@@ -21,7 +21,9 @@ from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.core.storage.kvstore import SimpleKVStore
 
 if TYPE_CHECKING:
+    from elasticsearch import Elasticsearch
     from langgraph.checkpoint.base import BaseCheckpointSaver
+    from redis import Redis
 
 _SCHEME_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*)://(.*)$")
 
@@ -47,6 +49,49 @@ def url_path(url: str) -> Path:
 def _unsupported(what: str, scheme: str, supported: str) -> NotImplementedError:
     return NotImplementedError(
         f"{what}: scheme {scheme!r} is not implemented yet (supported: {supported})"
+    )
+
+
+# ---- Elasticsearch and Redis ----------------------------------------------------------------
+
+
+def make_es_client(
+    url: str, *, request_timeout: float = 30.0, max_retries: int = 2
+) -> Elasticsearch:
+    """`http://` or `https://` -> Elasticsearch client. Does not connect until the first request.
+
+    `user:password@` in the URL becomes basic auth. Timeouts and retries are explicit; the
+    query path passes a shorter `request_timeout` than ingestion (design s16-2).
+    """
+    scheme, _ = split_url(url)
+    if scheme not in ("http", "https"):
+        raise _unsupported("Elasticsearch client", scheme, "http, https")
+    from elasticsearch import Elasticsearch
+
+    return Elasticsearch(
+        url,
+        request_timeout=request_timeout,
+        max_retries=max_retries,
+        retry_on_timeout=False,
+    )
+
+
+def make_redis_client(url: str, *, socket_timeout: float = 5.0) -> Redis:
+    """`redis://` or `rediss://` (TLS) -> Redis client with str responses.
+
+    Does not connect until the first command. `socket_timeout` bounds both connecting and each
+    command (redis-py waits forever by default).
+    """
+    scheme, _ = split_url(url)
+    if scheme not in ("redis", "rediss"):
+        raise _unsupported("Redis client", scheme, "redis, rediss")
+    from redis import Redis
+
+    return Redis.from_url(
+        url,
+        socket_timeout=socket_timeout,
+        socket_connect_timeout=socket_timeout,
+        decode_responses=True,
     )
 
 

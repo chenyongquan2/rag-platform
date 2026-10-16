@@ -63,13 +63,15 @@ class ServiceSettings(BaseSettings):
         case_sensitive=False,
     )
 
-    # Connection strings (design s16-7).
-    es_url: str = "http://localhost:9200"
-    redis_url: str = "redis://localhost:6379/0"
+    # Connection strings (design s16-7). ES, Redis and OTLP defaults are the host ports of
+    # docker-compose.yml (standard port + 20000). 127.0.0.1, not localhost: on Windows
+    # "localhost" tries ::1 first and each connection then waits about 2 s.
+    es_url: str = "http://127.0.0.1:29200"
+    redis_url: str = "redis://127.0.0.1:26379/0"
     docstore_url: str = "file://data/docstore"
     checkpoint_url: str = "sqlite://data/checkpoints/langgraph.db"
     lock_url: str = "file://data/locks"
-    otlp_endpoint: str = "http://localhost:4317"
+    otlp_endpoint: str = "http://127.0.0.1:24317"  # OTel Collector, OTLP gRPC
     kb_dir: str = "kb"
 
     # Model gateway (OpenAI-compatible). Empty means "not configured"; callers must check.

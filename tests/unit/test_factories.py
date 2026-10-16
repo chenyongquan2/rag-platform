@@ -12,7 +12,9 @@ from rag.factories import (
     LockTimeoutError,
     make_checkpointer,
     make_docstore,
+    make_es_client,
     make_lock_provider,
+    make_redis_client,
     url_path,
 )
 
@@ -137,3 +139,29 @@ def test_unsupported_schemes_raise() -> None:
         make_checkpointer("postgresql://user@localhost/rag")
     with pytest.raises(NotImplementedError, match="redis"):
         make_lock_provider("redis://localhost:6379/0")
+
+
+def test_es_and_redis_clients_by_scheme() -> None:
+    # Construction does not connect, so no service is needed.
+    from elasticsearch import Elasticsearch
+    from redis import Redis
+
+    es = make_es_client("http://127.0.0.1:29200", request_timeout=7.0, max_retries=1)
+    assert isinstance(es, Elasticsearch)
+    assert es.transport.node_pool.get().config.port == 29200
+    assert isinstance(make_es_client("https://es.example:9243"), Elasticsearch)
+
+    r = make_redis_client("redis://127.0.0.1:26379/2", socket_timeout=4.0)
+    assert isinstance(r, Redis)
+    kwargs = r.connection_pool.connection_kwargs
+    assert (kwargs["port"], kwargs["db"]) == (26379, 2)
+    # Explicit timeouts: redis-py waits forever by default.
+    assert kwargs["socket_timeout"] == 4.0
+    assert kwargs["socket_connect_timeout"] == 4.0
+    assert kwargs["decode_responses"] is True
+    assert isinstance(make_redis_client("rediss://cache.example:6380/0"), Redis)
+
+    with pytest.raises(NotImplementedError, match="opensearch"):
+        make_es_client("opensearch://localhost:9200")
+    with pytest.raises(NotImplementedError, match="memcached"):
+        make_redis_client("memcached://localhost:11211")

@@ -46,12 +46,14 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
 
 def test_service_settings_defaults(clean_env: pytest.MonkeyPatch) -> None:
     s = ServiceSettings(_env_file=None)
-    assert s.es_url == "http://localhost:9200"
-    assert s.redis_url == "redis://localhost:6379/0"
+    # Host ports of docker-compose.yml (standard port + 20000); 127.0.0.1 because "localhost"
+    # tries ::1 first and costs about 2 s per connection on Windows.
+    assert s.es_url == "http://127.0.0.1:29200"
+    assert s.redis_url == "redis://127.0.0.1:26379/0"
     assert s.docstore_url.startswith("file://")
     assert s.checkpoint_url.startswith("sqlite://")
     assert s.lock_url.startswith("file://")
-    assert s.otlp_endpoint == "http://localhost:4317"
+    assert s.otlp_endpoint == "http://127.0.0.1:24317"
     assert s.kb_dir == "kb"
     assert s.chat_model == "deepseek-v4-flash"
     assert s.embed_model == "qwen/text-embedding-v4"
