@@ -91,6 +91,41 @@ def test_service_settings_env_override_and_secret_masking(
     assert redacted["es_url"] == "http://es.example:9200"
 
 
+@pytest.mark.parametrize(
+    ("field", "url", "expected"),
+    [
+        ("ES_URL", "https://elastic:pw-es-123@es:9200", "https://elastic:***@es:9200"),
+        ("REDIS_URL", "redis://:pw-redis-123@cache:6379/0", "redis://:***@cache:6379/0"),
+        ("DOCSTORE_URL", "postgresql://rag:pw-pg-123@db/rag", "postgresql://rag:***@db/rag"),
+        ("OTLP_ENDPOINT", "https://tok-otlp-123@otel:4318", "https://***@otel:4318"),
+        (
+            "LLM_BASE_URL",
+            "https://gw.example/v1?api_key=pw-q-123&region=cn",
+            "https://gw.example/v1?api_key=***&region=cn",
+        ),
+    ],
+)
+def test_service_settings_masks_credentials_in_urls(
+    clean_env: pytest.MonkeyPatch, field: str, url: str, expected: str
+) -> None:
+    clean_env.setenv(field, url)
+    s = ServiceSettings(_env_file=None)
+
+    redacted = s.redacted()
+
+    assert redacted[field.lower()] == expected
+    assert "-123" not in str(redacted)
+    assert "-123" not in repr(s)
+    assert getattr(s, field.lower()) == url  # the real value is still usable
+
+
+def test_service_settings_budget_stop_not_above_budget(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("BUDGET_CNY", "30")
+    clean_env.setenv("BUDGET_STOP_CNY", "31")
+    with pytest.raises(ValidationError, match="budget_stop_cny"):
+        ServiceSettings(_env_file=None)
+
+
 def test_kb_config_minimal_yaml_uses_defaults(tmp_path: Path) -> None:
     path = tmp_path / "my_notes.yaml"
     path.write_text("source: {connector: local_dir, path: data/notes}\n", "utf-8")

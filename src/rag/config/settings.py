@@ -2,12 +2,51 @@
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from collections.abc import Iterator
+from typing import Any, Self
+from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _MASK = "***"
+_SECRET_QUERY_KEY = re.compile(r"pass|pwd|secret|token|key|auth|sig|credential", re.IGNORECASE)
+
+
+def mask_url(value: str) -> str:
+    """Replace credentials in a connection string with `***`.
+
+    Masks the password in `user:password@host`, the whole user part when there is no password
+    (it may be a token), and query values whose key looks secret (`api_key=`, `password=`, ...).
+    Values that are not URLs are returned unchanged.
+    """
+    if "://" not in value:
+        return value
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return _MASK
+    changed = False
+    netloc = parts.netloc
+    if "@" in netloc:
+        userinfo, host = netloc.rsplit("@", 1)
+        user, has_password, _ = userinfo.partition(":")
+        netloc = f"{user}:{_MASK}@{host}" if has_password else f"{_MASK}@{host}"
+        changed = True
+    query = parts.query
+    if query:
+        pairs = []
+        for pair in query.split("&"):
+            key, sep, _ = pair.partition("=")
+            if sep and _SECRET_QUERY_KEY.search(key):
+                pair = f"{key}={_MASK}"
+                changed = True
+            pairs.append(pair)
+        query = "&".join(pairs)
+    if not changed:
+        return value
+    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
 
 
 class ServiceSettings(BaseSettings):
@@ -50,10 +89,31 @@ class ServiceSettings(BaseSettings):
     budget_stop_cny: float = Field(default=28.0, ge=0)
     cost_ledger_path: str = "data/cost/ledger.jsonl"
 
+    @model_validator(mode="after")
+    def _stop_within_budget(self) -> Self:
+        if self.budget_stop_cny > self.budget_cny:
+            raise ValueError(
+                f"budget_stop_cny ({self.budget_stop_cny}) must not exceed "
+                f"budget_cny ({self.budget_cny})"
+            )
+        return self
+
     def redacted(self) -> dict[str, Any]:
-        """Effective settings for logging at startup, with every secret replaced by `***`."""
+        """Effective settings for logging at startup.
+
+        `SecretStr` fields become `***`; credentials inside connection strings are masked too.
+        """
         out: dict[str, Any] = {}
         for name in type(self).model_fields:
             value = getattr(self, name)
-            out[name] = _MASK if isinstance(value, SecretStr) else value
+            if isinstance(value, SecretStr):
+                out[name] = _MASK
+            elif isinstance(value, str):
+                out[name] = mask_url(value)
+            else:
+                out[name] = value
         return out
+
+    def __repr_args__(self) -> Iterator[tuple[str | None, Any]]:
+        # repr() and str() show the redacted values, never credentials from URLs.
+        yield from self.redacted().items()
