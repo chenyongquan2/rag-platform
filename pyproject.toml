@@ -1,0 +1,88 @@
+[project]
+name = "rag-platform"
+version = "0.1.0"
+description = "Multi-knowledge-base RAG platform: Elasticsearch hybrid retrieval, LlamaIndex ingestion, LangChain/LangGraph orchestration, MCP tools."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # Frameworks: installed together and upgraded one at a time (design s16-3).
+    "llama-index-core==0.14.25",
+    "langchain==1.4.5",
+    "langchain-openai>=1.1",
+    "langgraph==1.2.15",
+    "langgraph-checkpoint-sqlite>=3.0",
+    "mcp>=2.3,<2.4",
+    # Infrastructure clients.
+    "elasticsearch>=9,<10",
+    "redis>=5",
+    "filelock>=3.12",
+    # Config.
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "pyyaml>=6",
+    # Models and maths.
+    "sentence-transformers>=5",
+    "torch>=2.6",
+    "numpy>=2",
+    "scipy>=1.13",
+    # Document conversion (PDF etc.).
+    "docling>=2.50",
+    "torchvision>=0.21",
+    # Observability.
+    "opentelemetry-sdk>=1.30",
+    "opentelemetry-exporter-otlp>=1.30",
+    "openinference-instrumentation-llama-index>=4",
+    "openinference-instrumentation-langchain>=0.1.50",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.12",
+    "pre-commit>=4",
+]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "rag"
+
+[tool.uv]
+# Development happens on Windows; containers and CI run Linux. macOS is not a target.
+environments = ["sys_platform == 'win32'", "sys_platform == 'linux'"]
+
+# CPU-only torch: avoids pulling several GB of CUDA libraries on Linux.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "-m", "not integration and not llm"]
+markers = [
+    "unit: fast tests, no network, no Docker (default; added automatically to unmarked tests)",
+    "integration: needs the local Docker services (Elasticsearch, Redis)",
+    "llm: calls the real model gateway and costs money; never runs by default",
+]
+filterwarnings = [
+    "error::pytest.PytestUnknownMarkWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "N"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["rag"]
