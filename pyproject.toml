@@ -34,6 +34,8 @@ dependencies = [
     "opentelemetry-exporter-otlp>=1.30",
     "openinference-instrumentation-llama-index>=4",
     "openinference-instrumentation-langchain>=0.1.50",
+    # Data files (Hugging Face datasets are parquet).
+    "pyarrow>=18",
 ]
 
 [dependency-groups]
