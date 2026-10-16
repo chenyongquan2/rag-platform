@@ -5,6 +5,7 @@ The gateway is replaced by `httpx.MockTransport`; nothing here touches the netwo
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -12,11 +13,13 @@ from pathlib import Path
 import httpx
 import numpy as np
 import pytest
+from llama_index.core.ingestion import IngestionPipeline
+from llama_index.core.schema import TextNode
 from pydantic import ValidationError
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from rag.config import ModelPrice, ServiceSettings
-from rag.cost import BudgetExceeded, CostLedger
+from rag.cost import BudgetExceeded, CostLedger, UnknownModelPriceError
 from rag.embed import (
     CachedEmbedding,
     EmbeddingCache,
@@ -26,6 +29,7 @@ from rag.embed import (
     RedisEmbeddingCache,
     SqliteEmbeddingCache,
     cache_model_key,
+    make_embedding,
     make_embedding_cache,
     text_sha256,
 )
@@ -466,3 +470,116 @@ def test_make_embedding_cache_by_scheme(tmp_path: Path) -> None:
 
     with pytest.raises(NotImplementedError, match="postgres"):
         make_embedding_cache("postgres://db/x")
+
+
+# ---- factory --------------------------------------------------------------------------------
+
+
+def _settings(tmp_path: Path, **overrides: object) -> ServiceSettings:
+    values: dict[str, object] = {
+        "embed_base_url": "https://gw.example/v1",
+        "embed_api_key": "sk-test-secret",
+        "embed_backend": "gateway",
+        "embed_text_prefix": "",
+        "embed_batch_size": 10,
+        "cost_ledger_path": str(tmp_path / "cost" / "ledger.jsonl"),
+        "embed_ingest_cache_url": f"sqlite://{tmp_path.as_posix()}/cache/l0.sqlite3",
+        "embed_query_cache_url": "",
+        "redis_url": "redis://127.0.0.1:1/3",
+    }
+    values.update(overrides)
+    return ServiceSettings(_env_file=None, **values)  # type: ignore[arg-type]
+
+
+def test_factory_profiles_share_model_and_differ_in_timeouts(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, embed_text_prefix="p: ", embed_batch_size=7)
+    ingest = make_embedding("ingest", settings)
+    query = make_embedding("query", settings)
+
+    assert isinstance(ingest, CachedEmbedding) and isinstance(ingest.inner, GatewayEmbedding)
+    assert isinstance(query, CachedEmbedding) and isinstance(query.inner, GatewayEmbedding)
+    for name in ("model_name", "dim", "base_url", "text_prefix", "embed_batch_size"):
+        assert getattr(ingest.inner, name) == getattr(query.inner, name), name
+    assert ingest.inner.model_name == "qwen/text-embedding-v4"
+    assert ingest.inner.dim == 1024
+    assert ingest.inner.text_prefix == "p: "
+    assert ingest.embed_batch_size == ingest.inner.embed_batch_size == 7
+    assert (
+        ingest.cache_model
+        == query.cache_model
+        == cache_model_key("qwen/text-embedding-v4", 1024, "p: ")
+    )
+
+    assert (ingest.inner.profile, query.inner.profile) == ("ingest", "query")
+    assert ingest.inner.timeout_s == settings.embed_ingest_timeout_s
+    assert ingest.inner.max_retries == settings.embed_ingest_max_retries
+    assert query.inner.timeout_s == settings.embed_query_timeout_s < ingest.inner.timeout_s
+    assert query.inner.max_retries == settings.embed_query_max_retries <= 1
+
+    assert isinstance(ingest.cache, SqliteEmbeddingCache)
+    ingest.cache.close()
+    assert isinstance(query.cache, RedisEmbeddingCache)  # empty URL -> the cache Redis
+    kwargs = query.cache.client.connection_pool.connection_kwargs
+    assert (kwargs["port"], kwargs["db"]) == (1, 3)
+    assert query.cache.ttl_s == settings.embed_cache_ttl_s
+    memory = make_embedding("query", _settings(tmp_path, embed_query_cache_url="memory://"))
+    assert isinstance(memory, CachedEmbedding)
+    assert isinstance(memory.cache, InMemoryEmbeddingCache)
+
+    # The query profile makes at most two attempts.
+    gateway = FakeGateway(dim=1024, script=[httpx.Response(503)] * 3)
+    fast = make_embedding(
+        "query",
+        settings,
+        cache=InMemoryEmbeddingCache(),
+        transport=httpx.MockTransport(gateway),
+        sleep=lambda _s: None,
+    )
+    with pytest.raises(EmbeddingError, match="2 attempts"):
+        fast.get_query_embedding("question")
+    assert len(gateway.requests) == 2
+
+    # Missing gateway settings or a model without a price fail before any request.
+    with pytest.raises(ValueError, match="EMBED_BASE_URL"):
+        make_embedding(
+            "ingest", _settings(tmp_path, embed_base_url=""), cache=InMemoryEmbeddingCache()
+        )
+    with pytest.raises(UnknownModelPriceError):
+        make_embedding(
+            "ingest", _settings(tmp_path, embed_model="new-model"), cache=InMemoryEmbeddingCache()
+        )
+
+
+def test_fake_backend_fallback(tmp_path: Path) -> None:
+    gateway = FakeGateway()
+    settings = _settings(
+        tmp_path, embed_backend="fake", embed_dim=16, embed_batch_size=5, embed_base_url=""
+    )
+    for profile in ("ingest", "query"):
+        emb = make_embedding(profile, settings, transport=httpx.MockTransport(gateway))
+        assert isinstance(emb, FakeEmbedding)
+        assert emb.dim == 16
+        assert emb.embed_batch_size == 5
+        vector = emb.get_query_embedding("hello")
+        assert len(vector) == 16
+        assert vector == emb.get_text_embedding("hello")
+    assert gateway.requests == []
+    assert not (tmp_path / "cost" / "ledger.jsonl").exists()
+    assert not (tmp_path / "cache").exists()
+
+
+def test_works_in_ingestion_pipeline(tmp_path: Path) -> None:
+    gateway = FakeGateway(dim=1024)
+    settings = _settings(tmp_path, embed_batch_size=2, embed_ingest_cache_url="memory://")
+    emb = make_embedding("ingest", settings, transport=httpx.MockTransport(gateway))
+    pipeline = IngestionPipeline(transformations=[emb])
+
+    nodes = [TextNode(id_=f"n{i}", text=f"chunk {i}") for i in range(5)]
+    out = pipeline.run(nodes=nodes)
+    assert [n.embedding for n in out] == [_f32(gateway.vector(f"chunk {i}")) for i in range(5)]
+    assert [len(x) for x in gateway.inputs] == [2, 2, 1]
+
+    more = [TextNode(id_=f"m{i}", text=f"chunk {i + 3}") for i in range(4)]  # 2 cached, 2 new
+    out = asyncio.run(pipeline.arun(nodes=more))
+    assert [n.embedding for n in out] == [_f32(gateway.vector(f"chunk {i + 3}")) for i in range(4)]
+    assert sorted(t for batch in gateway.inputs[3:] for t in batch) == ["chunk 5", "chunk 6"]

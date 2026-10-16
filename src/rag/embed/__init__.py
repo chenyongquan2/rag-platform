@@ -11,6 +11,7 @@ from rag.embed.cache import (
     text_sha256,
 )
 from rag.embed.client import EmbeddingError, EmbedProfile, GatewayEmbedding
+from rag.embed.factory import make_embedding
 
 __all__ = [
     "CachedEmbedding",
@@ -22,6 +23,7 @@ __all__ = [
     "RedisEmbeddingCache",
     "SqliteEmbeddingCache",
     "cache_model_key",
+    "make_embedding",
     "make_embedding_cache",
     "text_sha256",
 ]
