@@ -197,7 +197,7 @@ class KbProcessor:
         return out
 
     def rule_stats(self) -> list[tuple[str, RuleStats]]:
-        """(rule name, stats) of every cleaning rule and every rule used as a chunk step."""
+        """(rule name, stats) of every cleaning rule; `chunk_rule_stats` has the chunk steps."""
         found: list[tuple[str, RuleStats]] = []
         for group in self._groups.values():
             for rule in group.rules:

@@ -3,8 +3,8 @@
 1. `markdown_split`: one node per heading section, with `title_path` and `parent_id`.
 2. `token_split`: LlamaIndex SentenceSplitter with the reranker's tokenizer, paragraphs split at a
    blank line, no overlap; fenced code blocks and Markdown tables are kept whole when they fit.
-3. `merge_tiny`: chunks below `min_tokens` are merged into the next chunk (the last one into the
-   previous), never across pages and never over the token cap.
+3. `merge_tiny`: chunks below `min_tokens` or with nothing but headings are merged into the next
+   chunk (the last one into the previous), never across pages and never over the token cap.
 4. `assign_chunk_ids`: ids `doc_id#<n>` numbered over the whole page, `chunk_index`, `parent_id`,
    and the final metadata whitelist. The splitters' own ids restart in every section (`id_func`
    gets the index within one section), so they are only temporary.
@@ -350,8 +350,9 @@ class TokenSplit(SentenceSplitter):
 
 @steps.register("merge_tiny")
 class MergeTiny(TransformComponent):
-    """Merge chunks shorter than `min_tokens` into the next chunk of the same page (the last
-    one into the previous), only when text + metadata stays within `max_tokens`.
+    """Merge chunks shorter than `min_tokens`, and chunks that are only headings, into the next
+    chunk of the same page (the last one into the previous), only when text + metadata stays
+    within `max_tokens`.
 
     Heading-only sections ("# Title" right before "## Part") are the usual case. The merged
     chunk keeps the next chunk's id and parent; its title path is the next chunk's when the tiny
