@@ -58,7 +58,9 @@ through the L0 cache (`data/cache/embeddings.sqlite3` for ingestion, the cache R
 uv run python -m rag.cost summary   # money spent so far, per kind and model
 ```
 
-Every real model call appends a line to `data/cost/ledger.jsonl`; requests stop with
-`BudgetExceeded` once spent + estimate would pass `BUDGET_STOP_CNY`. The ledger is committed and
-merged with `merge=union` (`.gitattributes`); when several checkouts call real models at the same
-time, set `COST_LEDGER_PATH` to one absolute path so each sees the others' spend.
+Every real model call appends a line to the cost ledger, by default
+`<parent of the main checkout>/rag-platform-data/cost/ledger.jsonl` (here
+`C:/workspace/rag-platform-data/cost/ledger.jsonl`): one git-ignored file shared by the main
+checkout and every worktree, so the budget stop sees all spend. Each request reserves its
+estimated cost first and stops with `BudgetExceeded` once spent + reserved + estimate would pass
+`BUDGET_STOP_CNY`. At most `EMBED_MAX_CONCURRENCY` requests per client are in flight.
