@@ -315,3 +315,69 @@ P0-05 的 `total_spent` 每次读整个账本文件，`reserve` 在一把全进�
 | `structured_output_failed` | 回答转不成要求的 Pydantic 对象 |
 
 不属于这四类的异常返回 None，免得把程序自己的 bug 当成网关故障。设计 16.8 里「写回答」这一行只说失败时只返回检索到的段，没给类别名。还考虑过只用一个 `llm_error`：调用方就看不出是网关慢了，还是预算用完了；预算用完要换假模型或者等主人加预算，处理办法不一样，所以分开。
+### 2026-10-17 P0-04：HF 文档集每篇丢了第一个字符，加清洗规则 hf_first_char 补回
+- 实查 `m-ric/huggingface_doc` 的 2,647 篇：1,224 篇以「 标题」开头，原文是「# 标题」；801 篇以「!--」开头，原文是「<!--」，后面是许可证注释；398 篇以「--」开头，原文是「---」，后面是 front matter；18 篇以「``python」开头。
+- 不补会出三个问题：一千多篇的一级标题变成普通文字，title_path 里没有文档标题；801 篇的许可证注释认不出是注释，每篇第一块多出几百字的 Apache 许可证，搜「license」会找到这些块；front matter 也认不出来。
+- 规则只补能确定原文的几种开头：上面四种，加上首行像缺了「<」的 HTML 标签、像缺了一个「*」的粗体。丢的是字母的（比如「hat is dynamic padding」，原文是 What）不知道丢了哪个字母，不改。对全部文档运行一次，补了 2,486 篇。
+- 这条规则只写在 `kb/public/hf_docs.yaml` 里，不放进通用的 `md_clean`。
+- 还考虑过：在连接器里修。连接器只负责交出原始数据；放在清洗规则里，它和别的规则一样有名字、能关掉、有统计，修了多少篇会出现在质量报告里。
+
+### 2026-10-17 P0-04：.mdx 和 .ipynb 都用 markdown 读取器
+- .mdx（468 篇）是 Markdown 加 JSX 组件，组件由 md_markup 删掉。
+- 数据集里的 .ipynb（264 篇）不是 JSON，已经是展开后的 Markdown 文字，代码单元在 ``` 里。`hf_docs.yaml` 给 .ipynb 指定 `reader: markdown`，doc_type 写 notebook，以后可以按类型过滤。读取器遇到真正的 JSON 笔记本（以 { 开头、有 cells 字段）会报错，不会把 JSON 当成正文。读 JSON 笔记本的读取器等以后有这种数据再写。
+- 按扩展名自动找读取器，只登记了 .md、.markdown、.mdx。别的扩展名必须在知识库配置里写 `reader`，没写就报错，错误信息里写明是哪个扩展名。
+- 三种扩展名在 YAML 里用 `&markdown` 和 `*markdown` 写成同一份配置，所以三者共用一个 pipeline_version，清洗时由同一组规则处理，dedupe 能找出不同扩展名之间的重复文件。
+
+### 2026-10-17 P0-04：Document 元数据的具体写法
+- title_path 存成字符串，各级标题用「 > 」连起来，比如「Guide > Install」。存成列表的话，LlamaIndex 拼进向量文字时写成「['Guide', 'Install']」，多出括号和引号。代价：标题里本身有「 > 」时，拆回列表会拆错，这种标题很少。ES 里的 title_path 本来就是 text 字段。
+- 标题路径里的标题去掉链接地址和图片：「Fix ([#5279](https://...))」写成「Fix (#5279)」。gradio 的更新日志里，一个标题带两三个网址，不去掉的话标题路径能占 100 多个 token，每块能放的正文就少了这么多。
+- unit：Markdown 一个文件就是一个单元，写 null。doc_type 按扩展名写 markdown、mdx、notebook。acl_groups 写 ["public"]，是读取器的参数，以后接公司文档时由配置给。
+- language 先写知识库配置的语言（配置是 auto 时写 und），再由 detect_language 按单元改写。
+- 元数据里 title_path 排在 source_rel 前面，进提示词的文字先出现标题路径。
+- 值为空的字段（比如第一个标题之前那段文字的 title_path）也不进向量和提示词文字，避免出现「title_path: 」这样的空行。
+- front matter 的顶层标量值存进 front_matter 字段；列表里是对象的（比如 authors）不存，日期转成字符串。
+- source_version、ingest_run_id、content_hash 不放进 Document，写 ES 时再加（设计 5.4）。
+
+### 2026-10-17 P0-04：pipeline_version 由整条处理配置算出来
+- 写法是 `v<代码版本>-<哈希前 10 位>`。哈希的输入：读取器名、清洗规则和参数、切块步骤和参数、元数据白名单、知识库语言、分词器模型名。任何一项改了，所有 Document 的哈希都会变，摄取管道就会把每页重新处理一遍（设计 5.4）。
+- 规则或步骤的代码改了、配置没改时，要手动把 `rag.ingest.build.INGEST_CODE_VERSION` 加 1。
+- 还考虑过：只用手写的版本号。改了切块参数却忘了改版本号，旧的块就会一直留着；配置改了版本号自动跟着变，不靠人记。
+
+### 2026-10-17 P0-04：重排模型的分词器用 tokenizers 库直接读，不用 transformers
+- 本机用 transformers 的 AutoTokenizer 加载 bge-reranker-base 的分词器要 68 秒；用 tokenizers 库直接读本地缓存里的 tokenizer.json 约 2 秒。两种方式对同一段中英混合文字切出的 token id 一样。
+- 文件路径用 huggingface_hub 的 `try_to_load_from_cache` 在本地缓存里找，不联网；找不到就报错，说明怎么下载。tokenizer.json 里开着截断（最多 512）时，长文字的 token 数会算少，所以加载后关掉截断和补齐。
+- pyproject.toml 新加两个直接依赖 tokenizers 和 huggingface-hub。它们本来就装着（sentence-transformers 依赖它们），uv.lock 里的版本没变。P0-05 也往依赖里加了 httpx，两个分支先后合并时 uv.lock 可能冲突，重新运行一次 `uv lock` 就能解决。
+
+### 2026-10-17 P0-04：句子切分用正则，不用 LlamaIndex 默认的 NLTK
+- SentenceSplitter 默认用 NLTK 的 punkt 切句子。本机第一次 import nltk 要 10 秒左右；LlamaIndex 用的又是没训练过的 `PunktSentenceTokenizer()`，效果和按标点切差不多，也不认中文句号。
+- 改成自己的正则：英文在 . ! ? 后面跟空白的地方断开，中文在 。！？ 后面断开，切出的各段拼起来和原文完全一样。这个函数通过 SentenceSplitter 的 `chunking_tokenizer_fn` 参数显式传进去。
+
+### 2026-10-17 P0-04：切块的具体做法
+- 按标题切：MarkdownNodeParser 的子类，改了三处。判断哪些行在代码块里，和清洗规则用同一个函数，认 ~~~ 包起来的和缩进的代码块（原版只认行首去掉空格后以 ``` 开头的行）。直接写出 title_path（原版的 header_path 用「/」连接，标题里有「/」就分不清，也不含本节自己的标题）。每节的 id 是 `doc_id#s<序号>`，序号在整页里往下数，原版每节都从 0 开始。
+- token 上限：SentenceSplitter 的子类。`max_tokens: 400` 指正文加元数据（title_path 和 source_rel）的 token 数，用重排模型的分词器量，给问题留出约 110 个 token。overlap 设为 0：相邻块的扩展按 doc_id 加 chunk_index 查（设计 7.4），重叠的文字会让 BM25 和去重都多算一次。段落按空行（两个换行）分开。
+- 代码块和表格：放得下就整块放进同一块，不从中间切开。一个代码块超过上限时按行切成几段，每段重新加上开头和结尾的 ```，每块仍然是完整的 Markdown。表格超过上限时在两行之间切开，后面的块不重复表头；按行分组并带上表头是 P2 表格步骤的事，质量报告记下了被切开的表格数。
+- 并入太短的块：少于 50 个 token 的块，以及只有标题的块，并入同一页的下一块；一页的最后一块并入前一块；合并后超过上限就不并。合并后的标题路径：前一块只有标题、而且是下一块的上级标题时，用下一块的路径；其他情况取两条路径相同的开头部分。
+- parent_id 写这块所在标题小节的 id。小节本身不写进 ES，按同一个 parent_id 取出所有块，就是这一小节的全文（设计 7.2 说的「大块」）。不按标题切的知识库，parent_id 就是 doc_id。
+- 最后一步给整页重新编号 `doc_id#0`、`doc_id#1`……，只保留指向原页面的关系，删掉 LlamaIndex 记的前后块关系，因为它们指向的是重新编号之前的 id。
+
+### 2026-10-17 P0-04：md_markup 删什么、留什么
+- 删：HTML 注释、HTML 和 MDX 标签（标签之间的文字留下）、MDX 的 import 行、doc-builder 加在标题后面、给页内链接用的 [[xxx]]、[[open-in-colab]] 行、空链接。script、style、iframe、video、audio、svg、literalinclude 这几种标签连里面的内容一起删。HTML 实体（&lt; 这类）等标签删完以后才解码，这样「&lt;b&gt;」解码出来的 <b> 不会再被当成标签删掉（设计 5.2 提到的前期问题）。
+- 留：用 ``` 或 ~~~ 包起来的代码块和行内代码完全不动；Markdown 表格只删单元格里的标签；Markdown 图片 ![](...) 留着，图片怎么处理以后再定；[[autodoc]] 行留着，它写的是这页讲哪些类，BM25 用得上。
+- 只删名字认识的标签：HTML 元素名、doc-builder 的标签名（frameworkcontent、hfoption、literalinclude 等）、首字母大写的 JSX 组件名。其他看起来像标签的文字不动，所以 a < 0、x<y、<model_id>、<your-username>、<https://...>、List<String> 都会留下。紧跟在字母或数字后面的大写名字不算组件（List<String>）。input、label 这类表单元素只有带属性时才算标签，文档里用 <input> 表示「这里填输入」时不删。
+- 课程测验组件 `<Question choices={[...]}>` 里每个选项的 text 和 explain 写成列表留下，其余属性删掉。
+- 对全部文档运行一次，这条规则删掉了输入的 9.1%，超过 5%，报告里在这条规则后面标了 WARN，提醒人看过再发布。删掉的主要是：801 篇的许可证注释；2,435 个 HTML 图片标签，约 33 万字符；timm 模型页注释里的 model-index 数据，一个注释最多 1.5 万字符，内容是各模型的精度表。抽查删掉的内容，没有发现正文被删。timm 的精度表在网页上本来不显示，删掉以后问不到这些数字；如果以后题集里有这类问题，再给这条规则加一个保留 model-index 注释的开关。
+
+### 2026-10-17 P0-04：疑似指令检测先只认少数句式
+- 现在认的句式，中英文各一份：要求忽略之前的指令或要求；「你现在是」「you are now a」；要求把密钥、密码、访问令牌、环境变量发出去；要求说出系统提示。
+- 设计 6.2 举的「把……发送到」在中文教程里很常见（「把模型上传到 Hub」），所以发送类句式要求发送的东西是密钥这一类。英文不认单独的 token：机器学习文档里 token 多半指文本切出的词元（「send a token to an expert」）。第一次对全部文档运行时，单独的 token 让 3 篇误报，改了以后只剩 1 篇：llama2 的博客在讲提示词注入时引用了「Ignore previous instructions」。
+- 清洗阶段对整篇标记，切块阶段（作为切块步骤再运行一次）对每块标记，块上的值覆盖从文档继承来的值，所以只有含这些句式的块是 true。完整的规则和安全题集是 P1-03 的事。
+
+### 2026-10-17 P0-04：语言检测不用模型，按文字种类和常用词判断
+- 先去掉代码块、行内代码、网址和链接地址，再按文字种类数「词」：拉丁字母、西里尔字母、韩文、天城文按词数；汉字每 1.5 个算 1 个词，假名每 2 个算 1 个词。数量最多的那种文字决定语言。拉丁字母再按常用虚词（the、de、der、le 等）分英、西、葡、德、法、意，分不出就算英文。文字太少（不到 3 个词）返回 und，规则这时用知识库配置的语言。
+- 不加新依赖，同一段文字每次结果一样。还考虑过：langdetect（要设随机种子才稳定，长文本慢）；fastText 的语言模型（要下载模型文件）。
+- 全部文档的结果：en 2,562、zh 46、hi 2、de 1、ko 1。transformers 的中文、日文、西班牙文、葡萄牙文 README 检测结果是 en，因为里面大半是英文的模型名和论文名，按词数确实英文多。
+
+### 2026-10-17 P0-04：重复和空内容怎么跳过
+- dedupe 比较清洗后正文的 sha256，内容完全相同的只留 doc_id 排序最前的一份，所以结果和读入顺序无关；留下的那份在 duplicate_sources 里记下其他出处。全部文档里有 19 篇重复，比如课程字幕的 -pt 和 -tf 两份、gradio 两份一样的 CHANGELOG。
+- skip_empty：去掉标题行以后，正文少于 20 个非空白字符（链接只算链接文字）算太短；只有标题的、只有链接列表的也跳过；有代码块的不算太短。全部文档里跳过 16 篇：只有标题 8 篇、只有目录 4 篇、太短 4 篇。「Generate a plot based on 5 inputs.」这种一句话的 demo 说明会留下。
+- 跳过的单元不传进摄取管道。P0-06 用 UPSERTS_AND_DELETE 时，这些单元以前写进去的块会被删除，这正是想要的结果。
