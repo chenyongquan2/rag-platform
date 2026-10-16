@@ -8,6 +8,7 @@ import pytest
 from llama_index.core import Document
 
 from rag.factories import (
+    InProcessLockProvider,
     LockTimeoutError,
     make_checkpointer,
     make_docstore,
@@ -99,6 +100,34 @@ def test_lock_providers(kind: str, tmp_path: Path) -> None:
     t.start()
     t.join()
     assert outcome == ["timeout", "acquired"]
+
+
+def test_in_process_lock_registry_does_not_grow() -> None:
+    provider = make_lock_provider("memory://")
+    assert isinstance(provider, InProcessLockProvider)
+
+    for i in range(100):
+        with provider.lock(f"session:{i}"):
+            assert len(provider) == 1
+    assert len(provider) == 0
+
+    # A waiter that times out is removed too.
+    outcome: list[str] = []
+
+    def contender() -> None:
+        try:
+            with provider.lock("session:busy", timeout=0.01):
+                outcome.append("acquired")
+        except LockTimeoutError:
+            outcome.append("timeout")
+
+    with provider.lock("session:busy"):
+        t = threading.Thread(target=contender)
+        t.start()
+        t.join()
+        assert len(provider) == 1
+    assert outcome == ["timeout"]
+    assert len(provider) == 0
 
 
 def test_unsupported_schemes_raise() -> None:

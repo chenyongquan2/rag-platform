@@ -13,7 +13,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
@@ -119,26 +119,48 @@ class LockProvider(Protocol):
 
 
 class InProcessLockProvider:
-    """Named `threading.Lock`s; correct only while one process serves everything."""
+    """Named `threading.Lock`s; correct only while one process serves everything.
+
+    A name's lock exists only while someone holds or waits for it, so the registry does not
+    grow with the number of distinct names (one per session id).
+    """
 
     def __init__(self) -> None:
         self._guard = threading.Lock()
-        self._locks: dict[str, threading.Lock] = {}
+        # name -> [lock, number of holders and waiters]
+        self._locks: dict[str, list[Any]] = {}
+
+    def __len__(self) -> int:
+        """Number of names currently held or waited for."""
+        with self._guard:
+            return len(self._locks)
 
     @contextmanager
     def lock(self, name: str, timeout: float | None = None) -> Iterator[None]:
         with self._guard:
-            lk = self._locks.setdefault(name, threading.Lock())
-        if not lk.acquire(timeout=-1 if timeout is None else timeout):
-            raise LockTimeoutError(f"lock {name!r} not acquired within {timeout}s")
+            entry = self._locks.setdefault(name, [threading.Lock(), 0])
+            entry[1] += 1
+        lk: threading.Lock = entry[0]
         try:
-            yield
+            if not lk.acquire(timeout=-1 if timeout is None else timeout):
+                raise LockTimeoutError(f"lock {name!r} not acquired within {timeout}s")
+            try:
+                yield
+            finally:
+                lk.release()
         finally:
-            lk.release()
+            with self._guard:
+                entry[1] -= 1
+                if entry[1] == 0:
+                    del self._locks[name]
 
 
 class FileLockProvider:
-    """One lock file per name in a directory; works across processes on one machine."""
+    """One lock file per name in a directory; works across processes on one machine.
+
+    Meant for a small, fixed set of names (the ingest lock of each knowledge base): Windows
+    removes the lock file on release, Linux leaves an empty file per name.
+    """
 
     def __init__(self, directory: Path) -> None:
         self.directory = directory
