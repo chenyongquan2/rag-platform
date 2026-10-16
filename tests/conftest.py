@@ -13,6 +13,8 @@ import pytest
 
 from rag.testing import use_safe_llama_settings
 
+pytest_plugins = ["pytester"]
+
 _NON_UNIT_MARKERS = {"integration", "llm"}
 
 
