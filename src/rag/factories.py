@@ -1,0 +1,172 @@
+"""Create external dependencies from connection strings (design s16-7).
+
+Business code receives only the interface; the scheme of the URL picks the implementation.
+For `file://` and `sqlite://`, everything after `scheme://` is a filesystem path, relative to
+the working directory unless absolute (`file://data/docstore/hf_docs.json`, `file://C:/x.json`).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import threading
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
+
+from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
+from llama_index.core.storage.docstore import SimpleDocumentStore
+from llama_index.core.storage.kvstore import SimpleKVStore
+
+if TYPE_CHECKING:
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+
+_SCHEME_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*)://(.*)$")
+
+
+def split_url(url: str) -> tuple[str, str]:
+    """Return `(scheme, rest)`; raise ValueError when the URL has no `scheme://`."""
+    match = _SCHEME_RE.match(url)
+    if not match:
+        raise ValueError(f"connection string needs a scheme like file:// or sqlite://: {url!r}")
+    return match.group(1).lower(), match.group(2)
+
+
+def url_path(url: str) -> Path:
+    """Filesystem path of a `file://` or `sqlite://` URL."""
+    _, rest = split_url(url)
+    if not rest:
+        raise ValueError(f"connection string has no path: {url!r}")
+    if re.match(r"^/[A-Za-z]:/", rest):  # file:///C:/x -> C:/x
+        rest = rest[1:]
+    return Path(rest)
+
+
+def _unsupported(what: str, scheme: str, supported: str) -> NotImplementedError:
+    return NotImplementedError(
+        f"{what}: scheme {scheme!r} is not implemented yet (supported: {supported})"
+    )
+
+
+# ---- docstore -------------------------------------------------------------------------------
+
+
+class JsonFileDocumentStore(SimpleDocumentStore):
+    """LlamaIndex SimpleDocumentStore bound to one JSON file; `persist()` writes back to it."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        kvstore = SimpleKVStore.from_persist_path(str(path)) if path.exists() else SimpleKVStore()
+        super().__init__(kvstore)
+
+    def persist(self, persist_path: str | None = None, fs=None) -> None:  # type: ignore[no-untyped-def, override]
+        super().persist(persist_path or str(self.path), fs=fs)
+
+
+def make_docstore(url: str, namespace: str) -> SimpleDocumentStore:
+    """Docstore for one knowledge base (`namespace`).
+
+    `file://<dir>` -> `<dir>/<namespace>.json`. Postgres comes later (design s16-7).
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", namespace):
+        raise ValueError(f"docstore namespace must be a plain name: {namespace!r}")
+    scheme, _ = split_url(url)
+    if scheme == "file":
+        return JsonFileDocumentStore(url_path(url) / f"{namespace}.json")
+    raise _unsupported("docstore", scheme, "file")
+
+
+# ---- LangGraph checkpointer -----------------------------------------------------------------
+
+
+def make_checkpointer(url: str) -> AbstractContextManager[BaseCheckpointSaver]:
+    """`sqlite://<path>` -> SqliteSaver, `memory://` -> InMemorySaver.
+
+    Returns a context manager that opens and closes the underlying connection.
+    """
+    scheme, _ = split_url(url)
+    if scheme == "sqlite":
+        return _sqlite_checkpointer(url_path(url))
+    if scheme == "memory":
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        return InMemorySaver()
+    raise _unsupported("checkpointer", scheme, "sqlite, memory")
+
+
+@contextmanager
+def _sqlite_checkpointer(path: Path) -> Iterator[BaseCheckpointSaver]:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with SqliteSaver.from_conn_string(str(path)) as saver:
+        yield saver
+
+
+# ---- locks (ingest lock, session lock) ------------------------------------------------------
+
+
+class LockTimeoutError(TimeoutError):
+    """The lock was not acquired within the timeout."""
+
+
+class LockProvider(Protocol):
+    def lock(self, name: str, timeout: float | None = None) -> AbstractContextManager[None]:
+        """Hold the lock called `name` inside the `with` block; `timeout=None` waits forever."""
+        ...
+
+
+class InProcessLockProvider:
+    """Named `threading.Lock`s; correct only while one process serves everything."""
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._locks: dict[str, threading.Lock] = {}
+
+    @contextmanager
+    def lock(self, name: str, timeout: float | None = None) -> Iterator[None]:
+        with self._guard:
+            lk = self._locks.setdefault(name, threading.Lock())
+        if not lk.acquire(timeout=-1 if timeout is None else timeout):
+            raise LockTimeoutError(f"lock {name!r} not acquired within {timeout}s")
+        try:
+            yield
+        finally:
+            lk.release()
+
+
+class FileLockProvider:
+    """One lock file per name in a directory; works across processes on one machine."""
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+
+    def _path(self, name: str) -> Path:
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:80]
+        digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:10]
+        return self.directory / f"{safe}.{digest}.lock"
+
+    @contextmanager
+    def lock(self, name: str, timeout: float | None = None) -> Iterator[None]:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        flock = FileLock(self._path(name))
+        try:
+            flock.acquire(timeout=-1 if timeout is None else timeout)
+        except FileLockTimeout as exc:
+            raise LockTimeoutError(f"lock {name!r} not acquired within {timeout}s") from exc
+        try:
+            yield
+        finally:
+            flock.release()
+
+
+def make_lock_provider(url: str) -> LockProvider:
+    """`file://<dir>` -> file locks, `memory://` -> in-process locks. Redis/Postgres later."""
+    scheme, _ = split_url(url)
+    if scheme == "file":
+        return FileLockProvider(url_path(url))
+    if scheme == "memory":
+        return InProcessLockProvider()
+    raise _unsupported("lock provider", scheme, "file, memory")

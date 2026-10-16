@@ -31,14 +31,18 @@ def test_url_path_keeps_relative_and_absolute_paths() -> None:
 
 
 def test_file_docstore_persists_and_reloads(tmp_path: Path) -> None:
-    url = _file_url(tmp_path / "docstore" / "hf_docs.json")
-    store = make_docstore(url)
+    url = _file_url(tmp_path / "docstore")
+    store = make_docstore(url, "hf_docs")
     store.add_documents([Document(text="hello", id_="hf_docs:a.md:0")])
     store.persist()
+    assert (tmp_path / "docstore" / "hf_docs.json").is_file()
 
-    reloaded = make_docstore(url)
+    reloaded = make_docstore(url, "hf_docs")
     assert reloaded.document_exists("hf_docs:a.md:0")
     assert reloaded.get_document("hf_docs:a.md:0").text == "hello"
+    assert not make_docstore(url, "other_kb").document_exists("hf_docs:a.md:0")
+    with pytest.raises(ValueError, match="namespace"):
+        make_docstore(url, "../escape")
 
 
 class _State(TypedDict):
@@ -99,7 +103,7 @@ def test_lock_providers(kind: str, tmp_path: Path) -> None:
 
 def test_unsupported_schemes_raise() -> None:
     with pytest.raises(NotImplementedError, match="postgresql"):
-        make_docstore("postgresql://user@localhost/rag")
+        make_docstore("postgresql://user@localhost/rag", "hf_docs")
     with pytest.raises(NotImplementedError, match="postgresql"):
         make_checkpointer("postgresql://user@localhost/rag")
     with pytest.raises(NotImplementedError, match="redis"):
