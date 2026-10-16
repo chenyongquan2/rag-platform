@@ -7,13 +7,25 @@ source:
   limit: 50            # null = all 2,647 documents; start small until the flow runs end to end
 language: en
 pipelines:
-  ".md":
-    clean: [md_clean]  # runs before the IngestionPipeline
+  ".md": &markdown
+    reader: markdown
+    clean:             # runs before the IngestionPipeline (spec P0-04); remove a line to turn a rule off
+      - hf_first_char  # the dataset export dropped the first character of most pages
+      - front_matter
+      - md_markup
+      - whitespace
+      - skip_empty: {min_chars: 20}
+      - dedupe
+      - detect_language
+      - suspicious_instruction
     steps:
       - markdown_split
-      - token_split: {max_tokens: 400}
-      - merge_tiny
+      - token_split: {max_tokens: 400}   # reranker tokens for text + title_path + source_rel
+      - merge_tiny: {min_tokens: 50}
+      - suspicious_instruction           # per-chunk flag
       - assign_chunk_ids
+  ".mdx": *markdown
+  ".ipynb": *markdown  # the dataset stores notebooks already flattened to Markdown text
 metadata:
   embed: [title_path]               # whitelist: only these keys go into the embedding text
   llm: [title_path, source_rel]     # whitelist: only these keys go into the prompt
