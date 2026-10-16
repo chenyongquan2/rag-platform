@@ -2,7 +2,7 @@
 
 Ingestion and query both call `make_embedding`; model, dimensions, text prefix and batch size
 come from the same settings, so passage vectors and question vectors always match. The two
-profiles differ only in timeout, retries and backoff (design s16-2) and in the L0 cache
+profiles differ only in timeout, retries, waits and deadline (design s16-2) and in the L0 cache
 backend: SQLite for ingestion, the cache Redis for queries (design s12-1).
 """
 
@@ -54,10 +54,14 @@ def make_embedding(
         timeout_s = settings.embed_ingest_timeout_s
         max_retries = settings.embed_ingest_max_retries
         backoff_s = settings.embed_ingest_backoff_s
+        backoff_max_s = settings.embed_ingest_backoff_max_s
+        deadline_s = settings.embed_ingest_deadline_s
     else:
         timeout_s = settings.embed_query_timeout_s
         max_retries = settings.embed_query_max_retries
         backoff_s = settings.embed_query_backoff_s
+        backoff_max_s = settings.embed_query_backoff_max_s
+        deadline_s = settings.embed_query_deadline_s
 
     client = GatewayEmbedding(
         model_name=settings.embed_model,
@@ -69,7 +73,8 @@ def make_embedding(
         timeout_s=timeout_s,
         max_retries=max_retries,
         backoff_s=backoff_s,
-        backoff_max_s=settings.embed_backoff_max_s,
+        backoff_max_s=backoff_max_s,
+        deadline_s=deadline_s,
         max_concurrency=settings.embed_max_concurrency,
         api_key=settings.embed_api_key.get_secret_value(),
         ledger=ledger or CostLedger.from_settings(settings),

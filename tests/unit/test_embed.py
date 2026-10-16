@@ -69,6 +69,8 @@ def test_embed_settings_defaults_and_limits(monkeypatch: pytest.MonkeyPatch) -> 
     assert s.embed_ingest_cache_url.startswith("sqlite://")
     assert s.embed_query_cache_url == ""  # empty = the cache Redis in redis_url
     assert s.embed_max_concurrency == 4
+    assert s.embed_query_backoff_max_s < s.embed_ingest_backoff_max_s
+    assert s.embed_query_deadline_s is not None and s.embed_ingest_deadline_s is None
 
     monkeypatch.setenv("EMBED_BACKEND", "fake")
     monkeypatch.setenv("EMBED_BATCH_SIZE", "5")
@@ -273,6 +275,85 @@ def test_client_retries_transient_errors(tmp_path: Path) -> None:
     # Exponential backoff from 1 s, capped at 8 s; Retry-After replaces the computed wait.
     assert sleeps == [1.0, 2.0, 3.0, 8.0]
     assert len(ledger.entries()) == 1  # only the successful call is billed
+
+
+class FakeClock:
+    """Monotonic clock for deadline tests; `sleep` advances it and records the wait."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _query_client(
+    tmp_path: Path, handler: object, clock: FakeClock, *, deadline_s: float = 4.0
+) -> GatewayEmbedding:
+    return GatewayEmbedding(
+        model_name="m",
+        dim=4,
+        base_url="https://gw.example/v1/",
+        api_key="sk-test-secret",
+        embed_batch_size=3,
+        profile="query",
+        timeout_s=3.0,
+        max_retries=1,
+        backoff_s=0.2,
+        backoff_max_s=1.0,
+        deadline_s=deadline_s,
+        ledger=_ledger(tmp_path),
+        transport=httpx.MockTransport(handler),  # type: ignore[arg-type]
+        sleep=clock.sleep,
+        clock=clock,
+    )
+
+
+def test_query_profile_waits_within_its_deadline(tmp_path: Path) -> None:
+    # A Retry-After longer than the profile ever waits: give up at once instead of sleeping.
+    clock = FakeClock()
+    gateway = FakeGateway(script=[httpx.Response(429, headers={"Retry-After": "30"})])
+    with pytest.raises(EmbeddingError, match="Retry-After 30 s") as info:
+        _query_client(tmp_path, gateway, clock).get_query_embedding("q")
+    assert (info.value.retryable, info.value.status_code) == (True, 429)
+    assert clock.sleeps == []
+    assert len(gateway.requests) == 1
+
+    # A short Retry-After is honoured.
+    clock = FakeClock()
+    gateway = FakeGateway(script=[httpx.Response(429, headers={"Retry-After": "0.5"})])
+    vector = _query_client(tmp_path, gateway, clock).get_query_embedding("q")
+    assert vector == gateway.vector("q")
+    assert clock.sleeps == [0.5]
+
+    # The retry only gets the time left before the deadline: 4 - 3 (timeout) - 0.2 (wait).
+    clock = FakeClock()
+    gateway = FakeGateway()
+    timeouts: list[float] = []
+
+    def slow_then_ok(request: httpx.Request) -> httpx.Response:
+        timeouts.append(request.extensions["timeout"]["read"])
+        if len(timeouts) == 1:
+            clock.now += 3.0
+            raise httpx.ReadTimeout("slow", request=request)
+        return gateway(request)
+
+    vector = _query_client(tmp_path, slow_then_ok, clock).get_query_embedding("q")
+    assert vector == gateway.vector("q")
+    assert timeouts == pytest.approx([3.0, 0.8])
+
+    # No time left for the wait: give up instead of sleeping.
+    clock = FakeClock()
+    timeouts.clear()
+    with pytest.raises(EmbeddingError, match="deadline"):
+        _query_client(tmp_path, slow_then_ok, clock, deadline_s=3.1).get_query_embedding("q")
+    assert clock.sleeps == []
+    assert len(timeouts) == 1
 
 
 def test_client_gives_up_after_max_retries(tmp_path: Path) -> None:
@@ -542,6 +623,12 @@ def test_factory_profiles_share_model_and_differ_in_timeouts(tmp_path: Path) -> 
     assert ingest.inner.max_retries == settings.embed_ingest_max_retries
     assert query.inner.timeout_s == settings.embed_query_timeout_s < ingest.inner.timeout_s
     assert query.inner.max_retries == settings.embed_query_max_retries <= 1
+    assert ingest.inner.backoff_max_s == settings.embed_ingest_backoff_max_s
+    assert query.inner.backoff_max_s == settings.embed_query_backoff_max_s
+    assert (ingest.inner.deadline_s, query.inner.deadline_s) == (
+        None,
+        settings.embed_query_deadline_s,
+    )
 
     assert isinstance(ingest.cache, SqliteEmbeddingCache)
     ingest.cache.close()

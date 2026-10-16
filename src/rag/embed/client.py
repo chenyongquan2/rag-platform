@@ -6,7 +6,9 @@ model, dimensions and text prefix; the profiles differ only in timeout and retri
 
 - At most `embed_batch_size` texts per request; vectors come back in input order.
 - Timeouts, connection errors, 408, 429 and 5xx are retried with exponential backoff
-  (`Retry-After` wins when the gateway sends it); other errors fail at once.
+  (`Retry-After` wins when the gateway sends it); other errors fail at once. A wait longer than
+  `backoff_max_s` ends the request instead of sleeping. With `deadline_s` (the query profile),
+  every attempt and wait must fit into that total time.
 - At most `max_concurrency` requests are in flight per client, also when
   `IngestionPipeline.arun` starts every batch at once.
 - Each request first reserves its estimated cost in the cost ledger (`BudgetExceeded` stops it
@@ -21,7 +23,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 import httpx
 from llama_index.core.base.embeddings.base import BaseEmbedding, Embedding
@@ -82,12 +84,14 @@ class GatewayEmbedding(BaseEmbedding):
     max_retries: int = Field(ge=0)
     backoff_s: float = Field(ge=0)
     backoff_max_s: float = Field(ge=0)
+    deadline_s: float | None = Field(default=None, gt=0)
     max_concurrency: int = Field(default=4, ge=1)
 
     _ledger: CostLedger = PrivateAttr()
     _slots: threading.BoundedSemaphore = PrivateAttr()
     _http: httpx.Client = PrivateAttr()
     _sleep: Callable[[float], None] = PrivateAttr()
+    _clock: Callable[[], float] = PrivateAttr()
 
     def __init__(
         self,
@@ -96,6 +100,7 @@ class GatewayEmbedding(BaseEmbedding):
         ledger: CostLedger,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
         **data: Any,
     ) -> None:
         super().__init__(**data)
@@ -106,6 +111,7 @@ class GatewayEmbedding(BaseEmbedding):
         ledger.price(self.model_name)  # no price -> fail now, before any money is spent
         self._ledger = ledger
         self._sleep = sleep
+        self._clock = clock
         self._slots = threading.BoundedSemaphore(self.max_concurrency)
         self._http = httpx.Client(
             base_url=self.base_url.rstrip("/") + "/",
@@ -169,11 +175,15 @@ class GatewayEmbedding(BaseEmbedding):
             "encoding_format": "float",
         }
         attempts = self.max_retries + 1
+        start = self._clock()
         for attempt in range(attempts):
             retry_after: float | None = None
             cause: Exception | None = None
+            timeout = self.timeout_s
+            if self.deadline_s is not None:
+                timeout = min(timeout, self.deadline_s - (self._clock() - start))
             try:
-                response = self._http.post("embeddings", json=body)
+                response = self._http.post("embeddings", json=body, timeout=timeout)
             except httpx.TransportError as exc:  # timeouts, refused or reset connections
                 error = EmbeddingError(
                     f"embedding request failed: {type(exc).__name__}: {exc}", retryable=True
@@ -191,12 +201,26 @@ class GatewayEmbedding(BaseEmbedding):
             if not error.retryable:
                 raise error from cause
             if attempt + 1 == attempts:
-                raise EmbeddingError(
-                    f"{error} (gave up after {attempts} attempts)",
-                    retryable=True,
-                    status_code=error.status_code,
-                ) from cause
-            delay = self._delay(attempt, retry_after)
+                self._give_up(error, f"gave up after {attempts} attempts", cause)
+            if retry_after is not None and retry_after > self.backoff_max_s:
+                self._give_up(
+                    error,
+                    f"Retry-After {retry_after:g} s is longer than the {self.profile} profile "
+                    f"waits ({self.backoff_max_s:g} s)",
+                    cause,
+                )
+            delay = (
+                retry_after
+                if retry_after is not None
+                else min(self.backoff_s * 2**attempt, self.backoff_max_s)
+            )
+            if self.deadline_s is not None and self._clock() - start + delay >= self.deadline_s:
+                self._give_up(
+                    error,
+                    f"no time left for a retry within the {self.profile} deadline of "
+                    f"{self.deadline_s:g} s",
+                    cause,
+                )
             logger.warning(
                 "embedding (%s): %s; retry %d of %d in %.1f s",
                 self.profile,
@@ -208,9 +232,11 @@ class GatewayEmbedding(BaseEmbedding):
             self._sleep(delay)
         raise AssertionError("unreachable")  # pragma: no cover
 
-    def _delay(self, attempt: int, retry_after: float | None) -> float:
-        wait = retry_after if retry_after is not None else self.backoff_s * 2**attempt
-        return min(wait, self.backoff_max_s)
+    @staticmethod
+    def _give_up(error: EmbeddingError, reason: str, cause: Exception | None) -> NoReturn:
+        raise EmbeddingError(
+            f"{error} ({reason})", retryable=True, status_code=error.status_code
+        ) from cause
 
     def _parse(
         self, response: httpx.Response, inputs: list[str], estimated_tokens: int

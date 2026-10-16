@@ -116,10 +116,15 @@ class ServiceSettings(BaseSettings):
     embed_ingest_timeout_s: float = Field(default=60.0, gt=0)
     embed_ingest_max_retries: int = Field(default=4, ge=0)
     embed_ingest_backoff_s: float = Field(default=2.0, ge=0)
+    embed_ingest_backoff_max_s: float = Field(default=60.0, ge=0)
+    embed_ingest_deadline_s: float | None = Field(default=None, gt=0)  # None: no total limit
     embed_query_timeout_s: float = Field(default=3.0, gt=0)
     embed_query_max_retries: int = Field(default=1, ge=0, le=1)
     embed_query_backoff_s: float = Field(default=0.2, ge=0)
-    embed_backoff_max_s: float = Field(default=30.0, ge=0)
+    embed_query_backoff_max_s: float = Field(default=1.0, ge=0)
+    embed_query_deadline_s: float | None = Field(default=7.0, gt=0)
+    # A wait (backoff or the gateway's Retry-After) longer than the profile's backoff_max ends
+    # the request instead; with a deadline, each attempt gets at most the time that is left.
     # Requests in flight per client: IngestionPipeline.arun starts every batch at once.
     embed_max_concurrency: int = Field(default=4, ge=1)
     # L0 embedding cache (design s12-1): `sqlite://<path>` or `memory://` for ingest;
