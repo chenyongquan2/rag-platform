@@ -1,0 +1,29 @@
+# Hugging Face documentation (Markdown, English). Design s5-1.
+kb: hf_docs
+source:
+  connector: hf_dataset
+  dataset: m-ric/huggingface_doc
+  limit: 50            # null = all 2,647 documents; start small until the flow runs end to end
+language: en
+pipelines:
+  ".md":
+    clean: [md_clean]  # runs before the IngestionPipeline
+    steps:
+      - markdown_split
+      - token_split: {max_tokens: 400}
+      - merge_tiny
+      - assign_chunk_ids
+metadata:
+  embed: [title_path]               # whitelist: only these keys go into the embedding text
+  llm: [title_path, source_rel]     # whitelist: only these keys go into the prompt
+es:
+  analyzer: standard
+retrieval:
+  top_k_per_route: 20
+  rerank_n: 30
+  final_k: 8
+  threshold: 0.3
+eval:
+  dir: evals/datasets/hf_docs
+access:
+  callers: ["*"]
