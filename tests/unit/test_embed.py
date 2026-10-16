@@ -274,7 +274,13 @@ def test_client_retries_transient_errors(tmp_path: Path) -> None:
     assert len(gateway.requests) == 5
     # Exponential backoff from 1 s, capped at 8 s; Retry-After replaces the computed wait.
     assert sleeps == [1.0, 2.0, 3.0, 8.0]
-    assert len(ledger.entries()) == 1  # only the successful call is billed
+    # The read timeout came after the request was sent, so the gateway may have billed it:
+    # an estimated line. The refused connection, 429 and 503 are not billed.
+    rows = ledger.entries()
+    assert [(r["usage_estimated"], r.get("error")) for r in rows] == [
+        (True, "ReadTimeout"),
+        (False, None),
+    ]
 
 
 class FakeClock:
@@ -403,6 +409,20 @@ def test_client_fails_fast_on_non_retryable_errors(
     rows = ledger.entries()
     assert len(rows) == (1 if status == 200 else 0)
     assert all(r["usage_estimated"] is True for r in rows)
+
+
+def test_client_redacts_keys_in_errors(tmp_path: Path) -> None:
+    body = (
+        "invalid key sk-live-abcdef123456 in header Authorization: Bearer sk-live-abcdef123456; "
+        "configured key sk-test-secret"
+    )
+    gateway = FakeGateway(script=[httpx.Response(401, text=body)])
+    with pytest.raises(EmbeddingError, match="401") as info:
+        _client(tmp_path, gateway).get_text_embedding("hello")
+    message = str(info.value)
+    assert "abcdef123456" not in message
+    assert "sk-test-secret" not in message
+    assert "Bearer ***" in message and "sk-***" in message
 
 
 def test_client_refuses_call_over_budget(tmp_path: Path) -> None:

@@ -13,13 +13,16 @@ model, dimensions and text prefix; the profiles differ only in timeout and retri
   `IngestionPipeline.arun` starts every batch at once.
 - Each request first reserves its estimated cost in the cost ledger (`BudgetExceeded` stops it
   before it is sent); every 2xx answer appends one ledger line with the tokens from `usage`
-  (estimated from the number of characters when the answer has no usage).
+  (estimated from the number of characters when the answer has no usage), and so does a read
+  timeout or a dropped connection after the request was sent (estimated).
+- API keys echoed in a gateway error text are masked before the text goes into an exception.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -36,6 +39,8 @@ logger = logging.getLogger(__name__)
 EmbedProfile = Literal["ingest", "query"]
 
 _RETRYABLE_STATUS = frozenset({408, 429})
+# Raised after the request went out: the gateway may have done (and billed) the work.
+_FAILED_AFTER_SEND = (httpx.ReadTimeout, httpx.ReadError)
 _SNIPPET_CHARS = 300
 
 
@@ -66,8 +71,20 @@ def _retry_after_s(response: httpx.Response) -> float | None:
         return None
 
 
-def _snippet(response: httpx.Response) -> str:
-    text = response.text.strip().replace("\n", " ")
+_BEARER_RE = re.compile(r"(?i)\b(bearer)\s+[^\s\"',;]+")
+_SK_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_\-]{4,}")
+
+
+def _redact(text: str, secret: str = "") -> str:
+    """Mask API keys that a gateway or proxy echoes back in an error text."""
+    if secret:
+        text = text.replace(secret, "***")
+    text = _BEARER_RE.sub(lambda m: f"{m.group(1)} ***", text)
+    return _SK_KEY_RE.sub("sk-***", text)
+
+
+def _snippet(response: httpx.Response, secret: str = "") -> str:
+    text = _redact(response.text.strip().replace("\n", " "), secret)
     return text[:_SNIPPET_CHARS] + ("..." if len(text) > _SNIPPET_CHARS else "")
 
 
@@ -92,6 +109,7 @@ class GatewayEmbedding(BaseEmbedding):
     _http: httpx.Client = PrivateAttr()
     _sleep: Callable[[float], None] = PrivateAttr()
     _clock: Callable[[], float] = PrivateAttr()
+    _secret: str = PrivateAttr()
 
     def __init__(
         self,
@@ -112,6 +130,7 @@ class GatewayEmbedding(BaseEmbedding):
         self._ledger = ledger
         self._sleep = sleep
         self._clock = clock
+        self._secret = api_key  # only to mask it in error texts
         self._slots = threading.BoundedSemaphore(self.max_concurrency)
         self._http = httpx.Client(
             base_url=self.base_url.rstrip("/") + "/",
@@ -185,15 +204,22 @@ class GatewayEmbedding(BaseEmbedding):
             try:
                 response = self._http.post("embeddings", json=body, timeout=timeout)
             except httpx.TransportError as exc:  # timeouts, refused or reset connections
+                if isinstance(exc, _FAILED_AFTER_SEND):
+                    self._record(
+                        len(inputs), estimated_tokens, estimated=True, error=type(exc).__name__
+                    )
                 error = EmbeddingError(
-                    f"embedding request failed: {type(exc).__name__}: {exc}", retryable=True
+                    f"embedding request failed: {type(exc).__name__}: "
+                    f"{_redact(str(exc), self._secret)}",
+                    retryable=True,
                 )
                 cause = exc
             else:
                 if response.is_success:
                     return self._parse(response, inputs, estimated_tokens)
                 error = EmbeddingError(
-                    f"embedding gateway answered HTTP {response.status_code}: {_snippet(response)}",
+                    f"embedding gateway answered HTTP {response.status_code}: "
+                    f"{_snippet(response, self._secret)}",
                     retryable=_is_retryable_status(response.status_code),
                     status_code=response.status_code,
                 )
@@ -247,7 +273,7 @@ class GatewayEmbedding(BaseEmbedding):
         except ValueError:
             self._record(len(inputs), estimated_tokens, estimated=True)
             raise EmbeddingError(
-                f"embedding gateway answer is not JSON: {_snippet(response)}",
+                f"embedding gateway answer is not JSON: {_snippet(response, self._secret)}",
                 retryable=False,
                 status_code=status,
             ) from None
@@ -284,7 +310,7 @@ class GatewayEmbedding(BaseEmbedding):
                 )
         return vectors
 
-    def _record(self, inputs: int, tokens: int, *, estimated: bool) -> None:
+    def _record(self, inputs: int, tokens: int, *, estimated: bool, **extra: Any) -> None:
         self._ledger.record(
             kind="embedding",
             model=self.model_name,
@@ -292,4 +318,5 @@ class GatewayEmbedding(BaseEmbedding):
             profile=self.profile,
             inputs=inputs,
             usage_estimated=estimated,
+            **extra,
         )
