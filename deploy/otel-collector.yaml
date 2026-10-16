@@ -1,0 +1,44 @@
+# OpenTelemetry Collector (contrib) for local development. Design s15-1.
+# The app sends traces over OTLP; this file decides where they go. To add or change a backend
+# (Langfuse, a company platform), edit only this file.
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+  batch:
+    timeout: 1s
+    send_batch_size: 512
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  file/traces:
+    path: /data/otel/traces.jsonl
+    format: json
+    rotation:
+      max_megabytes: 50
+      max_days: 7
+      max_backups: 5
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/jaeger, file/traces]

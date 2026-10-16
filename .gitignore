@@ -15,3 +15,4 @@ evals/reports/private/
 data/docstore/
 data/checkpoints/
 data/locks/
+data/otel/
