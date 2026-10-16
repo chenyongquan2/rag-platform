@@ -169,6 +169,20 @@ def test_alias_switch_conflict_changes_nothing(es: Elasticsearch, make_names: Na
     assert switch_alias(es, names, v3, expected_current=v2) == v2
     assert aliased_indices(es, names) == [v3]
 
+    # A stale caller expects the alias already on its target: the request must still check
+    # where the alias is, or it would add v2 next to v3.
+    with pytest.raises(AliasConflictError, match=v2):
+        switch_alias(es, names, v2, expected_current=v2)
+    assert aliased_indices(es, names) == [v3]
+    # The expected index does not exist (deleted meanwhile): also a conflict, nothing changes.
+    with pytest.raises(AliasConflictError, match="does not exist"):
+        switch_alias(es, names, v1, expected_current=names.index(7))
+    assert aliased_indices(es, names) == [v3]
+    # Switching to where the alias already is stays a no-op, with or without expected_current.
+    assert switch_alias(es, names, v3, expected_current=v3) == v3
+    assert switch_alias(es, names, v3) == v3
+    assert aliased_indices(es, names) == [v3]
+
     with pytest.raises(ValueError, match="does not exist"):
         switch_alias(es, names, names.index(9))
     with pytest.raises(ValueError, match="not a versioned index"):

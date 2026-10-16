@@ -42,10 +42,14 @@ class _Unset:
 _READ_NOW: Final = _Unset()
 
 
-def _error_type(exc: BadRequestError | NotFoundError) -> str:
+def _error(exc: BadRequestError | NotFoundError) -> dict[str, Any]:
     body = exc.body if isinstance(exc.body, dict) else {}
     error = body.get("error")
-    return error.get("type", "") if isinstance(error, dict) else ""
+    return error if isinstance(error, dict) else {}
+
+
+def _error_type(exc: BadRequestError | NotFoundError) -> str:
+    return str(_error(exc).get("type", ""))
 
 
 def create_kb_index(
@@ -93,11 +97,14 @@ def switch_alias(
 ) -> str | None:
     """Point the alias at `new_index` in one atomic request; return the index it pointed to.
 
-    Without `expected_current` the current target is read first. With it, the request removes
-    the alias from `expected_current` with `must_exist`, so if the alias has moved in the
-    meantime Elasticsearch rejects the whole request and AliasConflictError is raised.
-    `expected_current=None` means "no alias yet"; that case is checked by a read only.
-    The caller adds 1 to the data generation after a switch (design s7-5).
+    Without `expected_current` the current target is read first. Either way the request removes
+    the alias from every expected index with `must_exist` - also when that index is `new_index`
+    itself - so if the alias has moved in the meantime Elasticsearch rejects the whole request
+    and AliasConflictError is raised instead of leaving the alias on two indices.
+    `expected_current=None` means "no alias yet"; the request cannot check that, so it is
+    checked by a read only and two first switches at once are left to the ingest lock.
+    Raises IndexStateError when `new_index` is deleted between the existence check and the
+    request. The caller adds 1 to the data generation after a switch (design s7-5).
     """
     if names.version_of(new_index) is None:
         raise ValueError(f"{new_index!r} is not a versioned index of knowledge base {names.kb!r}")
@@ -113,18 +120,28 @@ def switch_alias(
     else:
         expected = [expected_current]
     actions: list[dict[str, Any]] = [
-        {"remove": {"index": old, "alias": names.alias, "must_exist": True}}
-        for old in expected
-        if old != new_index
+        {"remove": {"index": old, "alias": names.alias, "must_exist": True}} for old in expected
     ]
     actions.append({"add": {"index": new_index, "alias": names.alias}})
     try:
         es.indices.update_aliases(actions=actions)
     except NotFoundError as exc:
-        raise AliasConflictError(
-            f"{names.alias} no longer points to {expected}; nothing was changed "
-            f"({_error_type(exc) or exc})"
-        ) from exc
+        error = _error(exc)
+        missing = error.get("index")
+        if error.get("type") == "index_not_found_exception" and missing == new_index:
+            raise IndexStateError(
+                f"index {new_index} was deleted during the switch; nothing was changed"
+            ) from exc
+        if error.get("type") == "index_not_found_exception" and missing in expected:
+            raise AliasConflictError(
+                f"expected {names.alias} on {missing}, but {missing} does not exist; "
+                "nothing was changed"
+            ) from exc
+        if error.get("type") == "aliases_not_found_exception":
+            raise AliasConflictError(
+                f"{names.alias} no longer points to {', '.join(expected)}; nothing was changed"
+            ) from exc
+        raise
     return expected[0] if expected else None
 
 
