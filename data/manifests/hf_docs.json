@@ -1,0 +1,49 @@
+{
+  "kb": "hf_docs",
+  "corpus": {
+    "repo_id": "m-ric/huggingface_doc",
+    "revision": "ec31afec9dd94905638a65f55329ae34832a93fe",
+    "ref": "refs/convert/parquet",
+    "source_url": "https://huggingface.co/datasets/m-ric/huggingface_doc",
+    "license": "MIT",
+    "columns": {
+      "text": "text",
+      "path": "source"
+    },
+    "doc_url_prefix": "https://github.com/",
+    "rows": 2647,
+    "note": "Hub auto-converted parquet of huggingface_doc.csv (main @ 1b83935099b148190b6a9a9874b7e62a17fea889). The source column is the GitHub path of each page.",
+    "files": [
+      {
+        "path": "default/train/0000.parquet",
+        "size": 10058873,
+        "sha256": "c64e122082c85970d3e89841fc03226091eae1dc0542af1a5784ea742d158b32",
+        "rows": 2647
+      }
+    ]
+  },
+  "eval": {
+    "repo_id": "m-ric/huggingface_doc_qa_eval",
+    "revision": "5f70aa9a1e2430f528ac3f27f01f0ba8719c0704",
+    "ref": "main",
+    "source_url": "https://huggingface.co/datasets/m-ric/huggingface_doc_qa_eval",
+    "license": "Apache-2.0",
+    "columns": {
+      "question": "question",
+      "answer": "answer",
+      "source_doc": "source_doc",
+      "context": "context"
+    },
+    "doc_url_prefix": null,
+    "rows": 65,
+    "note": "65 questions with reference answer and source document, filtered by three 1-5 critique scores.",
+    "files": [
+      {
+        "path": "data/train-00000-of-00001.parquet",
+        "size": 289016,
+        "sha256": "55f07c5da32ee11dcd9051748637bd28900e311bfec63bae947f8ba6d0fdbda9",
+        "rows": 65
+      }
+    ]
+  }
+}
