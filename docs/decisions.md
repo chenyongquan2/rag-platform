@@ -206,3 +206,82 @@ Redis 连不上或读写报错时，程序记一条警告，当作没命中，�
 
 ### 2026-10-17 P0-05：网关不可用或预算用完时，手动改配置用假向量，程序不自动切换
 设 `EMBED_BACKEND=fake` 以后，摄取和查询都用 `FakeEmbedding`（维度等于 `embed_dim`）：不发请求，不写账本，也不读写 L0 缓存。没做「网关出错就自动换成假向量」：假向量和真向量之间算相似度没有意义，自动切换以后，同一个索引里会混进两种向量，查出来的结果是错的，程序却不报错。用假向量建的索引只能用假向量查，P0-06 建索引时要记下用的是哪种向量。
+
+### 2026-10-17 P1-01：对话模型的花费在 httpx 传输层记进账本，不用 LangChain 回调
+`make_chat_model` 用 `init_chat_model` 建 `ChatOpenAI`，同时传进去两个自己建的 httpx 客户端（同步、异步各一个），客户端的传输层是 `LedgerTransport` 和 `AsyncLedgerTransport`。传输层是 httpx 客户端里真正把请求发到网络上的那个对象，客户端每发一次请求都调用它一次。openai SDK 每发一次 HTTP 请求都经过这一层，包括 SDK 自己的重试：
+
+- 发出之前，按请求估算金额，用 P0-05 的 `CostLedger.reserve` 预留。已花的、正在进行的请求预留的、这次估算的三项加起来超过 `budget_stop_cny`（28 元），就抛 `BudgetExceeded`，请求不发出去。估算是上限：请求体的字符数当输入 token 数，请求里的 `max_completion_tokens` 当输出 token 数。所以 `max_tokens` 越大，每次预留越多：online 配置的 4096 个 token 按估计价约 0.033 元。
+- 网关返回 2xx 以后，从响应的 usage 读 token 数，账本加一行；流式请求读最后一个事件里的 usage。读超时、连接中途断开、流式回答没读完就被关掉（用户关了页面），网关可能已经生成并扣了费，按估算记一行，带 `error` 字段。连不上、4xx 和 5xx 不记，和 P0-05 一样。
+- 每行除了 P0-05 的字段，还有 `profile`、`reasoning_tokens`、`stream`、`served_model`（网关实际用的模型，现在是 deepseek-v4.1-flash）、`price_estimated`。
+- 网关的错误回答里如果原样带出了 API key，传输层先把它换成 `***`，再交给 SDK 拼进异常信息。
+
+按五条标准比了三种做法：
+
+| 做法 | SDK 自己重试的每一次都预留、都在账本里写一行 | invoke、stream、结构化输出、同步异步都覆盖 | 能读到推理 token | 代码量 | 换成非 OpenAI 格式的接口 |
+|---|---|---|---|---|---|
+| LangChain 回调：开始时预留，结束时在账本里写一行 | 不能 | 能，但回调里抛的异常默认只写日志、请求照发，要设 `raise_error=True` | 能 | 约 100 行 | 能用 |
+| 继承 `ChatOpenAI`，改写 `_generate`、`_stream` 等四个方法 | 不能 | 能 | 能 | 约 150 行 | 不能用，也不能再用 `init_chat_model` |
+| httpx 传输层（选这个） | 能 | 能，不依赖 LangChain 内部怎么调 | 能，直接读网关返回的 usage | 约 300 行，要自己解析流式回答的 SSE 事件 | 要改这一层 |
+
+- SSE（Server-Sent Events，服务器推送事件）：服务器在一个 HTTP 连接里一段一段地往客户端发数据，每段是一行 `data: {...}`；OpenAI 格式的流式回答就是这样发的，最后一段带 usage。
+- 回调和继承这两种做法看不到 SDK 内部的重试：第一次请求读超时、SDK 重发，回调只收到最后一次的结果。第一次如果已经被网关计费，账本里就少一笔。P0-05 定过「读超时也记一行」，只有传输层能做到。
+- 代价：这一层依赖 OpenAI 的响应格式（usage 字段、SSE 的 `data:` 行）。换成别的格式的接口时，要改这一层，或者改用回调。
+- 外层客户端换了传输层以后，httpx 不再读环境变量里的代理设置。这台机器设了 `HTTPS_PROXY`，所以传输层里面再用一个普通的 `httpx.Client` 发请求，代理和 `NO_PROXY` 照样生效，和向量客户端一致。每次请求的超时仍是 SDK 设的值。
+- 网关压缩过的回答，传输层先解压再交给 SDK，否则读不到 usage。
+
+### 2026-10-17 P1-01：结构化输出默认 function_calling，实测网关不支持 json_schema
+实测方法：cheap 配置，同一个问题（「7 是质数」这句话对不对），Pydantic 类 `Verdict` 有 `is_true` 和 `reason` 两个字段，两种方式各调一次。
+
+| 方式 | 结果 | 耗时 |
+|---|---|---|
+| `function_calling` | 返回正确的 `Verdict` | 1.5 秒 |
+| `json_schema` | 网关返回 HTTP 400：`This response_format type is unavailable now`；账本里没有写这一次 | 0.3 秒 |
+
+所以 `chat_structured_output_method` 默认 `function_calling`，和设计 11.1 一致。`ChatOpenAI` 用 `function_calling` 时，请求里只放这一个工具，并用 `tool_choice` 指定模型必须调用它；deepseek-v4.1-flash 是推理模型，实测也接受指定的 `tool_choice`。这次调用输入 325 个 token（工具的 JSON Schema 占了大部分），输出 76 个，其中推理 11 个。配置里还允许 `json_schema` 和 `json_mode`，换成支持它们的网关或模型时可以改；`json_mode` 这次没有测。
+
+`structured_output(model, schema)` 包了一层：模型没有调用工具时，LangChain 返回 None；参数不符合 Pydantic 类时，LangChain 把错误放在结果里。这两种情况都改成抛 `StructuredOutputError`（类别 `structured_output_failed`）。不让 None 往下传：路由节点拿到 None，不知道该走哪条路，错误会在后面的节点才暴露。`FakeChatModel` 只模拟 `function_calling`。
+
+### 2026-10-17 P1-01：三套配置的超时、重试和输出上限；推理 token 的实测
+| 配置 | 用在哪 | 单次超时 | 最多重试 | `max_tokens` | 最多按 Retry-After 等多久 | 网关一直不回应时最坏等多久 |
+|---|---|---|---|---|---|---|
+| `online` | 写回答 | 30 秒 | 1 次 | 4096 | 2 秒 | 约 61 秒 |
+| `cheap` | 改写、路由、判断够不够 | 20 秒 | 1 次 | 2048 | 2 秒 | 约 41 秒 |
+| `offline` | 出题、裁判 | 180 秒 | 4 次 | 8192 | 60 秒 | 约 15 分钟 |
+
+三套配置默认都用 `chat_model`（deepseek-v4-flash），`temperature` 都是 0。每套是环境变量里的一个 JSON，只写要改的键，其余用这套配置的默认值，例如 `CHAT_ONLINE='{"timeout_s": 10}'`。
+
+2026-10-17 实测四次调用（`tests/llm/test_chat_gateway.py`，每次输出上限 1024 个 token）：
+
+- online 配置问「法国首都是哪」，要求只答一个词：1.5 秒返回 Paris。输入 42 个 token，输出 19 个，其中推理 17 个。
+- 流式让模型从 1 数到 10：收到 15 个分块，4 个带正文，其余是推理内容、结束标记和 usage。第一个带正文的分块 0.8 秒到，全部收完 0.84 秒。账本里这一行的 usage 来自最后一个事件，不是估算。以后问答页面用 SSE 边生成边显示时，可以直接用 `.stream()`。
+- 推理 token 已经算在 `completion_tokens` 里：`total_tokens` 等于输入加 `completion_tokens`，网关另在 `completion_tokens_details.reasoning_tokens` 里给出推理 token 数，LangChain 放进 `usage_metadata.output_token_details.reasoning`。账本按 `completion_tokens` 算钱，另记 `reasoning_tokens`。如果别的网关的 `total_tokens` 显示推理 token 没算进 `completion_tokens`，程序把它加上再算钱。网关返回的推理文字（`reasoning_content`）`ChatOpenAI` 不保留，我们只需要 token 数，不需要推理文字。
+- cheap 配置把 `max_tokens` 改成 16，让模型列出前 20 个质数：16 个 token 全部用在推理上，正文是空的，`finish_reason` 是 `length`。这说明两件事：网关遵守 `ChatOpenAI` 发的 `max_completion_tokens`，所以预留时把它当输出上限是对的；`max_tokens` 必须给推理留够，所以三套配置最少 2048。
+
+为什么这样取值：
+
+- 不流式调用时，网关生成完才返回，单次超时就是整个生成最多花多久。实测短回答 1.5 秒。online 定 30 秒：按每秒约 50 个 token 算（我的推断，这次没有测长回答的速度），30 秒能生成约 1500 个 token（推理加正文）。cheap 只输出一个小 JSON，定 20 秒。offline 出题和裁判的提示词长，任务不着急，定 180 秒、重试 4 次。
+- 设计 11.1 写的是在线回答「几秒超时」，现在的 30 秒和最坏 61 秒都比这长。原因是推理模型生成一个完整回答本来就要几秒到十几秒，超时定成几秒，正常的长回答也会失败。P1-02 和 P1-04 会实测几十个真实回答的耗时，到时再改；P3 给整个请求加总时限以后，单次调用也不会超过剩下的时间。
+- 重试用 openai SDK 自己的：两次之间等 0.5 秒、1 秒、2 秒、4 秒，最多 8 秒，每次随机少等 0 到 25%。SDK 默认会按网关的 `Retry-After` 最多等 120 秒。传输层看到 `Retry-After` 超过这套配置的上限，就在响应头里加 `x-should-retry: false`，SDK 看到这个头不再重试，直接报错。和 P0-05 一样，网关要求 online 调用等 30 秒，就直接失败，不等。
+- 还考虑过：像 P0-05 那样在传输层自己写重试，让 SDK 不重试。好处是能设每次等多久和总时限。没选：要再写一份和 P0-05 差不多的重试代码；SDK 的等待本来就短（最多 8 秒），唯一的问题是 `Retry-After` 可能很长，加一个响应头就解决了。
+
+### 2026-10-17 P1-01：对话模型的价格仍是估计值
+网关的模型列表不带价格，每次调用的响应里也没有费用，这次查不到 deepseek-v4-flash 的实际扣费，价格不改：仍按输入 2 元、输出 8 元每百万 token 算。`ModelPrice` 加了 `estimated` 字段，这个模型写成 `true`，账本里对话调用的每一行都带 `price_estimated: true`，以后知道真实价格只改配置。
+
+这次 `llm` 测试一共 4 次对话调用，按估计价花了 0.002102 元，账本总额从 0.000040 元变成 0.002142 元。`json_schema` 那次返回 400，账本里没有写这一次。
+
+### 2026-10-17 P1-01：网关不可用或预算用完时，手动设 CHAT_BACKEND=fake，程序不自动切换
+设 `CHAT_BACKEND=fake` 以后，三套配置都返回 `FakeChatModel`，每次都回答 `chat_fake_reply` 这句固定的话（默认 `[fake chat model] no answer`）：不发请求，不写账本，也不检查网关地址和价格。假模型上的结构化输出拿不到对象（固定回答里没有工具调用），会抛 `StructuredOutputError`。`FakeChatModel` 为此加了 `default_response`：脚本里的回答用完以后用它，不设时仍然报错。
+
+和 P0-05 的向量一样，不做「网关出错就自动换成假模型」：自动换了以后，评测分数和返回给用户的回答里会混进假回答，程序却不报错。网关出错时按设计 16.8 报 `llm_timeout` 或 `llm_error`，由调用方决定只返回检索到的段。预算用完时 `BudgetExceeded` 的错误信息里提示设 `EMBED_BACKEND=fake` 和 `CHAT_BACKEND=fake`。
+
+### 2026-10-17 P1-01：对话模型调用的四个错误类别
+`ErrorCategory` 加了四个类别，`chat_error_category(exc)` 把调用时抛出的异常换成类别：
+
+| 类别 | 什么情况 |
+|---|---|
+| `llm_timeout` | 连接或读取超时，重试已经用完 |
+| `llm_error` | 其他网关错误：连不上、4xx、429、5xx |
+| `budget_exceeded` | 预算检查不让发，请求没有发出去 |
+| `structured_output_failed` | 回答转不成要求的 Pydantic 对象 |
+
+不属于这四类的异常返回 None，免得把程序自己的 bug 当成网关故障。设计 16.8 里「写回答」这一行只说失败时只返回检索到的段，没给类别名。还考虑过只用一个 `llm_error`：调用方就看不出是网关慢了，还是预算用完了；预算用完要换假模型或者等主人加预算，处理办法不一样，所以分开。
