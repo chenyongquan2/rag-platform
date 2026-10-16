@@ -129,3 +129,70 @@ P0-01 定的规则（连接串里的相对路径从当前目录算）不变：`d
 - `docker stats`（索引里还没有数据）：ES 约 2.5 GB，Jaeger 约 15 MB，Collector 约 37 MB，Redis 约 8 MB。设计 16.5 估的是 ES 约 3 GB、Collector 和 Jaeger 合计 0.3 到 0.6 GB；Jaeger 在内存里存的 trace 多了以后会变大。没有给容器设内存上限。
 - 所有容器从停止状态启动到健康检查全部通过，用了 40 秒到 2 分 20 秒，`scripts/dev_up.sh` 默认最多等 300 秒。
 - Collector 镜像里没有 shell 和 HTTP 客户端，写不了容器健康检查，`dev_up.sh` 从本机访问它的健康检查端口（33133）。
+
+### 2026-10-17 P0-05：向量客户端自己写，继承 LlamaIndex 的 BaseEmbedding，用 httpx 调网关
+`rag.embed.GatewayEmbedding` 继承 LlamaIndex 的 `BaseEmbedding`，用 httpx 向网关的 `/embeddings` 发请求。摄取和查询都调用 `make_embedding` 创建它：模型名、维度、文本前缀、每批条数读同一份配置，只有超时、重试次数和重试间隔按 `ingest`、`query` 两种用途分开设。它是 `BaseEmbedding` 的子类，单元测试里放进 `IngestionPipeline`，同步和异步都能用。
+
+按五条标准比了三种做法：
+
+| 做法 | 能拿到 usage | 重试能按配置设、只有一层 | 不加新依赖 | 不联网就能测 | 能用 `qwen/text-embedding-v4` 这种模型名 |
+|---|---|---|---|---|---|
+| LlamaIndex 的 OpenAILikeEmbedding | 不能 | 不能，有两层 | 不满足，要加两个包 | 能 | 能 |
+| 自己写，内部调 openai SDK | 能 | 次数能设，等待时间是 SDK 里的固定值 | 满足 | 能 | 能 |
+| 自己写，用 httpx（选这个） | 能 | 能 | 满足 | 能 | 能 |
+
+- LlamaIndex 那一行是按以前读过的源码说的，这次没有装包核对（我的推断）：`llama-index-embeddings-openai` 的 `get_embeddings` 只返回向量，把响应里的 usage 扔了，账本就记不到真实 token 数；openai SDK 自己重试一层，LlamaIndex 外面再用 tenacity 重试一层，两层的次数相乘；它还会把文本里的换行换成空格，这是一个不显式写在我们配置里的默认行为。`OpenAIEmbedding` 只认 OpenAI 自己的模型名，所以要用 `llama-index-embeddings-openai-like` 里的 `OpenAILikeEmbedding`，两个包的版本要和 llama-index-core 一起升级。
+- openai SDK 已经随 langchain-openai 装好了，但它的重试等待时间从 0.5 秒起、最长 8 秒，配置改不了。
+- httpx 本来就装了（0.28.1），这次在 `pyproject.toml` 里写成直接依赖，`uv.lock` 只多了两行。
+
+代价：自己维护约 200 行代码，OpenAI 接口以后加了字段要自己改。以后要用的接口不是 OpenAI 格式，或者要用 LlamaIndex 的多协程并发（`num_workers`），再重新比较。
+
+### 2026-10-17 P0-05：网关一次最多收 10 条文本，默认每批 10 条；超时和重试按用途分开
+探测方法：不重试，向网关依次发 1 条、10 条、11 条很短的文本（`t0`、`t1`……）。10 条成功；11 条返回 HTTP 400，错误信息是 batch size 不能大于 10。所以 `embed_batch_size` 默认 10。配置允许的上限 2048 是 LlamaIndex 自己的上限，设成大于 10 时网关返回 400，第一次请求就报错，不会重试。
+
+同时量到：单条文本一次请求约 0.6 秒，第一次 1.75 秒（包括建立 TLS 连接）；10 条一次请求 2.6 秒（也是新连接）。同一段文本连发三次，三个向量逐位相同。
+
+超时和重试：
+
+| 用途 | 单次超时 | 最多重试 | 两次之间等多久 | 网关一直不通时最坏等多久 |
+|---|---|---|---|---|
+| 摄取 `ingest` | 60 秒 | 4 次 | 2、4、8、16 秒（最长 30 秒） | 每批约 330 秒 |
+| 查询 `query` | 3 秒 | 1 次（配置不允许大于 1） | 0.2 秒 | 约 6.2 秒 |
+
+会重试的错误：超时、连接失败、HTTP 408、429 和 5xx；网关带了 `Retry-After`（秒数）时按它等，最长 30 秒。其他错误第一次就报错：400、401、403、404 等 4xx，回答不是 JSON，向量条数不对，维度不对。直接写 `text-embedding-v4` 时网关一直返回 503，会按 5xx 重试到次数用完再报错，摄取时要多等约半分钟才看到错误；没有为它单独处理。
+
+### 2026-10-17 P0-05：L0 缓存的键里加上维度和文本前缀，向量按 float32 存
+设计 12.1 写的键是「向量模型名 + 文本哈希」。实际的键分两部分：模型部分是 `qwen/text-embedding-v4@1024`，配了文本前缀时再加前缀的 sha256 前 12 位；文本部分是原文的 sha256。原因：同一个模型名，换了维度（text-embedding-v4 支持 64 到 2048 维）或换了前缀，同一段文本的向量就不一样了。只用模型名做键，改了维度以后，缓存会返回旧维度的向量。
+
+- 向量按 float32 存，1024 维占 4 KB。ES 的 dense_vector 本来就按 float32 存。网关新返回的向量也先转成 float32 再交给调用方，所以同一段文本不管是不是从缓存读的，拿到的数字都一样。
+- 同一批里重复的文本只发一次。查询和摄取用同样的键：两边前缀相同，同一段文本的向量相同（llm 测试实测逐位相同）。
+- 摄取用 SQLite 文件 `data/cache/embeddings.sqlite3`（`data/cache/` 已在 .gitignore 里），WAL 模式。每次请求拿到的向量用一个事务写进文件，再发下一次请求，所以摄取中途停下，重跑时只算还没写进缓存的文本。
+
+还考虑过：用 LlamaIndex `BaseEmbedding` 自带的 `embeddings_cache`。它的键是原文本身，不带模型名；一条一条读写，一批 10 条要读写 10 次；存的值是「随机 uuid 对应向量」，以后的版本可能改格式。所以自己写了 `CachedEmbedding`，包在客户端外面，一批只读一次、写一次。
+
+### 2026-10-17 P0-05：查询缓存默认用 redis_url，Redis 出错时当作没命中
+`embed_query_cache_url` 留空时用 `redis_url`，因为设计 16.7 规定缓存只用一个 Redis；单元测试或者本机没开 Redis 时可以设成 `memory://`。键是 `rag:l0:<模型部分>:<sha256>`，30 天过期。compose 里的 Redis 设了 allkeys-lru，内存满了会删掉最久没用的键。
+
+Redis 连不上或读写报错时，程序记一条警告，当作没命中，查询照样去网关算向量；连接和读写的超时都是 0.5 秒。原因：缓存只用来省钱、省时间，Redis 出故障不该让查询失败。
+
+没有用 P0-02 写的 `make_redis_client`：它设了 `decode_responses=True`，Redis 返回的值会被当成文本解码，二进制的向量会解码失败。所以缓存自己用 `Redis.from_url` 建客户端，不解码。
+
+### 2026-10-17 P0-05：账本只记网关正常返回的请求，每次请求之前查一次预算
+网关每返回一次 2xx，账本就加一行。token 数从响应的 usage 读；没有 usage，或者回答解析失败时，按字符数估算，这一行写 `usage_estimated: true`。4xx、5xx 和超时不记，因为一般不对失败的请求收费（我的推断，没查到网关的计费说明）。
+
+每次发请求之前，程序读一遍账本，算出已经花的钱；再加上这次请求的估算（把字符数当 token 数，比实际多）。如果超过 `budget_stop_cny`（28 元），就抛 `BudgetExceeded`，不发请求。每次都读整个账本：现在只有几行；HF 文档全量摄取约 500 万 token，按每块约 400 token、每次 10 块估算，约 1,250 次请求，账本也只有一千多行；用 1,250 行的账本实测，查一次预算约 13 毫秒，比一次请求的两秒多小得多。以后行数多到拖慢请求，再改成把总数存在内存里。
+
+每行的字段：time、kind、model、prompt_tokens、completion_tokens、total_tokens、cny，再加调用方自己的字段（profile、inputs、usage_estimated）。写的时候加文件锁，几个进程同时写，两行也不会混在一起。最后一行如果因为进程崩溃只写了一半，读的时候跳过并记一条警告。
+
+### 2026-10-17 P0-05：账本文件提交进 git，合并时两边新加的行都保留
+`data/cost/ledger.jsonl` 不放进 .gitignore，`.gitattributes` 里给它设 `merge=union`。几个分支各自在账本末尾加行，普通合并会冲突；union 合并把两边新加的行都留下。提交进 git 以后，主人能看到每个分支花了多少钱，worktree 删掉以后记录也还在。这次探测加 llm 测试的 6 行已经提交。
+
+代价：同一台机器上几个 worktree 同时调真实模型时，每个 worktree 的账本只有自己的花费，预算检查看不到别的 worktree 刚花的钱。这时把 `COST_LEDGER_PATH` 设成同一个绝对路径，比如主 checkout 的 `data/cost/ledger.jsonl`。
+
+还考虑过：把账本放进 .gitignore。缺点是删掉 worktree 时花费记录一起删掉了。
+
+### 2026-10-17 P0-05：对话模型的价格先写一个偏高的估计
+价格表 `model_prices` 里，`deepseek-v4-flash` 先写成输入 2 元、输出 8 元每百万 token。网关的模型列表不带价格，这次没有查到真实价格。故意写高：预算检查只会提前停下，不会花超了才停。P1-01 第一次真实调用以后，按网关的实际扣费改价格。向量模型按设计 20.2 写 0.5 元每百万 token。价格表里没有的模型，创建客户端时直接报错，一次请求都不发。
+
+### 2026-10-17 P0-05：网关不可用或预算用完时，手动改配置用假向量，程序不自动切换
+设 `EMBED_BACKEND=fake` 以后，摄取和查询都用 `FakeEmbedding`（维度等于 `embed_dim`）：不发请求，不写账本，也不读写 L0 缓存。没做「网关出错就自动换成假向量」：假向量和真向量之间算相似度没有意义，自动切换以后，同一个索引里会混进两种向量，查出来的结果是错的，程序却不报错。用假向量建的索引只能用假向量查，P0-06 建索引时要记下用的是哪种向量。

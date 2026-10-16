@@ -46,3 +46,19 @@ disabled** (no TLS, no password) for local development; never expose this setup 
 Connection defaults in `ServiceSettings` match these ports; override with `ES_URL`, `REDIS_URL`,
 `OTLP_ENDPOINT`. Integration tests skip with a message when a service is not reachable, and use
 `test<run>_`-prefixed indices and Redis keys that they delete afterwards.
+
+## Embeddings and cost
+
+`rag.embed.make_embedding("ingest" | "query")` builds every embedding model: the same gateway
+model, dimensions and text prefix on both sides, only timeout and retries differ. Vectors go
+through the L0 cache (`data/cache/embeddings.sqlite3` for ingestion, the cache Redis for queries).
+`EMBED_BACKEND=fake` switches to `FakeEmbedding` when the gateway is down or the budget is used up.
+
+```bash
+uv run python -m rag.cost summary   # money spent so far, per kind and model
+```
+
+Every real model call appends a line to `data/cost/ledger.jsonl`; requests stop with
+`BudgetExceeded` once spent + estimate would pass `BUDGET_STOP_CNY`. The ledger is committed and
+merged with `merge=union` (`.gitattributes`); when several checkouts call real models at the same
+time, set `COST_LEDGER_PATH` to one absolute path so each sees the others' spend.
