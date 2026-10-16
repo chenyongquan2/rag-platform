@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class ErrorCategory(StrEnum):
@@ -54,8 +54,10 @@ class _ResultMeta(BaseModel):
     rerank_timeout: bool = False
     timings_ms: dict[str, float] = Field(default_factory=dict)
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def error_categories(self) -> list[ErrorCategory]:
+        """Set flags as category names; included in the JSON returned to callers."""
         flags = [
             (self.degraded, ErrorCategory.DEGRADED),
             (self.rerank_timeout, ErrorCategory.RERANK_TIMEOUT),

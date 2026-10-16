@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from rag.types import (
     Answer,
     AnswerSentence,
@@ -45,6 +47,10 @@ def test_retrieval_result_fields_and_flags() -> None:
 
     flagged = result.model_copy(update={"degraded": True, "rerank_timeout": True})
     assert flagged.error_categories == [ErrorCategory.DEGRADED, ErrorCategory.RERANK_TIMEOUT]
+    # error_categories is part of the JSON that callers receive.
+    dumped = json.loads(flagged.model_dump_json())
+    assert dumped["error_categories"] == ["degraded", "rerank_timeout"]
+    assert RetrievalResult.model_validate(dumped) == flagged
     assert ErrorCategory.DEGRADED == "degraded"
     assert ErrorCategory.ANSWER_PARSE_FAILED == "answer_parse_failed"
 
@@ -76,3 +82,7 @@ def test_answer_roundtrip_json() -> None:
 
     failed = answer.model_copy(update={"answer_parse_failed": True, "degraded": True})
     assert failed.error_categories == [ErrorCategory.DEGRADED, ErrorCategory.ANSWER_PARSE_FAILED]
+    assert json.loads(failed.model_dump_json())["error_categories"] == [
+        "degraded",
+        "answer_parse_failed",
+    ]
