@@ -43,3 +43,35 @@ llama-index-core 0.14.25、langchain 1.4.5、langgraph 1.2.15、mcp 2.3.0、docl
 
 ### 2026-10-17 P0-01：docstore 连接串指向一个目录，每个知识库一个文件
 `DOCSTORE_URL=file://data/docstore`，`make_docstore(url, kb)` 读写 `data/docstore/<kb>.json`。一个连接串给所有知识库用；以后换成 Postgres 时，知识库名就是 LlamaIndex docstore 的 namespace。`file://` 和 `sqlite://` 后面的整段就是文件路径，相对路径从工作目录算起，不用 SQLAlchemy 那种三个斜杠、四个斜杠区分相对和绝对路径的写法，Windows 路径（`file://C:/...`）也能直接写。
+
+### 2026-10-17 P0-03：HF 文档集下载 Hub 自动转换出来的 parquet，不下载原始 CSV
+`m-ric/huggingface_doc` 的 main 分支里只有一个 `huggingface_doc.csv`（21,954,601 字节）。Hugging Face Hub 会自动把数据集转成 parquet，放在 `refs/convert/parquet` 分支（`default/train/0000.parquet`，10,058,873 字节）。选 parquet 的原因：
+- 任务要求下载 parquet。
+- parquet 带列类型，读的时候不用处理正文里大量的换行和引号转义；文件也小一半。
+- 清单里写明下载哪个提交（`ec31afec…`），以后 Hub 重新转换出新的提交，也不影响我们下载的这一版。清单的 `note` 里记了它是从 main 的哪个提交（`1b83935…`）转出来的。
+
+还考虑过：直接下载 CSV。好处是用户上传的原文件，不依赖 Hub 的转换。如果转换分支的这个提交以后被删掉，就改成下载 CSV，需要加一段读 CSV 的代码。评测题集 `m-ric/huggingface_doc_qa_eval` 的 main 分支本身就是 parquet，直接用 main 的提交 `5f70aa9…`。
+
+### 2026-10-17 P0-03：自己用标准库下载，不用 huggingface_hub 的 hf_hub_download
+下载地址按 Hub 的格式自己拼：`<endpoint>/datasets/<repo>/resolve/<提交 id>/<文件路径>`，用 Python 标准库 urllib 下载。文件存到 `<HF_DATA_DIR>/<repo>/<提交 id>/<文件路径>`。原因：
+- huggingface_hub 的缓存目录用 blobs 加 snapshots 符号链接。Windows 上没有建符号链接的权限时，它会改成复制文件，目录结构和 Linux 上不一样。
+- 它不会按我们的清单核对大小、sha256 和行数，这一步反正要自己写。
+- 自己拼地址，单元测试可以把地址换成 `file://` 的本地目录，不联网就能测下载、缓存和核对。
+
+还考虑过：用 huggingface_hub。它已经是间接依赖，也认 `HF_ENDPOINT` 环境变量。服务配置里新加的 `hf_endpoint` 字段读的也是 `HF_ENDPOINT`，两边设一次就都走镜像。
+
+### 2026-10-17 P0-03：新加依赖 pyarrow
+锁文件里原来没有 pyarrow。读 parquet 必须用它，pandas 读 parquet 也要靠它。版本是 26.0.0。P0-02 也在改 `uv.lock`，两个分支先后合并到 main 时，`uv.lock` 可能冲突，到时重新跑一次 `uv lock` 就能解决。
+
+### 2026-10-17 P0-03：doc_id 写成「知识库名:相对路径」，HF 文档的相对路径就是 source 列
+设计 5.4 要求 doc_id 由知识库、相对路径和单元组成。具体格式：`hf_docs:huggingface/transformers/blob/main/docs/source/en/bert.md`。文件里还分单元时（比如 CHM 里的页面），后面加 `#<单元>`。用冒号隔开知识库名，因为路径里本身有斜杠。路径里的反斜杠统一换成斜杠，绝对路径和带 `..` 的路径直接报错，这样同一个文件在 Windows 和 Linux 上得到同一个 id。
+
+数据集的 `source` 列就是这篇文档在 GitHub 上的路径，所以 `source_url` 写成 `https://github.com/` 加上这个路径，前缀写在清单的 `doc_url_prefix` 里。实查 2,647 个 `source` 没有空值，也没有重复。以后出现重复时直接报错，不自动加序号：加序号的话，id 会随行的先后顺序变化，增量更新就认不出是同一篇。评测题的 `source_doc` 用同一个函数算 doc_id，65 题的来源文档都在文档集里。
+
+### 2026-10-17 P0-03：limit 取文件里的前 N 行，不先按路径排序
+知识库配置里的 `limit: 50` 取的是清单指定的那个 parquet 文件里的前 50 行。文件按 sha256 核对过，所以每次取到的 50 篇都一样。没有先按路径排序再取，因为按字母顺序排，前 50 篇全是 `gradio-app` 仓库的文档（共 469 篇，排在 `huggingface` 前面），而文件原来的顺序是各个仓库混在一起的。
+
+### 2026-10-17 P0-03：清单里的大小、sha256 和行数由第一次下载记下，再提交
+`data/manifests/hf_docs.json` 里的仓库、提交 id、许可、来源网址和预期行数（2,647 和 65）是手写的，大小、sha256 和每个文件的行数一开始留空。运行一次 `python -m rag.data.hf download --pin`，程序从下载下来的文件算出这三项写回清单。之后的下载和读取都要求这三项齐全，而且和文件一致。第一次记下的 sha256 和 Hub 接口返回的 LFS 对象 id（也是 sha256）比过，两个文件都一样。
+
+下载先写到临时文件，核对通过才改名放进缓存，所以缓存里不会留下核对没通过的文件；两个 checkout 共用一个缓存目录、同时下载也不会读到写了一半的文件。`HF_DATA_DIR` 默认是 `data/raw/hf`（相对当前目录，在 .gitignore 里）。这次在 P0-03 的 worktree 里运行时，把它设成了 `C:\workspace\rag-platform\data\raw\hf`，主 checkout 以后用默认值就能直接用这份下载。
