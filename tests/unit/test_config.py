@@ -12,6 +12,7 @@ from rag.config import (
     load_kb_config,
     load_kb_configs,
 )
+from rag.config.paths import shared_data_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -61,7 +62,7 @@ def test_service_settings_defaults(clean_env: pytest.MonkeyPatch) -> None:
     assert s.reranker_model == "BAAI/bge-reranker-base"
     assert s.budget_cny == 30.0
     assert s.budget_stop_cny == 28.0
-    assert s.cost_ledger_path == "data/cost/ledger.jsonl"
+    assert s.cost_ledger_path == (shared_data_dir() / "cost" / "ledger.jsonl").as_posix()
     assert s.llm_base_url == ""
     assert s.llm_api_key.get_secret_value() == ""
     assert s.embed_base_url == ""

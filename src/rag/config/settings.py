@@ -10,6 +10,8 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from rag.config.paths import shared_data_dir
+
 _MASK = "***"
 _SECRET_QUERY_KEY = re.compile(r"pass|pwd|secret|token|key|auth|sig|credential", re.IGNORECASE)
 
@@ -135,7 +137,10 @@ class ServiceSettings(BaseSettings):
     # Money: stop real model jobs when spent + estimate would exceed budget_stop_cny.
     budget_cny: float = Field(default=30.0, ge=0)
     budget_stop_cny: float = Field(default=28.0, ge=0)
-    cost_ledger_path: str = "data/cost/ledger.jsonl"
+    # One ledger for every checkout and worktree on this machine, so the stop sees all spend.
+    cost_ledger_path: str = Field(
+        default_factory=lambda: (shared_data_dir() / "cost" / "ledger.jsonl").as_posix()
+    )
     model_prices: dict[str, ModelPrice] = Field(default_factory=_default_model_prices)
 
     @model_validator(mode="after")

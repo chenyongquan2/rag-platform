@@ -1,2 +1,0 @@
-# The cost ledger is append-only JSON lines: on merge keep the lines of both sides.
-data/cost/ledger.jsonl merge=union

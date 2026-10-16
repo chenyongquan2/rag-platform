@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from rag.config import ModelPrice, ServiceSettings
+from rag.config.paths import main_checkout, shared_data_dir
 from rag.cost import (
     BudgetExceeded,
     CostLedger,
@@ -129,17 +130,36 @@ def test_cli_summary_prints_totals(tmp_path: Path, capsys: pytest.CaptureFixture
     assert "calls: 3" in proc.stdout
 
 
-def test_ledger_is_tracked_with_union_merge() -> None:
-    path = "data/cost/ledger.jsonl"
-    attr = subprocess.run(
-        ["git", "check-attr", "merge", "--", path],
-        capture_output=True,
-        text=True,
-        check=True,
-        cwd=REPO_ROOT,
-    )
-    assert attr.stdout.strip().endswith("merge: union")
+def test_ledger_is_shared_outside_checkouts_and_git_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Default: one file next to the main checkout, the same for every worktree of the repo.
+    monkeypatch.delenv("COST_LEDGER_PATH", raising=False)
+    default = Path(ServiceSettings(_env_file=None).cost_ledger_path)
+    assert default.is_absolute()
+    assert default == shared_data_dir() / "cost" / "ledger.jsonl"
+    assert REPO_ROOT not in default.parents
+
+    # A linked worktree (`.git` is a file) resolves to its main checkout, wherever it lives.
+    main = tmp_path / "workspace" / "repo"
+    (main / ".git" / "worktrees" / "wt1").mkdir(parents=True)
+    worktree = main / ".claude" / "worktrees" / "wt1"
+    worktree.mkdir(parents=True)
+    gitdir = (main / ".git" / "worktrees" / "wt1").as_posix()
+    (worktree / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    assert main_checkout(worktree) == main
+    assert main_checkout(main) == main
+    assert shared_data_dir(worktree) == tmp_path / "workspace" / "rag-platform-data"
+    plain = tmp_path / "installed"
+    plain.mkdir()
+    assert main_checkout(plain) == plain  # no git metadata
+
+    # A ledger inside a checkout is never committed.
     ignored = subprocess.run(
-        ["git", "check-ignore", "-q", path], check=False, cwd=REPO_ROOT
+        ["git", "check-ignore", "-q", "data/cost/ledger.jsonl"], check=False, cwd=REPO_ROOT
     ).returncode
-    assert ignored == 1  # 1 = not ignored
+    assert ignored == 0
+    tracked = subprocess.run(
+        ["git", "ls-files", "data/cost"], capture_output=True, text=True, check=True, cwd=REPO_ROOT
+    ).stdout
+    assert tracked == ""
