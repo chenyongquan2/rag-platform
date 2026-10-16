@@ -131,7 +131,7 @@ def test_kb_config_minimal_yaml_uses_defaults(tmp_path: Path) -> None:
     path = tmp_path / "public" / "my_notes.yaml"
     path.write_text("source: {connector: local_dir, path: data/notes}\n", "utf-8")
 
-    cfg = load_kb_config(path)
+    cfg = load_kb_config(path, kb_root=tmp_path)
 
     assert cfg.kb == "my_notes"
     assert cfg.source.connector == "local_dir"
@@ -163,17 +163,35 @@ def test_kb_config_access_must_be_explicit_outside_public(tmp_path: Path) -> Non
     path = tmp_path / "private" / "mt5.yaml"
     path.write_text("source: {connector: local_dir, path: data/mt5}\n", "utf-8")
     with pytest.raises(ValueError, match=r"access\.callers"):
-        load_kb_config(path)
+        load_kb_config(path, kb_root=tmp_path)
 
     path.write_text("access: {callers: [oncall-agent]}\n", "utf-8")
-    assert load_kb_config(path).access.callers == ["oncall-agent"]
+    assert load_kb_config(path, kb_root=tmp_path).access.callers == ["oncall-agent"]
 
     # Built in code without `access`: nobody may use it.
     assert KnowledgeBaseConfig().access.callers == []
 
 
+def test_kb_config_public_only_directly_under_kb_root(tmp_path: Path) -> None:
+    nested = tmp_path / "private" / "public"
+    nested.mkdir(parents=True)
+    path = nested / "x.yaml"
+    path.write_text("source: {connector: local_dir, path: data/x}\n", "utf-8")
+
+    # kb/private/public/x.yaml is private: the folder name alone does not make it public.
+    with pytest.raises(ValueError, match=r"access\.callers"):
+        load_kb_config(path, kb_root=tmp_path)
+    with pytest.raises(ValueError, match=r"access\.callers"):
+        load_kb_configs(tmp_path)
+    # A file outside the kb root is never public either.
+    with pytest.raises(ValueError, match=r"access\.callers"):
+        load_kb_config(path, kb_root=tmp_path / "elsewhere")
+    # The same file is public when the kb root is the folder that contains public/.
+    assert load_kb_config(path, kb_root=tmp_path / "private").access.callers == ["*"]
+
+
 def test_kb_config_hf_docs_example() -> None:
-    cfg = load_kb_config(REPO_ROOT / "kb" / "public" / "hf_docs.yaml")
+    cfg = load_kb_config(REPO_ROOT / "kb" / "public" / "hf_docs.yaml", kb_root=REPO_ROOT / "kb")
 
     assert cfg.kb == "hf_docs"
     assert cfg.source.connector == "hf_dataset"

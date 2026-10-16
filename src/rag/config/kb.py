@@ -145,24 +145,35 @@ class KnowledgeBaseConfig(_Strict):
         return self
 
 
-def load_kb_config(path: str | Path, *, public: bool | None = None) -> KnowledgeBaseConfig:
+def is_public_kb_file(path: str | Path, kb_root: str | Path) -> bool:
+    """True only when `path`, relative to `kb_root`, starts with `public/`.
+
+    `kb/private/public/x.yaml` is not public, and neither is a file outside `kb_root`.
+    """
+    try:
+        rel = Path(path).resolve().relative_to(Path(kb_root).resolve())
+    except ValueError:
+        return False
+    return len(rel.parts) > 1 and rel.parts[0] == "public"
+
+
+def load_kb_config(path: str | Path, *, kb_root: str | Path = "kb") -> KnowledgeBaseConfig:
     """Load one knowledge-base YAML file. `kb` defaults to the file name without extension.
 
-    `public` says whether the file is a public knowledge base (default: its directory is named
-    `public`). A public config without `access` is open to every caller; any other config must
-    set `access.callers` explicitly, so a private knowledge base is never open by omission.
+    A config under `<kb_root>/public/` without `access` is open to every caller; any other
+    config must set `access.callers` explicitly, so a private knowledge base is never open by
+    omission. `kb_root` is the knowledge-base config directory (`ServiceSettings.kb_dir`).
     """
     path = Path(path)
     data = yaml.safe_load(path.read_text("utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError(f"{path}: knowledge-base config must be a mapping")
     data.setdefault("kb", path.stem)
-    if public is None:
-        public = path.parent.name == "public"
     if "access" not in data:
-        if not public:
+        if not is_public_kb_file(path, kb_root):
             raise ValueError(
-                f"{path}: knowledge bases outside kb/public/ must set access.callers explicitly"
+                f"{path}: knowledge bases outside {kb_root}/public/ must set access.callers "
+                "explicitly"
             )
         data["access"] = {"callers": ["*"]}
     return KnowledgeBaseConfig.model_validate(data)
@@ -175,7 +186,7 @@ def load_kb_configs(kb_dir: str | Path) -> dict[str, KnowledgeBaseConfig]:
     origins: dict[str, Path] = {}
     files = sorted([*kb_dir.rglob("*.yaml"), *kb_dir.rglob("*.yml")])
     for path in files:
-        cfg = load_kb_config(path, public=path.relative_to(kb_dir).parts[0] == "public")
+        cfg = load_kb_config(path, kb_root=kb_dir)
         if cfg.kb in configs:
             raise ValueError(f"duplicate knowledge base {cfg.kb!r} in {origins[cfg.kb]} and {path}")
         configs[cfg.kb] = cfg
