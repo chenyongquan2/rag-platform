@@ -7,13 +7,13 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from rag.config import ServiceSettings
+from rag.config import ServiceSettings, repo_path
 from rag.data.hf.connector import corpus_documents
 from rag.data.hf.download import ensure_dataset, read_dataset
 from rag.data.hf.evalset import eval_questions, missing_sources
 from rag.data.hf.manifest import DatasetEntry, HfDataError, Manifest, load_manifest, save_manifest
 
-DEFAULT_MANIFEST = "data/manifests/hf_docs.json"
+DEFAULT_MANIFEST = str(repo_path("data/manifests/hf_docs.json"))
 
 
 def _parser() -> argparse.ArgumentParser:

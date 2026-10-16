@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,8 @@ from rag.data.hf.manifest import (
 )
 
 _USER_AGENT = "rag-platform/0.1 (+urllib)"
+_REPLACE_ATTEMPTS = 5
+_REPLACE_DELAY_S = 0.2
 
 
 @dataclass(frozen=True)
@@ -113,9 +116,32 @@ def _download(url: str, target: Path, file: FileEntry, *, timeout_s: float) -> N
         _check_parquet(tmp, url)
         if not file.pinned:
             _pin(tmp, file)
-        os.replace(tmp, target)
+        _move_into_cache(tmp, target, file)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _move_into_cache(tmp: Path, target: Path, file: FileEntry) -> None:
+    """Rename the verified download into place.
+
+    On Windows the rename fails with PermissionError while another process (another checkout
+    sharing the cache) has the target open or is renaming its own copy. Retry briefly; if the
+    other process has meanwhile put a verified copy there, use it.
+    """
+    error: PermissionError | None = None
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, target)
+            return
+        except PermissionError as exc:
+            if _verifies(target, file):
+                return
+            error = exc
+            time.sleep(_REPLACE_DELAY_S * (attempt + 1))
+    raise HfDataError(
+        f"cannot move the download into {target}: {error}. Another process may have the file "
+        "open (shared cache, HF_DATA_DIR); close it and run the download again"
+    ) from error
 
 
 def _check_parquet(path: Path, url: str) -> None:

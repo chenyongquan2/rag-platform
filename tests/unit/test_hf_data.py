@@ -5,6 +5,7 @@ Everything runs against a tiny parquet fixture served from a `file://` "mirror" 
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import random
@@ -17,8 +18,9 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from pydantic import ValidationError
 
-from rag.config import ServiceSettings, load_kb_config
+from rag.config import ServiceSettings, load_kb_config, repo_path
 from rag.data import SourceDocument, make_doc_id
 from rag.data.hf import (
     HfDataError,
@@ -34,6 +36,7 @@ from rag.data.hf import (
     save_manifest,
     verify_file,
 )
+from rag.data.hf import download as hf_download
 from rag.data.hf.cli import main as cli_main
 from rag.registry import connectors
 
@@ -206,6 +209,46 @@ def test_make_doc_id_is_kb_plus_relative_path() -> None:
         make_doc_id("", "a.md")
 
 
+def test_make_doc_id_normalizes_paths_and_escapes_hash() -> None:
+    assert make_doc_id("kb", "a//b.md") == "kb:a/b.md"
+    assert make_doc_id("kb", "a/./b.md") == "kb:a/b.md"
+    assert make_doc_id("kb", ".\\a\\\\b.md") == "kb:a/b.md"
+    # `#` separates the unit, so a `#` (and `%`) inside the path is percent-encoded.
+    assert make_doc_id("kb", "docs/c#.md") == "kb:docs/c%23.md"
+    assert make_doc_id("kb", "docs/50%.md") == "kb:docs/50%25.md"
+    assert make_doc_id("kb", "docs/c%23.md") != make_doc_id("kb", "docs/c#.md")
+    assert make_doc_id("kb", "docs/c#.md", unit="p#2") == "kb:docs/c%23.md#p#2"
+    for bad in ("C:/x.md", "c:x.md", "//server/share/x.md", "./", "a/./.."):
+        with pytest.raises(ValueError):
+            make_doc_id("kb", bad)
+    with pytest.raises(ValueError):
+        make_doc_id("kb", "a.md", unit="")
+
+
+def test_manifest_rejects_unsafe_revision_repo_id_and_paths(hub: FakeHub) -> None:
+    base = _manifest_dict(hub)
+
+    def rejected(section: str, **changes: Any) -> None:
+        data = copy.deepcopy(base)
+        file_changes = changes.pop("file", {})
+        data[section].update(changes)
+        data[section]["files"][0].update(file_changes)
+        with pytest.raises(ValidationError):
+            Manifest.model_validate(data)
+
+    rejected("corpus", revision="main")
+    rejected("corpus", revision="ec31afec")
+    rejected("corpus", revision="EC31AFEC9DD94905638A65F55329AE34832A93FE")
+    for repo_id in ("../evil", "m-ric/..", "./x", "a/b/c", "C:/x"):
+        rejected("eval", repo_id=repo_id)
+    for path in ("../x.parquet", "a/../../x.parquet", "/abs/x.parquet", "C:/x.parquet", ""):
+        rejected("corpus", file={"path": path})
+
+    data = copy.deepcopy(base)
+    data["corpus"]["files"][0]["path"] = "./default//train\\0000.parquet"
+    assert Manifest.model_validate(data).corpus.files[0].path == CORPUS_FILE
+
+
 # AC2
 def test_hf_settings_defaults_and_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in ("HF_ENDPOINT", "HF_DATA_DIR", "HF_TIMEOUT_S"):
@@ -255,6 +298,65 @@ def test_download_caches_and_verifies(
             timeout_s=5,
         )
     assert not [p for p in other_cache.rglob("*") if p.is_file()]
+
+
+def test_corrupt_cached_file_is_fetched_again(
+    hub: FakeHub, manifest_path: Path, settings: ServiceSettings
+) -> None:
+    manifest = load_manifest(manifest_path)
+    cached = _ensure(manifest, settings)[0].path
+    cached.write_bytes(b"not the parquet file")
+
+    again = _ensure(manifest, settings)
+    assert again[0].path == cached
+    assert again[0].downloaded is True
+    assert cached.read_bytes() == hub.path(CORPUS_REPO, CORPUS_FILE).read_bytes()
+
+
+def test_download_errors_become_hf_data_errors(tmp_path: Path, manifest_path: Path) -> None:
+    manifest = load_manifest(manifest_path)
+    cache = tmp_path / "cache-err"
+    with pytest.raises(HfDataError, match="download failed"):
+        ensure_dataset(
+            manifest.corpus,
+            endpoint=(tmp_path / "no-such-mirror").as_uri(),
+            data_dir=str(cache),
+            timeout_s=5,
+        )
+    assert not [p for p in cache.rglob("*") if p.is_file()]
+
+
+def test_locked_cache_file_gives_clear_error_or_accepts_finished_copy(
+    tmp_path: Path, hub: FakeHub, manifest_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = load_manifest(manifest_path)
+    monkeypatch.setattr(hf_download, "_REPLACE_DELAY_S", 0.0)
+    calls: list[object] = []
+
+    def locked(src: object, dst: object) -> None:
+        calls.append(dst)
+        raise PermissionError(13, "The process cannot access the file", str(dst))
+
+    monkeypatch.setattr(hf_download.os, "replace", locked)
+    cache = tmp_path / "cache-locked"
+    with pytest.raises(HfDataError, match="shared cache"):
+        ensure_dataset(manifest.corpus, endpoint=hub.endpoint, data_dir=str(cache), timeout_s=5)
+    assert len(calls) == hf_download._REPLACE_ATTEMPTS
+    assert not [p for p in cache.rglob("*") if p.is_file()]
+
+    # Another process finished the same download first: its verified copy is accepted.
+    good = hub.path(CORPUS_REPO, CORPUS_FILE).read_bytes()
+
+    def raced(src: object, dst: object) -> None:
+        Path(str(dst)).write_bytes(good)
+        raise PermissionError(13, "The process cannot access the file", str(dst))
+
+    monkeypatch.setattr(hf_download.os, "replace", raced)
+    result = ensure_dataset(
+        manifest.corpus, endpoint=hub.endpoint, data_dir=str(cache), timeout_s=5
+    )
+    assert result[0].path.read_bytes() == good
+    assert not list(cache.rglob("*.part"))
 
 
 # AC4
@@ -378,6 +480,20 @@ def test_hf_dataset_connector_registered_and_created_from_kb_config(
         HfDatasetConnector(
             kb="other_kb", dataset=CORPUS_REPO, manifest=str(manifest_path), settings=settings
         )
+
+
+def test_relative_manifest_path_resolves_from_repo_root(
+    tmp_path: Path, settings: ServiceSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)  # a working directory without data/manifests/
+    connector = HfDatasetConnector(
+        kb=KB, dataset=CORPUS_REPO, manifest="data/manifests/hf_docs.json", settings=settings
+    )
+    expected = REPO_ROOT / "data" / "manifests" / "hf_docs.json"
+    assert connector.manifest_path.resolve() == expected.resolve()
+    assert connector.manifest.corpus.rows == 2647
+    assert repo_path("data/x.json").resolve() == (REPO_ROOT / "data" / "x.json").resolve()
+    assert repo_path(tmp_path / "abs.json") == tmp_path / "abs.json"
 
 
 # AC9

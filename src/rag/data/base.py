@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import PureWindowsPath
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -11,24 +11,41 @@ ConnectorMode = Literal["snapshot", "changes"]
 """`snapshot`: every document on each run; `changes`: only what changed since last run (s7-4)."""
 
 
+def normalize_rel_path(path: str) -> str:
+    """Normalize a relative path to `a/b/c` form, or raise `ValueError` if it is not relative.
+
+    Backslashes become `/`; empty and `.` segments are dropped (`./a//b/./c` -> `a/b/c`). Absolute
+    paths (`/x`, `//server/x`, `C:/x`, `C:x`) and `..` segments are rejected, so the result can be
+    joined under a directory without escaping it.
+    """
+    rel = path.replace("\\", "/")
+    if rel.startswith("/") or PureWindowsPath(rel).anchor:
+        raise ValueError(f"path must be relative, got {path!r}")
+    parts = [part for part in rel.split("/") if part not in ("", ".")]
+    if ".." in parts:
+        raise ValueError(f"path must not contain '..', got {path!r}")
+    if not parts:
+        raise ValueError(f"path must not be empty, got {path!r}")
+    return "/".join(parts)
+
+
 def make_doc_id(kb: str, source_rel: str, unit: str | None = None) -> str:
     """Stable document id: knowledge base + relative path (+ unit inside the file), design s5-4.
 
     `hf_docs:huggingface/transformers/blob/main/docs/source/en/bert.md`,
-    `mt5_manuals:help/mt5.chm#page.htm`. Backslashes become `/` and a leading `./` is dropped, so
-    the same file gets the same id on Windows and Linux. Absolute paths and `..` are rejected: an
-    id must not depend on where the data happens to live on this machine.
+    `mt5_manuals:help/mt5.chm#page.htm`. The path is normalized (`normalize_rel_path`), so the
+    same file gets the same id on Windows and Linux; an id never depends on where the data lives.
+    `#` separates the unit, so `%` and `#` inside the path are percent-encoded (`c#.md` ->
+    `c%23.md`): the first `#` after the kb is always the unit separator and ids stay unique.
     """
     if not kb:
         raise ValueError("kb must not be empty")
-    rel = source_rel.replace("\\", "/")
-    while rel.startswith("./"):
-        rel = rel[2:]
-    if not rel or rel.startswith("/") or PurePosixPath(rel).is_absolute():
-        raise ValueError(f"source_rel must be a non-empty relative path, got {source_rel!r}")
-    if ".." in rel.split("/"):
-        raise ValueError(f"source_rel must not contain '..', got {source_rel!r}")
-    return f"{kb}:{rel}" if unit is None else f"{kb}:{rel}#{unit}"
+    rel = normalize_rel_path(source_rel).replace("%", "%25").replace("#", "%23")
+    if unit is None:
+        return f"{kb}:{rel}"
+    if not unit:
+        raise ValueError("unit must not be empty; pass None for a file without units")
+    return f"{kb}:{rel}#{unit}"
 
 
 class SourceDocument(BaseModel):

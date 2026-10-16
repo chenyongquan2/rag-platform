@@ -8,7 +8,7 @@ from pathlib import Path
 import pyarrow as pa
 from pydantic import BaseModel, ConfigDict
 
-from rag.config import ServiceSettings
+from rag.config import ServiceSettings, repo_path
 from rag.data.base import make_doc_id
 from rag.data.hf.download import ensure_dataset, read_dataset
 from rag.data.hf.manifest import DatasetEntry, HfDataError, Manifest, load_manifest
@@ -52,9 +52,12 @@ def load_eval_questions(
     settings: ServiceSettings | None = None,
     download: bool = True,
 ) -> list[EvalQuestion]:
-    """Load the eval set of a manifest, downloading it first unless `download=False`."""
+    """Load the eval set of a manifest, downloading it first unless `download=False`.
+
+    A relative manifest path is taken from the repo root.
+    """
     if not isinstance(manifest, Manifest):
-        manifest = load_manifest(manifest)
+        manifest = load_manifest(repo_path(manifest))
     settings = settings if settings is not None else ServiceSettings()
     entry = _eval_entry(manifest)
     if download:

@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Self
 
 import pyarrow.parquet as pq
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from rag.data.base import normalize_rel_path
 
 _CHUNK = 1 << 20
 
@@ -43,9 +45,16 @@ class FileEntry(_Strict):
     """One file inside a dataset repo. `None` values are filled by `download --pin`."""
 
     path: str = Field(min_length=1)
+    """Path inside the repo; normalized, and never absolute or with `..` (it is joined under the
+    cache directory)."""
     size: int | None = Field(default=None, ge=0)
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     rows: int | None = Field(default=None, ge=0)
+
+    @field_validator("path")
+    @classmethod
+    def _relative_path(cls, value: str) -> str:
+        return normalize_rel_path(value)
 
     @property
     def pinned(self) -> bool:
@@ -53,10 +62,14 @@ class FileEntry(_Strict):
 
 
 class DatasetEntry(_Strict):
-    """One dataset repo at a pinned revision (a commit id, so the files never change under us)."""
+    """One dataset repo at a pinned revision (a commit id, so the files never change under us).
+
+    `repo_id` and `revision` become directories of the cache path, so they are checked strictly.
+    """
 
     repo_id: str = Field(pattern=r"^[\w.-]+/[\w.-]+$")
-    revision: str = Field(min_length=1)
+    revision: str = Field(pattern=r"^[0-9a-f]{40}$")
+    """Full commit id; a branch name could move to other files."""
     ref: str | None = None
     """The branch the revision was taken from (`main`, `refs/convert/parquet`); informational."""
     source_url: str
@@ -68,6 +81,13 @@ class DatasetEntry(_Strict):
     rows: int = Field(ge=0)
     note: str | None = None
     files: list[FileEntry] = Field(min_length=1)
+
+    @field_validator("repo_id")
+    @classmethod
+    def _no_dot_segments(cls, value: str) -> str:
+        if any(part in (".", "..") for part in value.split("/")):
+            raise ValueError(f"repo_id must be <owner>/<name>, got {value!r}")
+        return value
 
     @property
     def label(self) -> str:

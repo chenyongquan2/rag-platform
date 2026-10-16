@@ -5,6 +5,6 @@ Importing this package registers the built-in connectors in `rag.registry.connec
 
 # Imported for its side effect: registers the `hf_dataset` connector.
 from rag.data import hf as hf
-from rag.data.base import ConnectorMode, SourceDocument, make_doc_id
+from rag.data.base import ConnectorMode, SourceDocument, make_doc_id, normalize_rel_path
 
-__all__ = ["ConnectorMode", "SourceDocument", "make_doc_id"]
+__all__ = ["ConnectorMode", "SourceDocument", "make_doc_id", "normalize_rel_path"]

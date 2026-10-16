@@ -9,7 +9,7 @@ from typing import ClassVar
 
 import pyarrow as pa
 
-from rag.config import ServiceSettings
+from rag.config import ServiceSettings, repo_path
 from rag.data.base import ConnectorMode, SourceDocument, make_doc_id
 from rag.data.hf.download import CachedFile, ensure_dataset, read_dataset
 from rag.data.hf.manifest import HfDataError, Manifest, load_manifest
@@ -60,8 +60,9 @@ class HfDatasetConnector:
     """Full-snapshot connector over a pinned HF dataset listed in a data manifest.
 
     Built from the KB config: `connectors.create("hf_dataset", kb=cfg.kb, settings=settings,
-    **cfg.source.model_extra)`. `dataset` must be the manifest's corpus repo and `kb` the
-    manifest's kb, so a YAML edit cannot silently point the knowledge base at other data.
+    **cfg.source.model_extra)`. A relative `manifest` path is taken from the repo root.
+    `dataset` must be the manifest's corpus repo and `kb` the manifest's kb, so a YAML edit cannot
+    silently point the knowledge base at other data.
     """
 
     mode: ClassVar[ConnectorMode] = "snapshot"
@@ -76,7 +77,7 @@ class HfDatasetConnector:
         settings: ServiceSettings | None = None,
     ) -> None:
         self.limit = check_limit(limit)
-        self.manifest_path = Path(manifest)
+        self.manifest_path = repo_path(manifest)
         self.manifest = load_manifest(self.manifest_path)
         if self.manifest.kb != kb:
             raise HfDataError(
