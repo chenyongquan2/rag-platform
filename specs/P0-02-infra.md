@@ -1,6 +1,6 @@
 # P0-02 Local infrastructure
 
-Status: review
+Status: done
 Phase: P0
 Depends on: P0-01
 Design sections: s7-3, s7-5, s16-5, s15-1 (Collector), s12-1 (data generation)
@@ -55,6 +55,6 @@ OTel SDK setup in the app and metrics/logs pipelines (P0-11), Prometheus/Grafana
 - Files: `docker-compose.yml`, `deploy/otel-collector.yaml`, `scripts/dev_up.sh`, `.gitignore`, `.env.example`, `README.md`, `src/rag/{factories.py,config/settings.py,index/}`, `tests/unit/{test_index_mapping,test_index_names,test_factories,test_config}.py`, `tests/integration/`, `docs/decisions.md`.
 - Images: `docker.elastic.co/elasticsearch/elasticsearch:9.5.5` (pulled directly), `redis:8.10.2-alpine`, `otel/opentelemetry-collector-contrib:0.162.0`, `jaegertracing/jaeger:2.22.0` (Docker Hub through the registry mirrors already configured in Docker Desktop). Measured idle memory: ES 2.5 GB, others < 40 MB each.
 - Decisions (docs/decisions.md): host ports = standard + 20000 on 127.0.0.1 (other projects hold the standard ports; Windows reserves blocks in 1024-15000); settings use 127.0.0.1 (localhost costs ~2 s per connection); ES security and ML off locally; mapping adds explicit m/ef_construction, `exclude_source_vectors: true`, `dynamic: strict`; data generation seeded with the Redis server time in ms (Lua `TIME`) so eviction or a Redis restart never moves it back; Jaeger v2 (v1 is end of life; query API is `/api/v3` only).
-- Open issues: concurrent switch/delete of one KB rely on the ingest lock (P0-06). The CLI was run once, so the local ES has an empty `kb_hf_docs_v1` behind `kb_hf_docs`; P0-06 adds fields to `rag.index.mapping` before writing anything outside it (strict mapping). Host drive C: is 98% full (24 GB free). No container memory limits.
+- Open issues: concurrent alias switches and deletes of one KB rely on P0-06's ingest lock (`switch_alias` and `delete_kb_index` do not lock). `init` was run once, so the local ES has an empty `kb_hf_docs_v1` behind the `kb_hf_docs` alias; P0-06 writes into it, and adds fields to `rag.index.mapping` before writing anything outside it (strict mapping). Host drive C: is 98% full (about 22 GB free). No container memory limits.
 - Tests: 60 unit (6 new), 10 integration. The collector test reads its addresses from `docker-compose.yml` and `deploy/otel-collector.yaml` and skips when `OTLP_ENDPOINT` is not the compose collector.
-- Review rounds: round 1 CHANGES (stale switch expecting the target could leave the alias on two indices; 404 classification; hard-coded collector URLs; client-clock seed; rebase on P0-03), all fixed.
+- Review rounds: 2. Round 1 CHANGES (stale switch expecting the target could leave the alias on two indices; 404 classification; hard-coded collector URLs; client-clock seed; rebase on P0-03), all fixed; round 2 APPROVE with one nit (register the Lua script once per client), fixed.
