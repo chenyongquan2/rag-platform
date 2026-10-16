@@ -5,16 +5,30 @@ The gateway is replaced by `httpx.MockTransport`; nothing here touches the netwo
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import httpx
+import numpy as np
 import pytest
 from pydantic import ValidationError
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from rag.config import ModelPrice, ServiceSettings
 from rag.cost import BudgetExceeded, CostLedger
-from rag.embed import EmbeddingError, GatewayEmbedding
+from rag.embed import (
+    CachedEmbedding,
+    EmbeddingCache,
+    EmbeddingError,
+    GatewayEmbedding,
+    InMemoryEmbeddingCache,
+    RedisEmbeddingCache,
+    SqliteEmbeddingCache,
+    cache_model_key,
+    make_embedding_cache,
+    text_sha256,
+)
 from rag.testing import FakeEmbedding
 
 _EMBED_ENV = [
@@ -289,3 +303,166 @@ def test_client_refuses_call_over_budget(tmp_path: Path) -> None:
 
     client = _client(tmp_path, gateway, ledger=_ledger(tmp_path / "other", stop=28.0))
     assert client.get_text_embedding("0123456789") == gateway.vector("0123456789")
+
+
+# ---- L0 cache -------------------------------------------------------------------------------
+
+
+def _f32(vector: list[float]) -> list[float]:
+    """Vectors leave the cache wrapper rounded to float32, hit or miss."""
+    return np.asarray(vector, dtype=np.float32).astype(float).tolist()
+
+
+def _cached(
+    tmp_path: Path,
+    gateway: FakeGateway,
+    cache: EmbeddingCache | None = None,
+    *,
+    model: str = "m",
+    batch: int = 3,
+) -> CachedEmbedding:
+    client = _client(tmp_path, gateway, batch=batch, model=model)
+    return CachedEmbedding(
+        client,
+        cache if cache is not None else InMemoryEmbeddingCache(),
+        cache_model=cache_model_key(model, gateway.dim),
+    )
+
+
+def test_cache_hit_and_miss(tmp_path: Path) -> None:
+    gateway = FakeGateway()
+    cache = InMemoryEmbeddingCache()
+    emb = _cached(tmp_path, gateway, cache, batch=3)
+
+    first = emb.get_text_embedding_batch(["a", "b", "a", "c"])  # batches [a, b, a] and [c]
+    assert gateway.inputs == [["a", "b"], ["c"]]  # the duplicate is sent once
+    assert first == [_f32(gateway.vector(t)) for t in ["a", "b", "a", "c"]]
+
+    assert emb.get_text_embedding_batch(["c", "b", "a"]) == [first[3], first[1], first[0]]
+    assert emb.get_query_embedding("b") == first[1]  # queries share the cache
+    assert len(gateway.requests) == 2  # all hits
+
+    emb.get_text_embedding_batch(["a", "d"])
+    assert gateway.inputs[-1] == ["d"]  # only the miss is sent
+
+    # Key: (model key, sha256 of the text).
+    key = cache_model_key("m", 4)
+    assert cache.get_many(key, [text_sha256("a")]) == {text_sha256("a"): first[0]}
+    assert text_sha256("a") == hashlib.sha256(b"a").hexdigest()
+
+    # Another model, other dimensions or another prefix never share entries.
+    other_gateway = FakeGateway()
+    other = _cached(tmp_path, other_gateway, cache, model="other")
+    other.get_text_embedding("a")
+    assert other_gateway.inputs == [["a"]]
+    keys = {cache_model_key("m", 4), cache_model_key("m", 8), cache_model_key("m", 4, "query: ")}
+    assert len(keys) == 3
+
+
+def test_interrupted_run_resumes_from_cache(tmp_path: Path) -> None:
+    path = tmp_path / "cache" / "l0.sqlite3"
+    gateway = FakeGateway(script=[None, None, httpx.Response(400, json={"error": "stop"})])
+    cache = SqliteEmbeddingCache(path)
+    with pytest.raises(EmbeddingError):
+        _cached(tmp_path, gateway, cache, batch=3).get_text_embedding_batch(TEXTS)
+    assert [len(x) for x in gateway.inputs] == [3, 3, 1]  # the third batch failed
+    cache.close()
+
+    # A new run (new cache object on the same file) computes only the missing text.
+    rerun_gateway = FakeGateway()
+    vectors = _cached(tmp_path, rerun_gateway, SqliteEmbeddingCache(path)).get_text_embedding_batch(
+        TEXTS
+    )
+    assert rerun_gateway.inputs == [["text number 6"]]
+    assert vectors == [_f32(gateway.vector(t)) for t in TEXTS]
+
+
+def test_sqlite_cache_persists(tmp_path: Path) -> None:
+    path = tmp_path / "sub" / "l0.sqlite3"
+    vector = [0.5, 0.25, -1.0, 0.0]
+    cache = SqliteEmbeddingCache(path)
+    cache.put_many("m@4", {"h1": vector})
+    cache.close()
+
+    cache = SqliteEmbeddingCache(path)
+    assert cache.get_many("m@4", ["h1", "h2"]) == {"h1": vector}
+    assert cache.get_many("other@4", ["h1"]) == {}
+    cache.put_many("m@4", {"h1": [1.0, 2.0, 3.0, 4.0]})
+    assert cache.get_many("m@4", ["h1"]) == {"h1": [1.0, 2.0, 3.0, 4.0]}
+
+    many = {f"k{i}": [float(i)] * 4 for i in range(1_200)}  # more than one IN (...) query
+    cache.put_many("m@4", many)
+    assert cache.get_many("m@4", list(many)) == many
+    cache.close()
+
+
+class FakeRedis:
+    """The two Redis calls the cache makes: MGET and a pipeline of SET with EX."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, bytes] = {}
+        self.ttl: dict[str, int | None] = {}
+        self.down = False
+
+    def mget(self, keys: list[str]) -> list[bytes | None]:
+        if self.down:
+            raise RedisConnectionError("redis is down")
+        return [self.store.get(k) for k in keys]
+
+    def pipeline(self, transaction: bool = True) -> FakeRedisPipeline:
+        return FakeRedisPipeline(self)
+
+
+class FakeRedisPipeline:
+    def __init__(self, redis: FakeRedis) -> None:
+        self.redis = redis
+        self.ops: list[tuple[str, bytes, int | None]] = []
+
+    def set(self, key: str, value: bytes, ex: int | None = None) -> FakeRedisPipeline:
+        self.ops.append((key, value, ex))
+        return self
+
+    def execute(self) -> list[bool]:
+        if self.redis.down:
+            raise RedisConnectionError("redis is down")
+        for key, value, ex in self.ops:
+            self.redis.store[key] = value
+            self.redis.ttl[key] = ex
+        return [True] * len(self.ops)
+
+
+def test_redis_cache_keys_ttl_and_errors(tmp_path: Path) -> None:
+    redis = FakeRedis()
+    cache = RedisEmbeddingCache(redis, ttl_s=60)  # type: ignore[arg-type]
+    vector = [0.5, 0.25, -1.0, 0.0]
+
+    cache.put_many("m@4", {"h1": vector})
+    assert list(redis.store) == ["rag:l0:m@4:h1"]
+    assert redis.ttl["rag:l0:m@4:h1"] == 60
+    assert cache.get_many("m@4", ["h1", "h2"]) == {"h1": vector}
+
+    # Redis errors are cache misses: the query still gets its vector from the gateway.
+    redis.down = True
+    assert cache.get_many("m@4", ["h1"]) == {}
+    cache.put_many("m@4", {"h3": vector})
+    gateway = FakeGateway()
+    assert _cached(tmp_path, gateway, cache).get_query_embedding("q") == _f32(gateway.vector("q"))
+
+
+def test_make_embedding_cache_by_scheme(tmp_path: Path) -> None:
+    sqlite_cache = make_embedding_cache(f"sqlite://{tmp_path.as_posix()}/x/l0.sqlite3")
+    assert isinstance(sqlite_cache, SqliteEmbeddingCache)
+    assert (tmp_path / "x" / "l0.sqlite3").exists()
+    sqlite_cache.close()
+    assert isinstance(make_embedding_cache("memory://"), InMemoryEmbeddingCache)
+
+    # Connecting is lazy: building the Redis cache opens no connection.
+    redis_cache = make_embedding_cache("redis://127.0.0.1:1/0", ttl_s=5, redis_timeout_s=0.1)
+    assert isinstance(redis_cache, RedisEmbeddingCache)
+    assert redis_cache.ttl_s == 5
+    kwargs = redis_cache.client.connection_pool.connection_kwargs
+    assert kwargs["socket_timeout"] == 0.1
+    assert kwargs["socket_connect_timeout"] == 0.1
+
+    with pytest.raises(NotImplementedError, match="postgres"):
+        make_embedding_cache("postgres://db/x")
