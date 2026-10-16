@@ -16,12 +16,23 @@ def test_redis_is_an_lru_cache(redis_client: Redis) -> None:
     assert config["maxmemory-policy"] == "allkeys-lru"
 
 
-def test_data_generation_counter(redis_client: Redis, redis_key_prefix: str) -> None:
+def _server_ms(redis_client: Redis) -> int:
+    seconds, microseconds = redis_client.time()
+    return seconds * 1000 + microseconds // 1000
+
+
+def test_data_generation_counter(
+    redis_client: Redis, redis_key_prefix: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     prefix = f"{redis_key_prefix}data_generation:"
-    started_ms = time.time_ns() // 1_000_000
+    # The seed must come from the Redis server clock, the one clock all processes share;
+    # a client whose clock is far behind must not be able to move the counter back.
+    monkeypatch.setattr(time, "time_ns", lambda: 0)
+    monkeypatch.setattr(time, "time", lambda: 0.0)
+    started_ms = _server_ms(redis_client)
 
     first = get_data_generation(redis_client, "hf_docs", key_prefix=prefix)
-    # A missing counter starts at the current time in ms, so it is above every earlier value.
+    # A missing counter starts at the server time in ms, so it is above every earlier value.
     assert first >= started_ms
     assert get_data_generation(redis_client, "hf_docs", key_prefix=prefix) == first
     assert incr_data_generation(redis_client, "hf_docs", key_prefix=prefix) == first + 1
