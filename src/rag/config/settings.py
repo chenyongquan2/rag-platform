@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from typing import Any, Self
+from typing import Any, Literal, Self
 from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _MASK = "***"
@@ -49,6 +49,25 @@ def mask_url(value: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
 
 
+class ModelPrice(BaseModel):
+    """Price of one model in CNY per million tokens (spec P0-05)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    input_cny_per_m: float = Field(ge=0)
+    output_cny_per_m: float = Field(default=0.0, ge=0)
+
+
+def _default_model_prices() -> dict[str, ModelPrice]:
+    return {
+        # Design s20-2: text-embedding-v4 costs 0.5 CNY per million tokens.
+        "qwen/text-embedding-v4": ModelPrice(input_cny_per_m=0.5),
+        # The gateway lists no prices. Deliberately high estimates until P1-01 checks the bill:
+        # the budget check then stops early rather than late. See docs/decisions.md.
+        "deepseek-v4-flash": ModelPrice(input_cny_per_m=2.0, output_cny_per_m=8.0),
+    }
+
+
 class ServiceSettings(BaseSettings):
     """Process-wide settings. Env var names are the upper-case field names (no prefix).
 
@@ -86,6 +105,26 @@ class ServiceSettings(BaseSettings):
     embed_dim: int = Field(default=1024, gt=0)
     reranker_model: str = "BAAI/bge-reranker-base"
 
+    # Embedding client (spec P0-05, design s7-4, s16-2, s17-1). Ingest and query share model,
+    # dims, prefix and batch size; only timeout, retries and backoff differ by profile.
+    # `fake` switches both profiles to FakeEmbedding (gateway down or budget used up).
+    embed_backend: Literal["gateway", "fake"] = "gateway"
+    embed_text_prefix: str = ""
+    embed_batch_size: int = Field(default=10, gt=0, le=2048)
+    embed_ingest_timeout_s: float = Field(default=60.0, gt=0)
+    embed_ingest_max_retries: int = Field(default=4, ge=0)
+    embed_ingest_backoff_s: float = Field(default=2.0, ge=0)
+    embed_query_timeout_s: float = Field(default=3.0, gt=0)
+    embed_query_max_retries: int = Field(default=1, ge=0, le=1)
+    embed_query_backoff_s: float = Field(default=0.2, ge=0)
+    embed_backoff_max_s: float = Field(default=30.0, ge=0)
+    # L0 embedding cache (design s12-1): `sqlite://<path>` or `memory://` for ingest;
+    # `redis://...` or `memory://` for query, empty = the shared cache Redis `redis_url`.
+    embed_ingest_cache_url: str = "sqlite://data/cache/embeddings.sqlite3"
+    embed_query_cache_url: str = ""
+    embed_cache_ttl_s: int = Field(default=30 * 24 * 3600, gt=0)
+    embed_cache_redis_timeout_s: float = Field(default=0.5, gt=0)
+
     # Hugging Face data (spec P0-03). huggingface.co is blocked here; the mirror serves the same
     # `/datasets/<repo>/resolve/<revision>/<path>` URLs. `HF_ENDPOINT` is also what huggingface_hub
     # reads. Point `HF_DATA_DIR` at one shared directory so several checkouts reuse one download.
@@ -97,6 +136,7 @@ class ServiceSettings(BaseSettings):
     budget_cny: float = Field(default=30.0, ge=0)
     budget_stop_cny: float = Field(default=28.0, ge=0)
     cost_ledger_path: str = "data/cost/ledger.jsonl"
+    model_prices: dict[str, ModelPrice] = Field(default_factory=_default_model_prices)
 
     @model_validator(mode="after")
     def _stop_within_budget(self) -> Self:

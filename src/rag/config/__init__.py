@@ -14,7 +14,7 @@ from rag.config.kb import (
     load_kb_configs,
 )
 from rag.config.paths import REPO_ROOT, repo_path
-from rag.config.settings import ServiceSettings
+from rag.config.settings import ModelPrice, ServiceSettings
 
 __all__ = [
     "REPO_ROOT",
@@ -23,6 +23,7 @@ __all__ = [
     "EvalConfig",
     "KnowledgeBaseConfig",
     "MetadataConfig",
+    "ModelPrice",
     "PipelineConfig",
     "RetrievalConfig",
     "ServiceSettings",
