@@ -16,3 +16,4 @@ data/docstore/
 data/checkpoints/
 data/locks/
 data/otel/
+data/cost/*.lock
