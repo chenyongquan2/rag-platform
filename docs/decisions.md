@@ -34,6 +34,7 @@ llama-index-core 0.14.25、langchain 1.4.5、langgraph 1.2.15、mcp 2.3.0、docl
 
 ### 2026-10-17 P0-01：只有 kb/public/ 下的知识库默认对所有调用方开放
 评审指出：`access.callers` 默认 `["*"]` 的话，私有知识库的配置只要漏写 `access`，所有调用方都能查到。现在的规则：
+- 判断是不是公开知识库，只看配置文件相对 kb 根目录的路径是否以 `public/` 开头；`kb/private/public/x.yaml` 算私有。
 - `kb/public/` 下的配置没写 `access` 时，`callers` 取 `["*"]`，所有已认证的调用方都能用。公开知识库仍然只写数据源就能用，符合设计 5.1。
 - 其他目录（比如 `kb/private/`）下的配置没写 `access` 时，`load_kb_config` 直接报错，错误信息里写明要设置 `access.callers`。
 - 在代码里直接构造 `KnowledgeBaseConfig` 而不给 `access` 时，`callers` 是空列表，谁都不能访问。
