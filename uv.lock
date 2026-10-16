@@ -2224,6 +2224,7 @@ dependencies = [
     { name = "elasticsearch", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "filelock", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "httpx", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "huggingface-hub", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "langchain", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "langchain-openai", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "langgraph", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -2242,6 +2243,7 @@ dependencies = [
     { name = "redis", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "scipy", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "sentence-transformers", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "tokenizers", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "torch", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "torchvision", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
@@ -2259,6 +2261,7 @@ requires-dist = [
     { name = "elasticsearch", specifier = ">=9,<10" },
     { name = "filelock", specifier = ">=3.12" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "huggingface-hub", specifier = ">=0.34" },
     { name = "langchain", specifier = "==1.4.5" },
     { name = "langchain-openai", specifier = ">=1.1" },
     { name = "langgraph", specifier = "==1.2.15" },
@@ -2277,6 +2280,7 @@ requires-dist = [
     { name = "redis", specifier = ">=5" },
     { name = "scipy", specifier = ">=1.13" },
     { name = "sentence-transformers", specifier = ">=5" },
+    { name = "tokenizers", specifier = ">=0.20" },
     { name = "torch", specifier = ">=2.6", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torchvision", specifier = ">=0.21", index = "https://download.pytorch.org/whl/cpu" },
 ]

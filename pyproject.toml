@@ -26,6 +26,10 @@ dependencies = [
     "torch>=2.6",
     "numpy>=2",
     "scipy>=1.13",
+    # Reranker tokenizer for chunk sizes, read from the local HF cache (already installed with
+    # sentence-transformers; imported directly by rag.ingest.tokens).
+    "tokenizers>=0.20",
+    "huggingface-hub>=0.34",
     # Document conversion (PDF etc.).
     "docling>=2.50",
     "torchvision>=0.21",
