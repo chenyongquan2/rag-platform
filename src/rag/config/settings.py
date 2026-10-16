@@ -120,6 +120,8 @@ class ServiceSettings(BaseSettings):
     embed_query_max_retries: int = Field(default=1, ge=0, le=1)
     embed_query_backoff_s: float = Field(default=0.2, ge=0)
     embed_backoff_max_s: float = Field(default=30.0, ge=0)
+    # Requests in flight per client: IngestionPipeline.arun starts every batch at once.
+    embed_max_concurrency: int = Field(default=4, ge=1)
     # L0 embedding cache (design s12-1): `sqlite://<path>` or `memory://` for ingest;
     # `redis://...` or `memory://` for query, empty = the shared cache Redis `redis_url`.
     embed_ingest_cache_url: str = "sqlite://data/cache/embeddings.sqlite3"

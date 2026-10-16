@@ -1,8 +1,14 @@
 """Append-only cost ledger of real model calls and the budget check (spec P0-05).
 
-One JSON object per line in `data/cost/ledger.jsonl`: time (UTC), kind (`embedding`, `chat`),
-model, prompt/completion/total tokens from the response's `usage`, and the cost in CNY from the
-price table in the service settings. Callers add their own fields (profile, number of inputs).
+One JSON object per line in the ledger file (`cost_ledger_path`, by default one file shared by
+every checkout): time (UTC), kind (`embedding`, `chat`), model, prompt/completion/total tokens
+from the response's `usage`, and the cost in CNY from the price table in the service settings.
+Callers add their own fields (profile, number of inputs).
+
+Requests in flight hold a reservation of their estimated cost (`reserve`), so concurrent
+requests in one process cannot together pass the stop. Other processes do not see these
+reservations; with a shared ledger they can overshoot the stop by at most what they have in
+flight at that moment.
 """
 
 from __future__ import annotations
@@ -10,7 +16,8 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +30,11 @@ from rag.config import ModelPrice, ServiceSettings
 logger = logging.getLogger(__name__)
 
 _PER_MILLION = 1_000_000
+
+# Estimated cost of requests in flight, per resolved ledger path, shared by every CostLedger
+# object of this process that writes the same file.
+_RESERVED: dict[str, float] = {}
+_RESERVED_LOCK = threading.Lock()
 
 
 class BudgetExceeded(RuntimeError):  # noqa: N818 - the name the spec and plan use
@@ -145,16 +157,51 @@ class CostLedger:
     def total_spent(self) -> float:
         return sum(float(row.get("cny") or 0.0) for row in self.entries())
 
+    def reserved(self) -> float:
+        """Estimated cost of this process's requests in flight against this ledger file."""
+        with _RESERVED_LOCK:
+            return _RESERVED.get(self._key(), 0.0)
+
     def check_budget(self, estimated_cny: float) -> float:
-        """Return the amount spent so far; raise `BudgetExceeded` if the job would pass the stop."""
+        """Return the amount spent so far; raise `BudgetExceeded` if spent + reserved +
+        `estimated_cny` would pass the stop."""
         spent = self.total_spent()
-        if spent + estimated_cny > self.budget_stop_cny:
-            raise BudgetExceeded(
-                f"budget stop: spent {spent:.6f} CNY + estimated {estimated_cny:.6f} CNY > "
-                f"stop {self.budget_stop_cny:.2f} CNY (ledger {self.path}); switch to the fake "
-                "models (EMBED_BACKEND=fake) and leave the real run for the owner"
-            )
+        self._raise_if_over(spent, self.reserved(), estimated_cny)
         return spent
+
+    @contextmanager
+    def reserve(self, estimated_cny: float) -> Iterator[None]:
+        """Hold `estimated_cny` against the stop while a request is in flight.
+
+        The check and the reservation happen under one lock, so two threads cannot both pass a
+        check that only one of them fits into. Record the call's real cost before leaving.
+        """
+        key = self._key()
+        with _RESERVED_LOCK:
+            held = _RESERVED.get(key, 0.0)
+            self._raise_if_over(self.total_spent(), held, estimated_cny)
+            _RESERVED[key] = held + estimated_cny
+        try:
+            yield
+        finally:
+            with _RESERVED_LOCK:
+                left = _RESERVED.get(key, 0.0) - estimated_cny
+                if left > 1e-12:
+                    _RESERVED[key] = left
+                else:
+                    _RESERVED.pop(key, None)
+
+    def _raise_if_over(self, spent: float, reserved: float, estimated_cny: float) -> None:
+        if spent + reserved + estimated_cny > self.budget_stop_cny:
+            raise BudgetExceeded(
+                f"budget stop: spent {spent:.6f} CNY + reserved {reserved:.6f} CNY + "
+                f"estimated {estimated_cny:.6f} CNY > stop {self.budget_stop_cny:.2f} CNY "
+                f"(ledger {self.path}); switch to the fake models (EMBED_BACKEND=fake) and "
+                "leave the real run for the owner"
+            )
+
+    def _key(self) -> str:
+        return str(self.path.resolve())
 
     def summary(self) -> LedgerSummary:
         rows = self.entries()

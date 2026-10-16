@@ -104,6 +104,21 @@ def test_check_budget_raises_over_stop(tmp_path: Path) -> None:
         check_budget(0.3, settings)
 
 
+def test_reserve_counts_in_flight_spend(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path, stop=1.0)
+    other = CostLedger(ledger.path, prices=PRICES, budget_stop_cny=1.0)  # same file, same process
+
+    with ledger.reserve(0.6):
+        assert other.reserved() == pytest.approx(0.6)
+        with pytest.raises(BudgetExceeded, match="reserved"):
+            other.check_budget(0.5)
+        with pytest.raises(BudgetExceeded), other.reserve(0.5):
+            pass
+        assert other.reserved() == pytest.approx(0.6)  # the refused reservation was not kept
+    assert ledger.reserved() == 0.0
+    assert other.check_budget(0.5) == 0.0
+
+
 def test_cli_summary_prints_totals(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     ledger = _ledger(tmp_path)
     ledger.record(kind="embedding", model="emb", prompt_tokens=1_000_000, profile="ingest")

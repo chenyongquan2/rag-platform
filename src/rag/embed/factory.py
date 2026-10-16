@@ -70,6 +70,7 @@ def make_embedding(
         max_retries=max_retries,
         backoff_s=backoff_s,
         backoff_max_s=settings.embed_backoff_max_s,
+        max_concurrency=settings.embed_max_concurrency,
         api_key=settings.embed_api_key.get_secret_value(),
         ledger=ledger or CostLedger.from_settings(settings),
         transport=transport,

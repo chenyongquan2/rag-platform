@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -66,6 +68,7 @@ def test_embed_settings_defaults_and_limits(monkeypatch: pytest.MonkeyPatch) -> 
     assert s.embed_ingest_max_retries > s.embed_query_max_retries
     assert s.embed_ingest_cache_url.startswith("sqlite://")
     assert s.embed_query_cache_url == ""  # empty = the cache Redis in redis_url
+    assert s.embed_max_concurrency == 4
 
     monkeypatch.setenv("EMBED_BACKEND", "fake")
     monkeypatch.setenv("EMBED_BATCH_SIZE", "5")
@@ -150,6 +153,7 @@ def _client(
     model: str = "m",
     ledger: CostLedger | None = None,
     sleeps: list[float] | None = None,
+    concurrency: int = 4,
 ) -> GatewayEmbedding:
     return GatewayEmbedding(
         model_name=model,
@@ -162,11 +166,34 @@ def _client(
         max_retries=retries,
         backoff_s=1.0,
         backoff_max_s=8.0,
+        max_concurrency=concurrency,
         profile="ingest",
         ledger=ledger or _ledger(tmp_path),
         transport=httpx.MockTransport(gateway),
         sleep=(sleeps.append if sleeps is not None else lambda _s: None),
     )
+
+
+class SlowGateway(FakeGateway):
+    """A gateway that takes `delay` seconds per request and counts requests in flight."""
+
+    def __init__(self, delay: float, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.delay = delay
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self._count_lock = threading.Lock()
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        with self._count_lock:
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            time.sleep(self.delay)
+            return super().__call__(request)
+        finally:
+            with self._count_lock:
+                self.in_flight -= 1
 
 
 TEXTS = [f"text number {i}" for i in range(7)]
@@ -583,3 +610,45 @@ def test_works_in_ingestion_pipeline(tmp_path: Path) -> None:
     out = asyncio.run(pipeline.arun(nodes=more))
     assert [n.embedding for n in out] == [_f32(gateway.vector(f"chunk {i + 3}")) for i in range(4)]
     assert sorted(t for batch in gateway.inputs[3:] for t in batch) == ["chunk 5", "chunk 6"]
+
+
+def test_concurrent_requests_are_limited(tmp_path: Path) -> None:
+    gateway = SlowGateway(delay=0.05, dim=1024)
+    settings = _settings(
+        tmp_path, embed_batch_size=1, embed_max_concurrency=2, embed_ingest_cache_url="memory://"
+    )
+    emb = make_embedding("ingest", settings, transport=httpx.MockTransport(gateway))
+    assert isinstance(emb, CachedEmbedding)
+    assert emb.inner.max_concurrency == 2
+
+    # IngestionPipeline.arun starts every batch at once; the client lets two through at a time.
+    nodes = [TextNode(id_=f"n{i}", text=f"chunk {i}") for i in range(8)]
+    out = asyncio.run(IngestionPipeline(transformations=[emb]).arun(nodes=nodes))
+    assert [n.embedding for n in out] == [_f32(gateway.vector(f"chunk {i}")) for i in range(8)]
+    assert len(gateway.requests) == 8
+    assert gateway.max_in_flight == 2
+
+
+def test_budget_reservation_is_atomic_across_threads(tmp_path: Path) -> None:
+    # Each request is estimated at about 1,001 tokens = 0.0005 CNY; the stop allows two at once.
+    gateway = SlowGateway(delay=0.3)
+    client = _client(tmp_path, gateway, ledger=_ledger(tmp_path, stop=0.0012), concurrency=4)
+    barrier = threading.Barrier(4)
+    results: list[str] = []
+
+    def work(i: int) -> None:
+        barrier.wait()
+        try:
+            client.get_text_embedding("x" * 1_000 + str(i))
+            results.append("sent")
+        except BudgetExceeded:
+            results.append("refused")
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(results) == ["refused", "refused", "sent", "sent"]
+    assert len(gateway.requests) == 2

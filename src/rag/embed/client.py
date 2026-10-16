@@ -7,15 +7,18 @@ model, dimensions and text prefix; the profiles differ only in timeout and retri
 - At most `embed_batch_size` texts per request; vectors come back in input order.
 - Timeouts, connection errors, 408, 429 and 5xx are retried with exponential backoff
   (`Retry-After` wins when the gateway sends it); other errors fail at once.
-- Before each request the cost ledger is checked (`BudgetExceeded` stops the request); every
-  2xx answer appends one ledger line with the tokens from `usage` (estimated from the number of
-  characters when the answer has no usage).
+- At most `max_concurrency` requests are in flight per client, also when
+  `IngestionPipeline.arun` starts every batch at once.
+- Each request first reserves its estimated cost in the cost ledger (`BudgetExceeded` stops it
+  before it is sent); every 2xx answer appends one ledger line with the tokens from `usage`
+  (estimated from the number of characters when the answer has no usage).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
@@ -79,8 +82,10 @@ class GatewayEmbedding(BaseEmbedding):
     max_retries: int = Field(ge=0)
     backoff_s: float = Field(ge=0)
     backoff_max_s: float = Field(ge=0)
+    max_concurrency: int = Field(default=4, ge=1)
 
     _ledger: CostLedger = PrivateAttr()
+    _slots: threading.BoundedSemaphore = PrivateAttr()
     _http: httpx.Client = PrivateAttr()
     _sleep: Callable[[float], None] = PrivateAttr()
 
@@ -101,6 +106,7 @@ class GatewayEmbedding(BaseEmbedding):
         ledger.price(self.model_name)  # no price -> fail now, before any money is spent
         self._ledger = ledger
         self._sleep = sleep
+        self._slots = threading.BoundedSemaphore(self.max_concurrency)
         self._http = httpx.Client(
             base_url=self.base_url.rstrip("/") + "/",
             headers={"Authorization": f"Bearer {api_key}"},
@@ -150,7 +156,12 @@ class GatewayEmbedding(BaseEmbedding):
         inputs = [self.text_prefix + t for t in texts]
         # About one token per character or fewer for English and Chinese: an upper bound.
         estimated_tokens = sum(len(t) for t in inputs)
-        self._ledger.check_budget(self._ledger.estimate(self.model_name, estimated_tokens))
+        estimated_cny = self._ledger.estimate(self.model_name, estimated_tokens)
+        # Wait for a free slot first, then reserve: only requests about to be sent hold money.
+        with self._slots, self._ledger.reserve(estimated_cny):
+            return self._send(inputs, estimated_tokens)
+
+    def _send(self, inputs: list[str], estimated_tokens: int) -> list[Embedding]:
         body = {
             "model": self.model_name,
             "input": inputs,
