@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
 
 if TYPE_CHECKING:
     from redis import Redis
+    from redis.commands.core import Script
 
 DEFAULT_KEY_PREFIX = "rag:data_generation:"
 _KB_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
@@ -44,8 +46,14 @@ def _key(kb: str, key_prefix: str) -> str:
     return f"{key_prefix}{kb}"
 
 
+# One registered script per client (it runs by SHA and reloads itself after a Redis restart).
+_scripts: WeakKeyDictionary[Redis, Script] = WeakKeyDictionary()
+
+
 def _run(client: Redis, kb: str, key_prefix: str, op: str) -> int:
-    script = client.register_script(_SCRIPT)
+    script = _scripts.get(client)
+    if script is None:
+        script = _scripts[client] = client.register_script(_SCRIPT)
     return int(script(keys=[_key(kb, key_prefix)], args=[op]))
 
 
