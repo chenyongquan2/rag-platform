@@ -36,6 +36,8 @@ dependencies = [
     "openinference-instrumentation-langchain>=0.1.50",
     # Data files (Hugging Face datasets are parquet).
     "pyarrow>=18",
+    # HTTP client of the embedding gateway client (already installed through openai/langchain).
+    "httpx>=0.27",
 ]
 
 [dependency-groups]
