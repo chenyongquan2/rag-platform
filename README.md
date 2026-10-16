@@ -13,7 +13,7 @@ uv sync                          # create .venv from uv.lock (CPU-only torch)
 cp .env.example .env             # fill in gateway URLs and keys; .env is git-ignored
 uv run pre-commit install        # ruff, ruff format, unit tests, gitleaks on every commit
 uv run pytest                    # unit tests only (default)
-uv run pytest -m integration     # needs `docker compose up -d` (Elasticsearch, Redis)
+uv run pytest -m integration     # needs scripts/dev_up.sh (Elasticsearch, Redis, Collector, Jaeger)
 uv run pytest -m llm             # calls the real model gateway and costs money; only when a spec says so
 uv run pre-commit run --all-files
 ```
@@ -22,3 +22,27 @@ Test markers: `unit` (default; added to unmarked tests; no network, no Docker), 
 (local Docker services), `llm` (real model calls). The default run excludes `integration` and `llm`.
 Unit tests use `rag.testing.FakeEmbedding` and `FakeChatModel`; LlamaIndex `Settings.llm` is a stub
 that raises when called. The gitleaks hook is built from source and needs a Go toolchain on `PATH`.
+
+## Local services
+
+`docker-compose.yml` runs the infrastructure; the Python app runs on the host.
+
+```bash
+scripts/dev_up.sh                                   # docker compose up -d, then wait until healthy
+uv run python -m rag.index.cli init --kb hf_docs    # create kb_hf_docs_v1 and the kb_hf_docs alias
+uv run python -m rag.index.cli status --kb hf_docs  # alias, versions, document counts, data generation
+docker compose down                                 # stop (Elasticsearch data stays in the es-data volume)
+```
+
+| Service | Image | Host address |
+|---|---|---|
+| Elasticsearch (single node, Basic, 2 GB heap) | `docker.elastic.co/elasticsearch/elasticsearch:9.5.5` | `http://127.0.0.1:29200` |
+| Redis cache (allkeys-lru, 256 MB, no persistence) | `redis:8.10.2-alpine` | `redis://127.0.0.1:26379/0` |
+| OTel Collector (OTLP in; traces to Jaeger and `data/otel/traces.jsonl`) | `otel/opentelemetry-collector-contrib:0.162.0` | gRPC `127.0.0.1:24317`, HTTP `127.0.0.1:24318` |
+| Jaeger (all-in-one, in-memory) | `jaegertracing/jaeger:2.22.0` | UI `http://127.0.0.1:36686` |
+
+Host ports are the standard port + 20000 and bound to 127.0.0.1 only. **Elasticsearch security is
+disabled** (no TLS, no password) for local development; never expose this setup beyond the machine.
+Connection defaults in `ServiceSettings` match these ports; override with `ES_URL`, `REDIS_URL`,
+`OTLP_ENDPOINT`. Integration tests skip with a message when a service is not reachable, and use
+`test<run>_`-prefixed indices and Redis keys that they delete afterwards.
