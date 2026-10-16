@@ -196,8 +196,8 @@ class CostLedger:
             raise BudgetExceeded(
                 f"budget stop: spent {spent:.6f} CNY + reserved {reserved:.6f} CNY + "
                 f"estimated {estimated_cny:.6f} CNY > stop {self.budget_stop_cny:.2f} CNY "
-                f"(ledger {self.path}); switch to the fake models (EMBED_BACKEND=fake) and "
-                "leave the real run for the owner"
+                f"(ledger {self.path}); switch to the fake models (EMBED_BACKEND=fake, "
+                "CHAT_BACKEND=fake) and leave the real run for the owner"
             )
 
     def _key(self) -> str:

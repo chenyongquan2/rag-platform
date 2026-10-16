@@ -69,10 +69,12 @@ class FakeChatModel(BaseChatModel):
       script can carry `tool_calls` for `with_structured_output(..., method="function_calling")`.
     - Every call's input messages are recorded in `calls`.
     - When the script is exhausted the model raises instead of cycling, so a test that makes an
-      unexpected extra model call fails.
+      unexpected extra model call fails; with `default_response` set it answers that instead
+      (the `CHAT_BACKEND=fake` fallback, spec P1-01).
     """
 
     responses: list[str | AIMessage] = Field(default_factory=list)
+    default_response: str | AIMessage | None = None
     _cursor: int = PrivateAttr(default=0)
     _calls: list[list[BaseMessage]] = PrivateAttr(default_factory=list)
 
@@ -92,13 +94,16 @@ class FakeChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         self._calls.append(list(messages))
-        if self._cursor >= len(self.responses):
+        if self._cursor < len(self.responses):
+            scripted = self.responses[self._cursor]
+            self._cursor += 1
+        elif self.default_response is not None:
+            scripted = self.default_response
+        else:
             raise AssertionError(
                 f"FakeChatModel script exhausted: call {len(self._calls)} but only "
                 f"{len(self.responses)} scripted responses"
             )
-        scripted = self.responses[self._cursor]
-        self._cursor += 1
         message = scripted if isinstance(scripted, AIMessage) else AIMessage(content=scripted)
         return ChatResult(generations=[ChatGeneration(message=message)])
 

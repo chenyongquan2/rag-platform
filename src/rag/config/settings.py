@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from rag.config.paths import shared_data_dir
@@ -58,16 +66,57 @@ class ModelPrice(BaseModel):
 
     input_cny_per_m: float = Field(ge=0)
     output_cny_per_m: float = Field(default=0.0, ge=0)
+    # True when the price is a guess, not checked against the gateway's bill (spec P1-01).
+    estimated: bool = False
 
 
 def _default_model_prices() -> dict[str, ModelPrice]:
     return {
         # Design s20-2: text-embedding-v4 costs 0.5 CNY per million tokens.
         "qwen/text-embedding-v4": ModelPrice(input_cny_per_m=0.5),
-        # The gateway lists no prices. Deliberately high estimates until P1-01 checks the bill:
+        # The gateway lists no prices and shows no bill per call. Deliberately high estimates:
         # the budget check then stops early rather than late. See docs/decisions.md.
-        "deepseek-v4-flash": ModelPrice(input_cny_per_m=2.0, output_cny_per_m=8.0),
+        "deepseek-v4-flash": ModelPrice(input_cny_per_m=2.0, output_cny_per_m=8.0, estimated=True),
     }
+
+
+class ChatProfile(BaseModel):
+    """One use of the chat model (design s11-1, s16-2): which model, how long to wait, how often
+    to retry and how many output tokens to allow (spec P1-01).
+
+    `max_tokens` caps reasoning and answer tokens together (the default model is a reasoning
+    model), so it must leave room for the reasoning. `retry_after_max_s` is the longest
+    `Retry-After` the profile waits for; a longer one ends the call without a retry.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    model: str = ""  # empty: `chat_model`
+    timeout_s: float = Field(gt=0)
+    max_retries: int = Field(ge=0)
+    max_tokens: int = Field(gt=0)
+    temperature: float | None = Field(default=0.0, ge=0, le=2)
+    retry_after_max_s: float = Field(ge=0)
+
+
+ChatProfileName = Literal["online", "offline", "cheap"]
+
+# online: answering a user (short timeout, 1 retry); offline: question generation and judging
+# (long timeout, more retries); cheap: rewrite, route, sufficiency checks (short timeout).
+CHAT_PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
+    "online": {"timeout_s": 30.0, "max_retries": 1, "max_tokens": 4096, "retry_after_max_s": 2.0},
+    "offline": {
+        "timeout_s": 180.0,
+        "max_retries": 4,
+        "max_tokens": 8192,
+        "retry_after_max_s": 60.0,
+    },
+    "cheap": {"timeout_s": 20.0, "max_retries": 1, "max_tokens": 2048, "retry_after_max_s": 2.0},
+}
+
+
+def _chat_profile_default(name: str) -> ChatProfile:
+    return ChatProfile(**CHAT_PROFILE_DEFAULTS[name])
 
 
 class ServiceSettings(BaseSettings):
@@ -134,6 +183,19 @@ class ServiceSettings(BaseSettings):
     embed_cache_ttl_s: int = Field(default=30 * 24 * 3600, gt=0)
     embed_cache_redis_timeout_s: float = Field(default=0.5, gt=0)
 
+    # Chat models (spec P1-01, design s11-1). One profile per use; each is a JSON object in the
+    # env (`CHAT_ONLINE='{"timeout_s": 10}'`), keys left out keep that profile's defaults.
+    # `fake` switches every profile to FakeChatModel answering `chat_fake_reply` (gateway down or
+    # budget used up); it is never switched automatically.
+    chat_backend: Literal["gateway", "fake"] = "gateway"
+    chat_fake_reply: str = "[fake chat model] no answer"
+    chat_structured_output_method: Literal["function_calling", "json_schema", "json_mode"] = (
+        "function_calling"
+    )
+    chat_online: ChatProfile = Field(default_factory=lambda: _chat_profile_default("online"))
+    chat_offline: ChatProfile = Field(default_factory=lambda: _chat_profile_default("offline"))
+    chat_cheap: ChatProfile = Field(default_factory=lambda: _chat_profile_default("cheap"))
+
     # Hugging Face data (spec P0-03). huggingface.co is blocked here; the mirror serves the same
     # `/datasets/<repo>/resolve/<revision>/<path>` URLs. `HF_ENDPOINT` is also what huggingface_hub
     # reads. Point `HF_DATA_DIR` at one shared directory so several checkouts reuse one download.
@@ -149,6 +211,15 @@ class ServiceSettings(BaseSettings):
         default_factory=lambda: (shared_data_dir() / "cost" / "ledger.jsonl").as_posix()
     )
     model_prices: dict[str, ModelPrice] = Field(default_factory=_default_model_prices)
+
+    @field_validator("chat_online", "chat_offline", "chat_cheap", mode="before")
+    @classmethod
+    def _merge_chat_profile_defaults(cls, value: Any, info: ValidationInfo) -> Any:
+        """A partial profile (from env JSON or code) keeps that profile's other defaults."""
+        if isinstance(value, Mapping):
+            name = (info.field_name or "").removeprefix("chat_")
+            return {**CHAT_PROFILE_DEFAULTS[name], **value}
+        return value
 
     @model_validator(mode="after")
     def _stop_within_budget(self) -> Self:

@@ -18,6 +18,11 @@ class ErrorCategory(StrEnum):
     DEGRADED = "degraded"
     RERANK_TIMEOUT = "rerank_timeout"
     ANSWER_PARSE_FAILED = "answer_parse_failed"
+    # Chat model calls (spec P1-01); `rag.llm.chat_error_category` maps exceptions to these.
+    LLM_TIMEOUT = "llm_timeout"
+    LLM_ERROR = "llm_error"
+    BUDGET_EXCEEDED = "budget_exceeded"
+    STRUCTURED_OUTPUT_FAILED = "structured_output_failed"
 
 
 class AnswerStatus(StrEnum):
