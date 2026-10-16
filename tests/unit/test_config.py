@@ -127,7 +127,8 @@ def test_service_settings_budget_stop_not_above_budget(clean_env: pytest.MonkeyP
 
 
 def test_kb_config_minimal_yaml_uses_defaults(tmp_path: Path) -> None:
-    path = tmp_path / "my_notes.yaml"
+    (tmp_path / "public").mkdir()
+    path = tmp_path / "public" / "my_notes.yaml"
     path.write_text("source: {connector: local_dir, path: data/notes}\n", "utf-8")
 
     cfg = load_kb_config(path)
@@ -154,7 +155,21 @@ def test_kb_config_minimal_yaml_uses_defaults(tmp_path: Path) -> None:
     assert cfg.retrieval.final_k == 8
     assert cfg.retrieval.threshold == 0.3
     assert cfg.eval.dir == "evals/datasets/my_notes"
-    assert cfg.access.callers == ["*"]
+    assert cfg.access.callers == ["*"]  # public config: every caller
+
+
+def test_kb_config_access_must_be_explicit_outside_public(tmp_path: Path) -> None:
+    (tmp_path / "private").mkdir()
+    path = tmp_path / "private" / "mt5.yaml"
+    path.write_text("source: {connector: local_dir, path: data/mt5}\n", "utf-8")
+    with pytest.raises(ValueError, match=r"access\.callers"):
+        load_kb_config(path)
+
+    path.write_text("access: {callers: [oncall-agent]}\n", "utf-8")
+    assert load_kb_config(path).access.callers == ["oncall-agent"]
+
+    # Built in code without `access`: nobody may use it.
+    assert KnowledgeBaseConfig().access.callers == []
 
 
 def test_kb_config_hf_docs_example() -> None:
@@ -185,11 +200,14 @@ def test_load_kb_configs_rejects_duplicate_names(tmp_path: Path) -> None:
     (tmp_path / "public").mkdir()
     (tmp_path / "private").mkdir()
     (tmp_path / "public" / "a.yaml").write_text("kb: same\n", "utf-8")
-    (tmp_path / "private" / "b.yaml").write_text("kb: other\n", "utf-8")
+    private = "access: {callers: [oncall-agent]}\n"
+    (tmp_path / "private" / "b.yaml").write_text("kb: other\n" + private, "utf-8")
 
     loaded = load_kb_configs(tmp_path)
     assert sorted(loaded) == ["other", "same"]
+    assert loaded["same"].access.callers == ["*"]
+    assert loaded["other"].access.callers == ["oncall-agent"]
 
-    (tmp_path / "private" / "c.yaml").write_text("kb: same\n", "utf-8")
+    (tmp_path / "private" / "c.yaml").write_text("kb: same\n" + private, "utf-8")
     with pytest.raises(ValueError, match="same"):
         load_kb_configs(tmp_path)

@@ -32,8 +32,13 @@ llama-index-core 0.14.25、langchain 1.4.5、langgraph 1.2.15、mcp 2.3.0、docl
 ### 2026-10-17 P0-01：ruff 和单元测试的提交前检查用项目虚拟环境里的版本
 钩子用 `uv run --frozen ruff ...` 和 `uv run --frozen pytest`，版本以 `uv.lock` 为准，不在 `.pre-commit-config.yaml` 里另写一份 ruff 版本，免得两处版本不一致。没有加去行尾空格、补文件末尾换行这类会自动改文件的钩子，因为它们会改到设计文档和 `docs/` 下主人维护的文件。
 
-### 2026-10-17 P0-01：知识库默认所有已认证的调用方都能访问
-`access.callers` 的默认值是 `["*"]`，这样新知识库只写数据源就能用（设计 5.1 的要求）。代价：私有知识库如果忘了写 `access`，所有调用方都能查到。所以私有知识库的配置必须显式写 `callers`；P6 做权限时再决定是否改成默认谁都不能访问。
+### 2026-10-17 P0-01：只有 kb/public/ 下的知识库默认对所有调用方开放
+评审指出：`access.callers` 默认 `["*"]` 的话，私有知识库的配置只要漏写 `access`，所有调用方都能查到。现在的规则：
+- `kb/public/` 下的配置没写 `access` 时，`callers` 取 `["*"]`，所有已认证的调用方都能用。公开知识库仍然只写数据源就能用，符合设计 5.1。
+- 其他目录（比如 `kb/private/`）下的配置没写 `access` 时，`load_kb_config` 直接报错，错误信息里写明要设置 `access.callers`。
+- 在代码里直接构造 `KnowledgeBaseConfig` 而不给 `access` 时，`callers` 是空列表，谁都不能访问。
+
+评审给了两个做法：私有配置漏写时报错，或者默认空列表、谁都不能访问。选报错，原因：默认空列表时知识库照常加载，只是所有调用都查不到内容，主人要排查一阵才知道是漏写了 `access`；报错在服务启动时就把文件名和要补的字段说清楚。
 
 ### 2026-10-17 P0-01：docstore 连接串指向一个目录，每个知识库一个文件
 `DOCSTORE_URL=file://data/docstore`，`make_docstore(url, kb)` 读写 `data/docstore/<kb>.json`。一个连接串给所有知识库用；以后换成 Postgres 时，知识库名就是 LlamaIndex docstore 的 namespace。`file://` 和 `sqlite://` 后面的整段就是文件路径，相对路径从工作目录算起，不用 SQLAlchemy 那种三个斜杠、四个斜杠区分相对和绝对路径的写法，Windows 路径（`file://C:/...`）也能直接写。

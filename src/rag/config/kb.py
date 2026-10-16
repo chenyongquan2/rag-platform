@@ -118,9 +118,13 @@ class EvalConfig(_Strict):
 
 
 class AccessConfig(_Strict):
-    """Callers allowed to use this knowledge base; `*` means every authenticated caller."""
+    """Callers allowed to use this knowledge base; `*` means every authenticated caller.
 
-    callers: list[str] = Field(default_factory=lambda: ["*"])
+    The model default is empty (nobody). `load_kb_config` gives configs under `kb/public/`
+    `["*"]` and requires every other config to set `access` explicitly.
+    """
+
+    callers: list[str] = Field(default_factory=list)
 
 
 class KnowledgeBaseConfig(_Strict):
@@ -141,13 +145,26 @@ class KnowledgeBaseConfig(_Strict):
         return self
 
 
-def load_kb_config(path: str | Path) -> KnowledgeBaseConfig:
-    """Load one knowledge-base YAML file. `kb` defaults to the file name without extension."""
+def load_kb_config(path: str | Path, *, public: bool | None = None) -> KnowledgeBaseConfig:
+    """Load one knowledge-base YAML file. `kb` defaults to the file name without extension.
+
+    `public` says whether the file is a public knowledge base (default: its directory is named
+    `public`). A public config without `access` is open to every caller; any other config must
+    set `access.callers` explicitly, so a private knowledge base is never open by omission.
+    """
     path = Path(path)
     data = yaml.safe_load(path.read_text("utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError(f"{path}: knowledge-base config must be a mapping")
     data.setdefault("kb", path.stem)
+    if public is None:
+        public = path.parent.name == "public"
+    if "access" not in data:
+        if not public:
+            raise ValueError(
+                f"{path}: knowledge bases outside kb/public/ must set access.callers explicitly"
+            )
+        data["access"] = {"callers": ["*"]}
     return KnowledgeBaseConfig.model_validate(data)
 
 
@@ -158,7 +175,7 @@ def load_kb_configs(kb_dir: str | Path) -> dict[str, KnowledgeBaseConfig]:
     origins: dict[str, Path] = {}
     files = sorted([*kb_dir.rglob("*.yaml"), *kb_dir.rglob("*.yml")])
     for path in files:
-        cfg = load_kb_config(path)
+        cfg = load_kb_config(path, public=path.relative_to(kb_dir).parts[0] == "public")
         if cfg.kb in configs:
             raise ValueError(f"duplicate knowledge base {cfg.kb!r} in {origins[cfg.kb]} and {path}")
         configs[cfg.kb] = cfg
