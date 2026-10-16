@@ -64,3 +64,14 @@ Every real model call appends a line to the cost ledger, by default
 checkout and every worktree, so the budget stop sees all spend. Each request reserves its
 estimated cost first and stops with `BudgetExceeded` once spent + reserved + estimate would pass
 `BUDGET_STOP_CNY`. At most `EMBED_MAX_CONCURRENCY` requests per client are in flight.
+
+## Chat models
+
+`rag.llm.make_chat_model("online" | "offline" | "cheap")` builds every chat model with
+`init_chat_model` against the gateway (`LLM_BASE_URL`, `LLM_API_KEY`). Profiles differ in timeout,
+retries and `max_tokens` (which covers reasoning and answer tokens of the reasoning model); override
+one with JSON, e.g. `CHAT_ONLINE='{"timeout_s": 10}'`. Every HTTP attempt, including the SDK's
+retries, reserves its estimated cost and writes its real usage to the same cost ledger.
+`rag.llm.structured_output(model, Schema)` returns Pydantic objects via `function_calling` (the
+gateway rejects `json_schema`). `CHAT_BACKEND=fake` switches every profile to a `FakeChatModel`
+with a fixed reply; it is never switched automatically.
