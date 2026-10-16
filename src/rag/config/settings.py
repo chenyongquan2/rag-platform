@@ -84,6 +84,13 @@ class ServiceSettings(BaseSettings):
     embed_dim: int = Field(default=1024, gt=0)
     reranker_model: str = "BAAI/bge-reranker-base"
 
+    # Hugging Face data (spec P0-03). huggingface.co is blocked here; the mirror serves the same
+    # `/datasets/<repo>/resolve/<revision>/<path>` URLs. `HF_ENDPOINT` is also what huggingface_hub
+    # reads. Point `HF_DATA_DIR` at one shared directory so several checkouts reuse one download.
+    hf_endpoint: str = "https://hf-mirror.com"
+    hf_data_dir: str = "data/raw/hf"
+    hf_timeout_s: float = Field(default=60.0, gt=0)
+
     # Money: stop real model jobs when spent + estimate would exceed budget_stop_cny.
     budget_cny: float = Field(default=30.0, ge=0)
     budget_stop_cny: float = Field(default=28.0, ge=0)
