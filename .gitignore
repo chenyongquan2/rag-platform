@@ -11,3 +11,7 @@ data/cache/
 kb/private/
 evals/reports/private/
 *.log
+!.env.example
+data/docstore/
+data/checkpoints/
+data/locks/

@@ -2,6 +2,7 @@
 
 Usage: python scripts/design_section.py s7-4 [s9-1 ...]
 """
+
 import html
 import re
 import sys

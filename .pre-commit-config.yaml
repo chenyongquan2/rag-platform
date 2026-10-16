@@ -1,0 +1,48 @@
+# Install once: `uv run pre-commit install`. Run everything: `uv run pre-commit run --all-files`.
+# ruff and pytest run from the project venv (`uv run --frozen`) so their versions come from uv.lock.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: detect-private-key
+
+  # Secret scanning. Built from source with the local Go toolchain (no binary download).
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: forbid-env-files
+        name: forbid .env files (secrets live only in the git-ignored .env)
+        entry: ".env files hold secrets and must never be committed; put key names in .env.example"
+        language: fail
+        files: '(^|/)\.env(\..+)?$'
+        exclude: '(^|/)\.env\.example$'
+
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --frozen ruff check --fix --exit-non-zero-on-fix
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --frozen ruff format
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: pytest-unit
+        name: unit tests (pytest, unit marker only)
+        entry: uv run --frozen pytest -q -x
+        language: system
+        pass_filenames: false
+        types_or: [python, toml, yaml]
