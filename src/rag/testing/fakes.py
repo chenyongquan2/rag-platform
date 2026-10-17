@@ -5,14 +5,17 @@ from __future__ import annotations
 import hashlib
 import math
 import struct
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any, Literal
 
-from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForLLMRun,
+    CallbackManagerForLLMRun,
+)
 from langchain_core.language_models import BaseChatModel, LanguageModelInput
-from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from llama_index.core import Settings
@@ -86,13 +89,8 @@ class FakeChatModel(BaseChatModel):
     def calls(self) -> list[list[BaseMessage]]:
         return self._calls
 
-    def _generate(
-        self,
-        messages: list[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager: CallbackManagerForLLMRun | None = None,
-        **kwargs: Any,
-    ) -> ChatResult:
+    def _next_message(self, messages: list[BaseMessage]) -> AIMessage:
+        """Record the call and return the next scripted reply."""
         self._calls.append(list(messages))
         if self._cursor < len(self.responses):
             scripted = self.responses[self._cursor]
@@ -104,7 +102,16 @@ class FakeChatModel(BaseChatModel):
                 f"FakeChatModel script exhausted: call {len(self._calls)} but only "
                 f"{len(self.responses)} scripted responses"
             )
-        message = scripted if isinstance(scripted, AIMessage) else AIMessage(content=scripted)
+        return scripted if isinstance(scripted, AIMessage) else AIMessage(content=scripted)
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        message = self._next_message(messages)
         return ChatResult(generations=[ChatGeneration(message=message)])
 
     def bind_tools(
@@ -132,6 +139,50 @@ class FakeChatModel(BaseChatModel):
                 f"FakeChatModel only fakes method='function_calling', got {method!r}"
             )
         return super().with_structured_output(schema, include_raw=include_raw, **kwargs)
+
+
+class StreamingFakeChatModel(FakeChatModel):
+    """`FakeChatModel` whose streams (`stream`, `astream`) send each scripted text reply in
+    pieces of `chunk_chars` characters, like a gateway sending tokens (spec P1-02).
+
+    `invoke` still returns the whole reply. Replies with tool calls cannot be streamed: use
+    `FakeChatModel` for structured output.
+    """
+
+    chunk_chars: int = Field(default=5, gt=0)
+
+    def _pieces(self, messages: list[BaseMessage]) -> list[ChatGenerationChunk]:
+        message = self._next_message(messages)
+        if message.tool_calls:
+            raise NotImplementedError("StreamingFakeChatModel does not stream tool calls")
+        content = str(message.content)
+        size = self.chunk_chars
+        texts = [content[i : i + size] for i in range(0, len(content), size)] or [""]
+        return [ChatGenerationChunk(message=AIMessageChunk(content=text)) for text in texts]
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        for chunk in self._pieces(messages):
+            if run_manager is not None:
+                run_manager.on_llm_new_token(chunk.text, chunk=chunk)
+            yield chunk
+
+    async def _astream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        for chunk in self._pieces(messages):
+            if run_manager is not None:
+                await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
+            yield chunk
 
 
 @contextmanager
