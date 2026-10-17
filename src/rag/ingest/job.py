@@ -479,7 +479,10 @@ class IngestJob:
                 unchanged.append(doc.id_)
         deleted = sorted(stored_ids - set(ids))
         indexed = store.indexed_doc_ids()
-        orphans = sorted(indexed - set(ids) - stored_ids)
+        # Never sweep a page the connector listed this run: one that failed to read (with no
+        # stored copy) or was skipped is still in the source and keeps its chunks.
+        listed = {s.doc_id for s in sources}
+        orphans = sorted(indexed - set(ids) - stored_ids - listed)
 
         min_ratio = self.settings.ingest_min_input_ratio
         known = stored_ids | indexed

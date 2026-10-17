@@ -501,3 +501,25 @@ def test_cli_fake_embed_uses_fake_prefix(
     assert f"{DEFAULT_KEY_PREFIX}fake_{KB}" in env.redis.values
     assert env.es.mappings[f"fake_kb_{KB}_v1"]["_meta"]["embed_model"].startswith("fake-embedding")
     assert "fake_kb_t_v1" in capsys.readouterr().out
+
+
+def test_sweep_never_removes_pages_the_connector_listed(tmp_path: Path) -> None:
+    env = Env(
+        tmp_path,
+        make_settings(tmp_path, ingest_max_read_failure_ratio=0.5),
+        KnowledgeBaseConfig.model_validate(KB_YAML),
+    )
+    env.connector.put("a.md", page("A", section("a")))
+    env.connector.put("b.md", page("B", section("b")))
+    env.connector.put("nb.ipynb", page("Notebook", section("nb"), section("nbb")))
+    env.job().run()
+    nb_chunks = {i: env.chunks()[i] for i in env.chunk_ids("nb.ipynb")}
+    assert len(nb_chunks) == 2
+
+    env.docstore_file.unlink()  # no stored copy to fall back on
+    env.connector.put("nb.ipynb", NOTEBOOK_JSON)  # still listed, but fails to read
+    report = env.job().run()
+
+    assert doc_id("nb.ipynb") in report.read_failures
+    assert report.swept == []
+    assert {i: env.chunks()[i] for i in env.chunk_ids("nb.ipynb")} == nb_chunks
