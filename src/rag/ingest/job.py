@@ -18,11 +18,16 @@ One run, in this order (s7-4):
    cost does not fit the budget.
 4. `IngestionPipeline(chunk steps + embedding, docstore, EsVectorStore, UPSERTS_AND_DELETE).run()`
    writes new chunks; then refresh.
-5. `EsVectorStore.finalize()` deletes old chunks, the data generation goes up by one when the index
-   changed, the docstore is saved, a report is written.
+5. `EsVectorStore.finalize()` deletes old chunks (also leftovers of new pages from a failed run),
+   pages in the index that neither the source nor the docstore knows are swept, the data
+   generation goes up by one when the index changed, the docstore is saved, a report is written.
 If anything fails before the docstore is saved, the saved docstore is the previous one and the
 next run does the same work again: chunk ids are fixed, writes overwrite, vectors come from the
-L0 cache. Exit codes: 0 ok, 1 failed (nothing saved), 2 usage error.
+L0 cache. Pages a run starts writing are listed in `<index>.dirty.json` next to the docstore
+until a run succeeds, so the next run processes them again even if their source went back to
+the docstore's version. The docstore records the index's uuid; a docstore of another index (the
+index was recreated) or of an index without chunks is not used. Exit codes: 0 ok, 1 failed
+(nothing saved), 2 usage error.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import threading
 import time
@@ -112,6 +118,24 @@ def embed_model_id(embed: BaseEmbedding) -> str:
         return str(cache_model)
     dim = getattr(embed, "dim", None)
     return f"{embed.model_name}@{dim}" if dim else str(embed.model_name)
+
+
+INDEX_UUID_KEY = "index_uuid"
+"""Docstore meta key: uuid of the Elasticsearch index the docstore describes."""
+
+
+def _read_ids(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    data = json.loads(path.read_text("utf-8"))
+    return {str(i) for i in data}
+
+
+def _write_ids(path: Path, ids: Iterable[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(sorted(ids), ensure_ascii=False), "utf-8")
+    os.replace(tmp, path)
 
 
 def content_hash(text: str) -> str:
@@ -209,6 +233,12 @@ class IngestReport:
     no_pipeline: list[str] = field(default_factory=list)
     skipped_by_cleaning: dict[str, str] = field(default_factory=dict)
     new_index_fields: list[str] = field(default_factory=list)
+    swept: list[str] = field(default_factory=list)
+    """Pages in the index that neither the source nor the docstore knew; all chunks deleted."""
+    reprocessed: list[str] = field(default_factory=list)
+    """Unchanged pages processed again because a failed run had written them (dirty list)."""
+    docstore_reset: str | None = None
+    """Why the saved docstore was not used, if it was not."""
     report_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -228,6 +258,7 @@ class IngestReport:
                 "read_failures": len(self.read_failures),
                 "chunks_written": self.chunks_written,
                 "chunks_deleted": self.chunks_deleted,
+                "swept": len(self.swept),
             },
             "data_generation": self.data_generation,
             "generation_raised": self.generation_raised,
@@ -240,6 +271,9 @@ class IngestReport:
             "no_pipeline": self.no_pipeline,
             "skipped_by_cleaning": self.skipped_by_cleaning,
             "new_index_fields": self.new_index_fields,
+            "swept": self.swept,
+            "reprocessed": self.reprocessed,
+            "docstore_reset": self.docstore_reset,
             "docstore": self.docstore,
         }
 
@@ -256,6 +290,13 @@ class IngestReport:
         ]
         for doc_id, error in list(self.read_failures.items())[:5]:
             lines.append(f"  read failure {doc_id}: {error}")
+        if self.docstore_reset:
+            lines.append(f"docstore not used: {self.docstore_reset}")
+        if self.swept or self.reprocessed:
+            lines.append(
+                f"swept pages unknown to the docstore: {len(self.swept)}; processed again "
+                f"after a failed run: {len(self.reprocessed)}"
+            )
         raised = "raised" if self.generation_raised else "unchanged, the index did not change"
         lines += [
             f"data generation: {self.data_generation} ({raised})",
@@ -281,6 +322,11 @@ class _Plan:
     kept_old_version: list[str]
     no_pipeline: list[str]
     skipped_by_cleaning: dict[str, str]
+    orphans: list[str]
+    reprocessed: list[str]
+    dirty: set[str]
+    index_uuid: str
+    docstore_reset: str | None
 
 
 class IngestJob:
@@ -366,9 +412,29 @@ class IngestJob:
                 "vectors of two models cannot be compared. Build a new index version (s7-5) or "
                 "use another --index-prefix"
             )
+        store = EsVectorStore(
+            self.es, self.index, bulk_batch_size=self.settings.ingest_bulk_batch_size
+        )
+        self._store = store
+        index_uuid = str(
+            self.es.indices.get_settings(index=self.index)[self.index]["settings"]["index"]["uuid"]
+        )
         docstore = make_docstore(self.settings.docstore_url, self.index)
         assert isinstance(docstore, JsonFileDocumentStore)
+        docstore_reset: str | None = None
+        if docstore.get_all_document_hashes():
+            bound = docstore.get_meta(INDEX_UUID_KEY)
+            if bound != index_uuid:
+                docstore_reset = (
+                    f"it belongs to another index (uuid {bound}, {self.index} is now "
+                    f"{index_uuid}); every page is processed as new"
+                )
+            elif store.chunk_count() == 0:
+                docstore_reset = "the index holds no chunks; every page is processed as new"
+        if docstore_reset is not None:
+            docstore = JsonFileDocumentStore(docstore.path, empty=True)
         self._docstore = docstore
+        dirty = _read_ids(self._dirty_path(docstore))
 
         sources = list(self.connector.documents())
         read = self.processor.read(sources)
@@ -399,27 +465,30 @@ class IngestJob:
         added: list[str] = []
         updated: list[str] = []
         unchanged: list[str] = []
+        reprocessed: list[str] = []
         for doc in documents:
             stored_hash = docstore.get_document_hash(doc.id_)
             if stored_hash is None:
                 added.append(doc.id_)
             elif stored_hash != doc.hash:
                 updated.append(doc.id_)
+            elif doc.id_ in dirty:  # a failed run wrote another version of it
+                updated.append(doc.id_)
+                reprocessed.append(doc.id_)
             else:
                 unchanged.append(doc.id_)
         deleted = sorted(stored_ids - set(ids))
+        indexed = store.indexed_doc_ids()
+        orphans = sorted(indexed - set(ids) - stored_ids)
 
         min_ratio = self.settings.ingest_min_input_ratio
-        if (
-            stored_ids
-            and len(documents) < min_ratio * len(stored_ids)
-            and not self.allow_mass_delete
-        ):
+        known = stored_ids | indexed
+        if known and len(documents) < min_ratio * len(known) and not self.allow_mass_delete:
             raise MassDeleteError(
                 f"this run would pass {len(documents)} documents, fewer than {min_ratio:.0%} of "
-                f"the {len(stored_ids)} in the docstore: a possible mass delete (did the source "
-                "fail to load?). Nothing was changed; rerun with --allow-mass-delete if the "
-                "source really shrank"
+                f"the {len(known)} in the docstore or the index: a possible mass delete (did the "
+                "source fail to load?). Nothing was changed; rerun with --allow-mass-delete if "
+                "the source really shrank"
             )
         if self.ledger is not None:
             changed = set(added) | set(updated)
@@ -447,8 +516,17 @@ class IngestJob:
             kept_old_version=kept_old,
             no_pipeline=no_pipeline,
             skipped_by_cleaning=skipped_by_cleaning,
+            orphans=orphans,
+            reprocessed=reprocessed,
+            dirty=dirty,
+            index_uuid=index_uuid,
+            docstore_reset=docstore_reset,
         )
         return self._plan
+
+    @staticmethod
+    def _dirty_path(docstore: JsonFileDocumentStore) -> Path:
+        return docstore.path.with_name(f"{docstore.path.stem}.dirty.json")
 
     def _resolve_index(self, body: dict[str, Any]) -> str:
         if self.index is not None:
@@ -468,16 +546,17 @@ class IngestJob:
     # ---- phase 2: write new chunks ----------------------------------------------------------
 
     def write(self) -> None:
-        plan, docstore = self._plan, self._docstore
-        if plan is None or docstore is None or self.index is None:
+        plan, docstore, store = self._plan, self._docstore, self._store
+        if plan is None or docstore is None or store is None or self.index is None:
             raise RuntimeError("call prepare() before write()")
+        # Saved before the first write and kept until a run succeeds: if this run fails, the
+        # next one processes these pages again even when their source equals the docstore.
+        _write_ids(self._dirty_path(docstore), plan.dirty | set(plan.added) | set(plan.updated))
+        for doc_id in plan.reprocessed:  # a hash that never matches: LlamaIndex redoes the page
+            docstore.set_document_hash(doc_id, f"dirty:{self.run_id}")
         if index_embed_model(self.es, self.index) is None:
             set_index_embed_model(self.es, self.index, self.embed_id)
-        store = EsVectorStore(
-            self.es, self.index, bulk_batch_size=self.settings.ingest_bulk_batch_size
-        )
         store.begin_run(self.run_id, plan.fields)
-        self._store = store
         pipeline = IngestionPipeline(
             transformations=[KbChunker(self.processor), self.embed_model],
             docstore=docstore,
@@ -503,8 +582,9 @@ class IngestJob:
         plan, docstore, store = self._plan, self._docstore, self._store
         if plan is None or docstore is None or store is None or self.index is None:
             raise RuntimeError("call prepare() and write() before commit()")
-        finalized = store.finalize()
-        changed = bool(plan.added or plan.updated or plan.deleted)
+        finalized = store.finalize(also_clean=plan.added)
+        swept = store.sweep(plan.orphans)
+        changed = bool(plan.added or plan.updated or plan.deleted or plan.orphans)
         if changed:
             generation = incr_data_generation(
                 self.redis, self.cfg.kb, key_prefix=self.generation_prefix
@@ -513,7 +593,9 @@ class IngestJob:
             generation = get_data_generation(
                 self.redis, self.cfg.kb, key_prefix=self.generation_prefix
             )
+        docstore.set_meta(INDEX_UUID_KEY, plan.index_uuid)
         docstore.persist()
+        self._dirty_path(docstore).unlink(missing_ok=True)
         report = IngestReport(
             run_id=self.run_id,
             kb=self.cfg.kb,
@@ -527,7 +609,7 @@ class IngestJob:
             unchanged=plan.unchanged,
             deleted=plan.deleted,
             chunks_written=sum(store.written_docs.values()),
-            chunks_deleted=finalized.deleted_chunks,
+            chunks_deleted=finalized.deleted_chunks + swept,
             data_generation=generation,
             generation_raised=changed,
             cost_cny=self.ledger.run_cny if self.ledger is not None else 0.0,
@@ -537,6 +619,9 @@ class IngestJob:
             no_pipeline=plan.no_pipeline,
             skipped_by_cleaning=plan.skipped_by_cleaning,
             new_index_fields=self._new_fields,
+            swept=plan.orphans,
+            reprocessed=plan.reprocessed,
+            docstore_reset=plan.docstore_reset,
         )
         path = Path(self.settings.ingest_report_dir) / self.cfg.kb / f"ingest-{self.run_id}.json"
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -92,6 +92,10 @@ class Env:
     def docstore_file(self) -> Path:
         return self.tmp / "docstore" / f"{self.index}.json"
 
+    @property
+    def dirty_file(self) -> Path:
+        return self.tmp / "docstore" / f"{self.index}.dirty.json"
+
     def chunks(self) -> dict[str, dict[str, Any]]:
         return self.es.docs.get(self.index, {})
 
@@ -151,6 +155,7 @@ def test_job_counts_and_persists_docstore(env: Env) -> None:
         "read_failures": 0,
         "chunks_written": first.chunks_written,
         "chunks_deleted": 0,
+        "swept": 0,
     }
     assert saved["cost_cny"] == 0.0
 
@@ -260,6 +265,113 @@ def test_failed_run_does_not_persist_docstore(env: Env) -> None:
     assert repaired.updated == [doc_id("a.md")]
     assert env.chunk_ids("a.md") == [f"{doc_id('a.md')}#0", f"{doc_id('a.md')}#1"]
     assert {env.chunks()[i]["ingest_run_id"] for i in env.chunk_ids("a.md")} == {repaired.run_id}
+
+
+def test_docstore_reset_when_index_recreated(env: Env) -> None:
+    env.connector.put("a.md", page("A", section("a")))
+    env.connector.put("b.md", page("B", section("b")))
+    env.job().run()
+    assert env.docstore_file.is_file()
+
+    env.es.indices.delete(index=env.index)  # e.g. `docker compose down -v`; the docstore stays
+    report = env.job().run()
+
+    assert report.docstore_reset is not None and "another index" in report.docstore_reset
+    assert len(report.added) == 2 and report.unchanged == []
+    assert env.chunk_ids("a.md") and env.chunk_ids("b.md")
+    again = env.job().run()  # the saved docstore now belongs to the new index
+    assert again.docstore_reset is None
+    assert len(again.unchanged) == 2
+
+
+def test_docstore_reset_when_index_holds_no_chunks(env: Env) -> None:
+    env.connector.put("a.md", page("A", section("a")))
+    env.job().run()
+    env.es.docs[env.index].clear()  # same index, every chunk gone
+
+    report = env.job().run()
+
+    assert report.docstore_reset is not None and "no chunks" in report.docstore_reset
+    assert report.added == [doc_id("a.md")]
+    assert env.chunk_ids("a.md")
+
+
+def test_failed_run_chunks_of_new_docs_are_cleaned(env: Env) -> None:
+    env.connector.put("a.md", page("A", section("a")))
+    env.job().run()
+
+    env.connector.put("a.md", page("A", section("a2")))
+    env.connector.put("b.md", page("B", section("b"), section("bb"), section("bbb")))
+    env.es.fail_ids = {f"{doc_id('a.md')}#0"}
+    with pytest.raises(BulkWriteError):
+        env.job().run()
+    assert len(env.chunk_ids("b.md")) == 3  # written, but the docstore never learned about b
+
+    env.es.fail_ids = set()
+    env.connector.put("b.md", page("B", section("b")))  # b is still new to the docstore
+    report = env.job().run()
+
+    assert report.added == [doc_id("b.md")]
+    assert env.chunk_ids("b.md") == [f"{doc_id('b.md')}#0"]  # b#1 and b#2 were cleaned
+    assert report.chunks_deleted == 2
+
+
+def test_sweep_removes_pages_unknown_to_docstore(env: Env) -> None:
+    env.connector.put("a.md", page("A", section("a")))
+    env.job().run()
+
+    env.connector.put("a.md", page("A", section("a2")))
+    env.connector.put("c.md", page("C", section("c")))
+    env.es.fail_ids = {f"{doc_id('a.md')}#0"}
+    with pytest.raises(BulkWriteError):
+        env.job().run()
+    assert env.chunk_ids("c.md")  # written by the failed run
+
+    env.es.fail_ids = set()
+    env.connector.remove("c.md")  # c disappears before the next run: no docstore entry
+    report = env.job().run()
+
+    assert report.swept == [doc_id("c.md")]
+    assert env.chunk_ids("c.md") == []
+    assert report.generation_raised
+
+
+def test_mass_delete_guard_counts_pages_in_the_index(env: Env) -> None:
+    for name in ("a.md", "b.md", "c.md", "d.md"):
+        env.connector.put(name, page(name, section(name[0])))
+    env.job().run()
+    env.docstore_file.unlink()  # docstore lost: only the index still knows the four pages
+    chunks = dict(env.chunks())
+    for name in ("b.md", "c.md", "d.md"):
+        env.connector.remove(name)
+
+    with pytest.raises(MassDeleteError, match=r"pass 1 documents.*the 4 in the docstore"):
+        env.job().run()
+    assert env.chunks() == chunks
+
+
+def test_dirty_docs_are_reprocessed_after_failed_run(env: Env) -> None:
+    v1 = page("A", section("first"), section("second"))
+    env.connector.put("a.md", v1)
+    env.connector.put("b.md", page("B", section("b")))
+    env.job().run()
+    v1_chunks = {i: env.chunks()[i]["content"] for i in env.chunk_ids("a.md")}
+
+    env.connector.put("a.md", page("A", section("changed"), section("second")))
+    env.es.fail_ids = {f"{doc_id('a.md')}#1"}
+    with pytest.raises(BulkWriteError):
+        env.job().run()
+    assert env.chunks()[f"{doc_id('a.md')}#0"]["content"] != v1_chunks[f"{doc_id('a.md')}#0"]
+
+    env.es.fail_ids = set()
+    env.connector.put("a.md", v1)  # the source goes back to what the docstore has
+    report = env.job().run()
+
+    assert report.reprocessed == [doc_id("a.md")]
+    assert report.updated == [doc_id("a.md")]
+    assert {i: env.chunks()[i]["content"] for i in env.chunk_ids("a.md")} == v1_chunks
+    assert not env.dirty_file.exists()  # cleared after the successful run
+    assert env.job().run().unchanged == [doc_id("a.md"), doc_id("b.md")]
 
 
 def _gateway(requests: list[dict[str, Any]]) -> httpx.MockTransport:

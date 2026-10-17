@@ -104,12 +104,26 @@ class JsonFileDocumentStore(SimpleDocumentStore):
 
     The file is written to `<name>.tmp` and then renamed over the old one, so a crash while
     saving leaves the last saved docstore intact (it decides what ingestion deletes, s7-4).
+    `get_meta`/`set_meta` keep a few values of our own in the same file (which index the
+    docstore belongs to). `empty=True` starts empty and overwrites the file on `persist()`.
     """
 
-    def __init__(self, path: Path) -> None:
+    META_COLLECTION = "rag/meta"
+
+    def __init__(self, path: Path, *, empty: bool = False) -> None:
         self.path = path
-        kvstore = SimpleKVStore.from_persist_path(str(path)) if path.exists() else SimpleKVStore()
+        if path.exists() and not empty:
+            kvstore = SimpleKVStore.from_persist_path(str(path))
+        else:
+            kvstore = SimpleKVStore()
         super().__init__(kvstore)
+
+    def get_meta(self, key: str) -> Any:
+        entry = self._kvstore.get(key, collection=self.META_COLLECTION)
+        return entry.get("value") if entry else None
+
+    def set_meta(self, key: str, value: Any) -> None:
+        self._kvstore.put(key, {"value": value}, collection=self.META_COLLECTION)
 
     def persist(self, persist_path: str | None = None, fs=None) -> None:  # type: ignore[no-untyped-def, override]
         if fs is not None:

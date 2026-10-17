@@ -9,6 +9,7 @@ from llama_index.core import Document
 
 from rag.factories import (
     InProcessLockProvider,
+    JsonFileDocumentStore,
     LockTimeoutError,
     make_checkpointer,
     make_docstore,
@@ -72,6 +73,27 @@ def test_file_docstore_persist_is_atomic(tmp_path: Path, monkeypatch: pytest.Mon
     assert reloaded.get_document("hf_docs:a.md").text == "first"
     assert not reloaded.document_exists("hf_docs:b.md")
     assert sorted(p.name for p in (tmp_path / "docstore").iterdir()) == ["hf_docs.json"]
+
+
+def test_file_docstore_meta_and_empty_start(tmp_path: Path) -> None:
+    """The docstore remembers which index it belongs to (spec P0-06)."""
+    url = _file_url(tmp_path / "docstore")
+    store = make_docstore(url, "kb_x_v1")
+    assert isinstance(store, JsonFileDocumentStore)
+    assert store.get_meta("index_uuid") is None
+    store.add_documents([Document(text="first", id_="x:a.md")])
+    store.set_meta("index_uuid", "abc123")
+    store.persist()
+
+    reloaded = make_docstore(url, "kb_x_v1")
+    assert isinstance(reloaded, JsonFileDocumentStore)
+    assert reloaded.get_meta("index_uuid") == "abc123"
+    assert reloaded.document_exists("x:a.md")
+    assert set(reloaded.get_all_document_hashes().values()) == {"x:a.md"}
+
+    fresh = JsonFileDocumentStore(reloaded.path, empty=True)
+    assert fresh.get_meta("index_uuid") is None
+    assert not fresh.document_exists("x:a.md")
 
 
 class _State(TypedDict):

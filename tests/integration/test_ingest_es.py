@@ -351,3 +351,41 @@ def test_existing_index_gets_new_fields(make_kb: Callable[..., Kb]) -> None:
     meta = kb.es.indices.get_mapping(index=kb.index)[kb.index]["mappings"]["_meta"]
     assert meta["embed_model"] == f"fake-embedding@{DIMS}"
     assert all(c["images"] == [] for c in kb.chunks().values())
+
+
+def test_recreated_index_does_not_reuse_the_docstore(make_kb: Callable[..., Kb]) -> None:
+    kb = make_kb()
+    kb.connector.put("a.md", page("A", section("a")))
+    kb.connector.put("b.md", page("B", section("b")))
+    kb.run()
+    assert kb.docstore_file.is_file()
+
+    kb.es.indices.delete(index=kb.index)  # like `docker compose down -v`: the docstore file stays
+    report = kb.run()
+
+    assert report.docstore_reset is not None
+    assert len(report.added) == 2
+    assert kb.contents() == kb.expected()
+    assert kb.run().docstore_reset is None
+
+
+def test_failed_run_pages_are_cleaned_and_swept(make_kb: Callable[..., Kb]) -> None:
+    kb = make_kb()
+    kb.connector.put("a.md", page("A", section("a")))
+    kb.run()
+
+    kb.connector.put("a.md", page("A", section("poison")))
+    kb.connector.put("b.md", page("B", section("b"), section("bb"), section("bbb")))
+    kb.connector.put("c.md", page("C", section("c")))
+    with pytest.raises(BulkWriteError):
+        kb.run(embed_model=PoisonedEmbedding(dim=DIMS))
+    assert len(kb.doc_chunks("b.md")) == 3 and kb.doc_chunks("c.md")
+
+    kb.connector.put("a.md", page("A", section("a")))  # back to the saved version
+    kb.connector.put("b.md", page("B", section("b")))  # still new, now one chunk
+    kb.connector.remove("c.md")  # gone before any run saved it
+    report = kb.run()
+
+    assert report.reprocessed == [kb.connector.doc_id("a.md")]
+    assert report.swept == [kb.connector.doc_id("c.md")]
+    assert kb.contents() == kb.expected()
