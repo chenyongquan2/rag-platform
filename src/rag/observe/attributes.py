@@ -37,6 +37,27 @@ ERROR_CATEGORY = "rag.error.category"  # category of the failure in this span
 ERROR_TYPE = "error.type"  # OTel general convention: class of the error
 OUTCOME = "rag.outcome"  # ok | error | cancelled
 
+# Context of an answer (design s10-3, s11-3; spec P1-02): set on the `generate` step span.
+CONTEXT_FRAGMENTS = "rag.context.fragments"  # numbered fragments given to the model
+CONTEXT_TOKENS = "rag.context.tokens"  # their estimated tokens
+CONTEXT_BUDGET = "rag.context.budget"  # the token budget they had to fit into
+CONTEXT_DROPPED = "rag.context.dropped"  # chunks left out by the budget
+CONTEXT_DUPLICATES = "rag.context.duplicates"  # repeated chunk ids removed
+CONTEXT_SUSPICIOUS = "rag.context.suspicious"  # fragments flagged suspicious_instruction
+
+# Answer generation and citation check level 1 (design s11-1, s11-2; spec P1-02).
+ANSWER_LANGUAGE = "rag.answer.language"  # zh | en
+ANSWER_FOUND = "rag.answer.found"
+ANSWER_SENTENCES = "rag.answer.sentences"
+ANSWER_UNSUPPORTED = "rag.answer.unsupported_sentences"  # sentences without a valid [n]
+ANSWER_REMOVED_MARKERS = "rag.answer.removed_markers"  # [n] numbers matching no fragment
+ANSWER_ATTEMPTS = "rag.answer.attempts"  # model calls, retry included
+ANSWER_PARSE_FAILED = "rag.answer.parse_failed"
+ANSWER_MODEL_CALLS = "rag.answer.model_calls"  # cost ledger lines written by this answer
+ANSWER_COST_CNY = "rag.answer.cost_cny"  # CNY of those lines
+GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"  # GenAI conventions
+GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"  # reasoning tokens included
+
 # Value of ERROR_CATEGORY when an exception has no category (a bug, not a known failure).
 UNCLASSIFIED = "unclassified"
 OUTCOME_OK = "ok"
