@@ -91,6 +91,25 @@ timeout) and every attempt reserves its estimated cost and writes its usage to t
 gateway rejects `json_schema`). `CHAT_BACKEND=fake` switches every profile to a `FakeChatModel`
 with a fixed reply; it is never switched automatically.
 
+## Answers with numbered citations
+
+`rag.answer` turns a question plus ranked chunks into an `Answer` (no retrieval inside):
+
+```python
+ctx = build_context([result.chunks], cfg.answer.context_tokens, metadata_keys=cfg.metadata.llm)
+async for event in stream_answer(question, ctx, kb=cfg.kb, config=cfg.answer):
+    ...  # AnswerDelta (text as generated), AnswerRetry, then AnswerDone(answer)
+answer = await generate_answer(question, ctx, kb=cfg.kb, config=cfg.answer)  # same, no deltas
+```
+
+The context builder dedupes chunk ids, splits the token budget per sub-question and wraps each
+fragment `[n]` in `<doc_fragment n="n" untrusted="true">` delimiters (`suspicious_instruction`
+labelled). The prompt (zh or en, by the question's language unless the KB's `answer.language`
+fixes it) asks for `[n]` after every sentence or the fixed not-found sentence. The model (`online`
+profile) is always streamed; the answer is parsed (`【1】`, `[1,2]`, `[1][2]` accepted), unknown
+numbers are removed and uncited sentences counted (`answer.citation_check`). No citation at all:
+one retry, then `answer_parse_failed` with the chunks only.
+
 ## Observability
 
 `rag.observe` (spec P0-11, design s15-1): call `init_observability(settings, "<service>")` once at
