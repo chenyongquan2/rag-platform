@@ -171,6 +171,54 @@ result.chunks, result.rerank, result.threshold, result.not_found, result.below_t
 pipeline.get_context(result.chunks[0].chunk_id, "neighbors")  # page content + updated if gone
 ```
 
+## Search service (MCP and HTTP)
+
+One process serves three tools: `search_docs(kb, query, filters, top_k, deadline_ms)`,
+`get_context(chunk_id, mode)` and `list_knowledge_bases()`. At start it loads the reranker in the
+background (about a minute; logged as `search service ready in ... s`); a search that arrives
+earlier waits for the load within its deadline, then answers `not_ready`. Every request runs as
+the caller in `SERVICE_CALLER` with the document groups in `SERVICE_ACL_GROUPS` (until OAuth in
+P8); a knowledge base is visible when its `access.callers` has `*` or that caller. Responses mark
+every chunk text `untrusted`; errors are only `{error, request_id, message}`, the details are in
+the log under the same request id. Each request writes one business record line and a trace.
+
+```bash
+uv run python -m rag.serve stdio                       # MCP over stdio
+uv run python -m rag.serve http --host 127.0.0.1 --port 28080
+#   POST /v1/search_docs  {"kb": "hf_docs", "query": "...", "top_k": 5}
+#   POST /v1/get_context  {"chunk_id": "...", "mode": "neighbors"}
+#   GET  /v1/knowledge_bases, GET /healthz, GET /readyz (503 until loaded)
+#   MCP over streamable-http at http://127.0.0.1:28080/mcp
+```
+
+Register the stdio server with an MCP client, for example Claude Code (the server reads `.env`
+from its working directory, so run it from the repo; `HF_HUB_OFFLINE=1` keeps the reranker load
+offline; add `EMBED_BACKEND=fake` and `SEARCH_INDEX_PREFIX=fake_` to search the fake-vector
+index without paying for query embeddings):
+
+```bash
+claude mcp add rag-docs --env HF_HUB_OFFLINE=1 -- \
+  uv run --directory C:/workspace/rag-platform python -m rag.serve stdio
+```
+
+or in a client's JSON config (`.mcp.json`, Claude Desktop, Cursor):
+
+```json
+{
+  "mcpServers": {
+    "rag-docs": {
+      "command": "uv",
+      "args": ["run", "--directory", "C:/workspace/rag-platform", "python", "-m", "rag.serve", "stdio"],
+      "env": {"HF_HUB_OFFLINE": "1"}
+    }
+  }
+}
+```
+
+For the HTTP server, register `http://127.0.0.1:28080/mcp` as a streamable-http server
+(`claude mcp add --transport http rag-docs http://127.0.0.1:28080/mcp`). It has no
+authentication until P8, so keep `SERVICE_HOST` on 127.0.0.1.
+
 ## Retrieval evaluation
 
 Any retriever with `retrieve(question, kb, top_k) -> RetrievalResult` can be evaluated
