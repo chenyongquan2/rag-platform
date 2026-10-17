@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import subprocess
 import time
@@ -19,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from rag.config import REPO_ROOT, KnowledgeBaseConfig, ServiceSettings, repo_path
+from rag.config.paths import git_env
 from rag.eval.questions import LabeledQuestion, QuestionSet, content_sha256
 from rag.eval.retrieval.metrics import (
     Level,
@@ -55,29 +55,6 @@ def make_run_id(kb: str, label: str = "", now: datetime | None = None) -> str:
     now = (now or datetime.now(UTC)).astimezone(UTC)
     slug = _LABEL_RE.sub("-", label.lower()).strip("-")
     return f"{now:%Y%m%dT%H%M%SZ}_{kb}" + (f"_{slug}" if slug else "")
-
-
-# Variables that point git at another repository (set e.g. inside git hooks); dropped so that
-# `git -C <repo_root>` always describes `repo_root` (`git rev-parse --local-env-vars`).
-_GIT_REPO_ENV = {
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_COMMON_DIR",
-    "GIT_DIR",
-    "GIT_GRAFT_FILE",
-    "GIT_IMPLICIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_NO_REPLACE_OBJECTS",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_PREFIX",
-    "GIT_REPLACE_REF_BASE",
-    "GIT_SHALLOW_FILE",
-    "GIT_WORK_TREE",
-}
-
-
-def git_env() -> dict[str, str]:
-    """The current environment without the variables that redirect git to another repo."""
-    return {k: v for k, v in os.environ.items() if k not in _GIT_REPO_ENV}
 
 
 def _git(repo_root: Path, *args: str) -> str | None:
