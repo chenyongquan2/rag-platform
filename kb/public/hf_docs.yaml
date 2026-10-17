@@ -1,5 +1,8 @@
 # Hugging Face documentation (Markdown, English). Design s5-1.
 kb: hf_docs
+description: >-
+  Hugging Face documentation in English (Transformers, Datasets, Hub, Diffusers,
+  Inference Endpoints and other libraries): guides, API references and tutorials.
 source:
   connector: hf_dataset
   dataset: m-ric/huggingface_doc

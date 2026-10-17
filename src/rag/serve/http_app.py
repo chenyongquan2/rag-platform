@@ -1,0 +1,173 @@
+"""HTTP API of the search service (design s16-1) and the MCP streamable-http endpoint.
+
+One Starlette app, so one process holds one reranker for every way in:
+
+    GET  /healthz              200 {"status": "ok"} while the process runs
+    GET  /readyz               200 when the reranker and the chains are loaded, else 503
+    POST /v1/search_docs       {kb, query, filters?, top_k?, deadline_ms?} -> SearchResponse
+    POST /v1/get_context       {chunk_id, mode?}                           -> ContextResponse
+    GET  /v1/knowledge_bases                                               -> KnowledgeBaseList
+    /mcp                       MCP over streamable-http (when an MCPServer is given)
+
+JSON bodies are checked against fixed models (unknown fields are `invalid_request`). Errors are
+`{error, request_id, message}` with the category's status (`rag.serve.errors.http_status`);
+`not_ready` adds `Retry-After`. A caller may send `X-Request-Id` (letters, digits, `._:-`, at
+most 64); every answer carries the request id in that header. Starlette rather than FastAPI:
+the MCP SDK's streamable-http app is already a Starlette app (mounted here as it is), Starlette
+comes with the SDK, and four routes need no generated docs or dependency injection.
+"""
+
+from __future__ import annotations
+
+import functools
+import logging
+import re
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from typing import Any
+
+import anyio
+from mcp.server import MCPServer
+from pydantic import BaseModel, ConfigDict, ValidationError
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import BaseRoute, Mount, Route
+
+from rag.observe import new_request_id
+from rag.security.access import Credentials
+from rag.serve.errors import ServiceError, http_status
+from rag.serve.schema import ErrorResponse
+from rag.serve.service import SearchService
+from rag.types import ErrorCategory
+
+logger = logging.getLogger(__name__)
+
+REQUEST_ID_HEADER = "X-Request-Id"
+_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+RETRY_AFTER_S = 10
+TRANSPORT = "http"
+
+
+class SearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    kb: str
+    query: str
+    filters: dict[str, Any] | None = None
+    top_k: int | None = None
+    deadline_ms: int | None = None
+
+
+class ContextRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    chunk_id: str
+    mode: str | None = None
+
+
+def _request_id(request: Request) -> str:
+    given = request.headers.get(REQUEST_ID_HEADER)
+    if given and _REQUEST_ID.match(given):
+        return given
+    return new_request_id()
+
+
+def _error(category: str, request_id: str) -> JSONResponse:
+    headers = {REQUEST_ID_HEADER: request_id}
+    if category == ErrorCategory.NOT_READY:
+        headers["Retry-After"] = str(RETRY_AFTER_S)
+    return JSONResponse(
+        ErrorResponse.of(category, request_id).model_dump(mode="json"),
+        status_code=http_status(category),
+        headers=headers,
+    )
+
+
+async def _body[M: BaseModel](request: Request, model: type[M], request_id: str) -> M | None:
+    """The JSON body as `model`, or None (logged) when it is not valid JSON or does not fit."""
+    try:
+        data = await request.json()
+        return model.model_validate(data)
+    except ValidationError as exc:
+        fields = sorted({".".join(str(p) for p in err["loc"]) for err in exc.errors()})
+        logger.info("request %s: body rejected, fields %s", request_id, fields)
+    except (ValueError, UnicodeDecodeError):
+        logger.info("request %s: body is not JSON", request_id)
+    return None
+
+
+async def _call(fn: Callable[..., BaseModel], request_id: str, **kwargs: Any) -> JSONResponse:
+    try:
+        response = await anyio.to_thread.run_sync(
+            functools.partial(fn, Credentials(transport=TRANSPORT), request_id=request_id, **kwargs)
+        )
+    except ServiceError as err:
+        return _error(err.category, err.request_id)
+    except Exception:
+        logger.exception("request %s failed outside the service", request_id)
+        return _error(ErrorCategory.INTERNAL_ERROR, request_id)
+    return JSONResponse(response.model_dump(mode="json"), headers={REQUEST_ID_HEADER: request_id})
+
+
+def build_http_app(
+    service: SearchService, *, mcp: MCPServer | None = None, host: str = "127.0.0.1"
+) -> Starlette:
+    """The app over `service`; its lifespan starts the service's load (and the MCP session
+    manager when `mcp` is given, mounted at `/mcp`). `host` is where it listens: on 127.0.0.1
+    the MCP endpoint checks Host and Origin headers (DNS rebinding protection of the SDK)."""
+
+    async def healthz(request: Request) -> JSONResponse:
+        return JSONResponse({"status": "ok"})
+
+    async def readyz(request: Request) -> JSONResponse:
+        status = service.status()
+        return JSONResponse(status, status_code=200 if service.ready else 503)
+
+    async def search_docs(request: Request) -> JSONResponse:
+        request_id = _request_id(request)
+        body = await _body(request, SearchRequest, request_id)
+        if body is None:
+            return _error(ErrorCategory.INVALID_REQUEST, request_id)
+        return await _call(
+            service.search_docs,
+            request_id,
+            kb=body.kb,
+            query=body.query,
+            filters=body.filters,
+            top_k=body.top_k,
+            deadline_ms=body.deadline_ms,
+        )
+
+    async def get_context(request: Request) -> JSONResponse:
+        request_id = _request_id(request)
+        body = await _body(request, ContextRequest, request_id)
+        if body is None:
+            return _error(ErrorCategory.INVALID_REQUEST, request_id)
+        return await _call(service.get_context, request_id, chunk_id=body.chunk_id, mode=body.mode)
+
+    async def knowledge_bases(request: Request) -> JSONResponse:
+        return await _call(service.list_knowledge_bases, _request_id(request))
+
+    routes: list[BaseRoute] = [
+        Route("/healthz", healthz, methods=["GET"]),
+        Route("/readyz", readyz, methods=["GET"]),
+        Route("/v1/search_docs", search_docs, methods=["POST"]),
+        Route("/v1/get_context", get_context, methods=["POST"]),
+        Route("/v1/knowledge_bases", knowledge_bases, methods=["GET"]),
+    ]
+    if mcp is not None:
+        routes.append(
+            Mount("/", app=mcp.streamable_http_app(streamable_http_path="/mcp", host=host))
+        )
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
+        service.start()
+        if mcp is None:
+            yield
+            return
+        async with mcp.session_manager.run():
+            yield
+
+    return Starlette(routes=routes, lifespan=lifespan)
