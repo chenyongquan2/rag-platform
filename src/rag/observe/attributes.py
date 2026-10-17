@@ -51,12 +51,13 @@ MODEL_KIND = "rag.model.kind"  # embedding | chat
 MODEL_PROFILE = "rag.model.profile"  # ingest | query | online | offline | cheap
 USAGE_ESTIMATED = "rag.model.usage_estimated"  # tokens estimated, not from the gateway
 
-# Metric names (design s15-1: requests, errors, degraded, rerank timeouts, step latency,
-# tokens and cost).
+# Metric names (design s15-1: requests, errors, degraded, rerank timeouts, step latency, and
+# model calls, tokens and cost per caller).
 METRIC_REQUESTS = "rag.requests"
 METRIC_ERRORS = "rag.errors"
 METRIC_DEGRADED = "rag.requests.degraded"
 METRIC_RERANK_TIMEOUTS = "rag.requests.rerank_timeout"
 METRIC_STEP_DURATION = "rag.step.duration"
+METRIC_MODEL_CALLS = "rag.model.calls"
 METRIC_MODEL_TOKENS = "rag.model.tokens"
 METRIC_MODEL_COST = "rag.model.cost"

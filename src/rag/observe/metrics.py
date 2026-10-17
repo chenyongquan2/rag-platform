@@ -76,6 +76,11 @@ class Metrics:
             description="Duration of each request and layer step",
             explicit_bucket_boundaries_advisory=list(STEP_DURATION_BUCKETS_S),
         )
+        self.model_calls = meter.create_counter(
+            attr.METRIC_MODEL_CALLS,
+            unit="{call}",
+            description="Real model calls (cost ledger lines) by kind, model, profile, caller",
+        )
         self.model_tokens = meter.create_counter(
             attr.METRIC_MODEL_TOKENS,
             unit="{token}",
@@ -120,7 +125,11 @@ class Metrics:
             logger.warning("recording step duration failed", exc_info=True)
 
     def record_ledger_row(self, row: Mapping[str, Any]) -> None:
-        """Tokens and CNY of one cost ledger line (`rag.cost.add_record_listener`)."""
+        """One call, its tokens and CNY from one cost ledger line (`rag.cost.add_record_listener`).
+
+        The caller comes from the current request (design s15-1: calls, tokens and cost per
+        caller per day). Calls made outside a request, or in a thread that did not copy the
+        request's context, have no caller attribute."""
         request = current_request()
         base = _drop_none(
             {
@@ -130,6 +139,7 @@ class Metrics:
                 attr.CALLER: request.caller if request is not None else None,
             }
         )
+        self.model_calls.add(1, base)
         estimated = bool(row.get("usage_estimated", False))
         for token_type, key in (("input", "prompt_tokens"), ("output", "completion_tokens")):
             count = int(row.get(key) or 0)

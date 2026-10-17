@@ -140,3 +140,30 @@ def test_ledger_rows_feed_token_and_cost_counters(tmp_path: Path) -> None:
         {("chat", "m", "online"): 0.002, ("embedding", "m", "query"): 0.002}
     )
     assert len(ledger.entries()) == 2
+
+
+def test_model_calls_counted_per_caller(tmp_path: Path) -> None:
+    """Design s15-1: model calls, tokens and cost per caller per day."""
+    ledger = _ledger(tmp_path)
+    with memory_observability() as obs:
+        with request_span("ask_docs", kb="k", caller="claude-code"):
+            ledger.record(kind="chat", model="m", prompt_tokens=100, completion_tokens=10)
+            ledger.record(kind="embedding", model="m", prompt_tokens=20)
+        with request_span("ask_docs", kb="k", caller="claude-code"):
+            ledger.record(kind="chat", model="m", prompt_tokens=100, completion_tokens=10)
+        ledger.record(kind="chat", model="m", prompt_tokens=5)  # outside a request: no caller
+        calls = _sums(
+            metric_points(obs, attr.METRIC_MODEL_CALLS),
+            attr.MODEL_KIND,
+            attr.GEN_AI_REQUEST_MODEL,
+            attr.CALLER,
+        )
+        tokens = metric_points(obs, attr.METRIC_MODEL_TOKENS)
+        cost = metric_points(obs, attr.METRIC_MODEL_COST)
+    assert calls == {
+        ("chat", "m", "claude-code"): 2,
+        ("embedding", "m", "claude-code"): 1,
+        ("chat", "m", None): 1,
+    }
+    assert {a.get(attr.CALLER) for a, _ in tokens} == {"claude-code", None}
+    assert {a.get(attr.CALLER) for a, _ in cost} == {"claude-code", None}
