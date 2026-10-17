@@ -396,3 +396,36 @@ def test_index_version_without_hits() -> None:
     query = _query()
     _retriever(es).retrieve(query)
     assert query.trace.index_version == ""
+
+
+class _SlowGateway(FakeEmbedding):
+    """A gateway stand-in that answers after `delay_s` (CachedEmbedding calls the batch method)."""
+
+    delay_s: float = 2.0
+
+    def _get_text_embeddings(self, texts: list[str]) -> list[Embedding]:
+        time.sleep(self.delay_s)
+        return super()._get_text_embeddings(texts)
+
+
+def test_cache_miss_and_slow_gateway_still_leave_time_for_bm25() -> None:
+    # 800 ms limit: 160 ms are kept for the search (20%). The L0 cache misses and the gateway
+    # does not answer, so the wait ends with 160 ms left. The per-search ES time-out must still
+    # be long enough for a search (here 17 ms, as measured): BM25 answers, the result is
+    # degraded, not a retrieval_timeout.
+    es = FakeMsearchClient(bm25=BM25_HITS, vector=VECTOR_HITS, search_ms=17)
+    embed = CachedEmbedding(
+        _SlowGateway(dim=DIM, delay_s=2.0), InMemoryEmbeddingCache(), cache_model="m@4"
+    )
+    query = _query(deadline_ms=800)
+    nodes = _retriever(es, embed, es_reserve_ms=200, es_margin_ms=200).retrieve(query)
+
+    assert [n.node.node_id for n in nodes] == ["p#0", "q#0"]
+    assert query.trace.degraded is True
+    assert query.trace.failed_routes == {VECTOR: "embedding: timeout"}
+    (call,) = es.calls
+    per_search_ms = float(call["searches"][1]["timeout"].removesuffix("ms"))
+    remaining_ms = call["options"]["request_timeout"] * 1000.0
+    # At most half of what is left goes to the margin; ES gets the other half.
+    assert per_search_ms >= remaining_ms / 2 - 1
+    assert per_search_ms < remaining_ms

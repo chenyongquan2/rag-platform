@@ -18,7 +18,8 @@ Deadline: the request's `Deadline` (s16-2) bounds everything. A query vector in 
 is used whenever the cache answers within half of the remaining time. The gateway call is
 waited for at most until min(`es_reserve_ms`, `es_reserve_ratio` x the request's time limit)
 before the deadline, the time kept for the search; the `_msearch` gets the remaining time as its
-HTTP time-out, and each search inside it an Elasticsearch `timeout` `es_margin_ms` shorter, so a
+HTTP time-out, and each search inside it an Elasticsearch `timeout` shorter by `es_margin_ms` (at
+most half of the remaining time, so the searches keep the other half), so a
 slow route is reported as timed out before the HTTP request itself is cut off.
 """
 
@@ -295,7 +296,12 @@ class EsHybridRetriever(BaseRetriever):
                 category=ErrorCategory.RETRIEVAL_TIMEOUT,
                 route_errors={**trace.failed_routes, **{name: TIMEOUT for name, _ in searches}},
             )
-        per_search_ms = max(1, int(remaining_s * 1000.0 - self.es_margin_ms))
+        # The margin lets ES report a slow route as timed out before the HTTP request is cut;
+        # it takes at most half of what is left, so the searches always get the other half
+        # (after a slow gateway only the reserve, e.g. 160 ms of an 800 ms limit, is left).
+        remaining_ms = remaining_s * 1000.0
+        margin_ms = min(float(self.es_margin_ms), remaining_ms / 2.0)
+        per_search_ms = max(1, int(remaining_ms - margin_ms))
         lines: list[Mapping[str, Any]] = []
         for _, body in searches:
             lines.append({})

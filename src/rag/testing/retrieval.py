@@ -117,7 +117,9 @@ class FakeMsearchClient:
     scripted in `responses[route]` (default: no hits). `raises` makes the whole request fail
     instead; `delay_s` sleeps before answering. Every call is recorded in `calls` as
     `{"index", "searches", "options"}` (deep copies). `aliases` (alias -> index) answers
-    `indices.get_alias`; each lookup is recorded in `alias_calls`.
+    `indices.get_alias`; each lookup is recorded in `alias_calls`. With `search_ms`, each search
+    is taken to need that long inside Elasticsearch: a search whose `timeout` is shorter answers
+    `timed_out: true` without hits, as Elasticsearch does.
     """
 
     def __init__(
@@ -128,6 +130,7 @@ class FakeMsearchClient:
         raises: BaseException | None = None,
         delay_s: float = 0.0,
         aliases: Mapping[str, str] | None = None,
+        search_ms: float = 0.0,
     ) -> None:
         self.responses: dict[str, Mapping[str, Any]] = {}
         if bm25 is not None:
@@ -137,6 +140,7 @@ class FakeMsearchClient:
         self.raises = raises
         self.delay_s = delay_s
         self.calls: list[dict[str, Any]] = []
+        self.search_ms = search_ms
         self.aliases = dict(aliases or {})
         self.alias_calls: list[str] = []
         self.indices = _FakeIndices(self)
@@ -165,5 +169,9 @@ class FakeMsearchClient:
         answers = []
         for body in searches[1::2]:
             route = "vector" if "knn" in body else "bm25"
+            timeout = str(body.get("timeout", ""))
+            if self.search_ms and timeout.endswith("ms") and float(timeout[:-2]) < self.search_ms:
+                answers.append(search_response([], timed_out=True))
+                continue
             answers.append(copy.deepcopy(dict(self.responses.get(route, search_response([])))))
         return {"took": 5, "responses": answers}

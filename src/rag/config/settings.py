@@ -275,7 +275,8 @@ class ServiceSettings(BaseSettings):
     # the gateway the retriever keeps min(`search_es_reserve_ms`, `search_es_reserve_ratio` x
     # the request's time limit) for the Elasticsearch request (an `_msearch` takes ~20 ms); each
     # search inside the `_msearch` gets an ES time-out `search_es_margin_ms` before the HTTP
-    # request's, so a slow route comes back as timed out while the other route still counts.
+    # request's (at most half of the time left, so the searches keep the other half), so a slow
+    # route comes back as timed out while the other route still counts.
     search_deadline_ms: int = Field(default=10_000, gt=0)
     search_es_reserve_ms: int = Field(default=200, ge=0)
     search_es_reserve_ratio: float = Field(default=0.2, ge=0, lt=1)
