@@ -68,10 +68,11 @@ estimated cost first and stops with `BudgetExceeded` once spent + reserved + est
 ## Chat models
 
 `rag.llm.make_chat_model("online" | "offline" | "cheap")` builds every chat model with
-`init_chat_model` against the gateway (`LLM_BASE_URL`, `LLM_API_KEY`). Profiles differ in timeout,
-retries and `max_tokens` (which covers reasoning and answer tokens of the reasoning model); override
-one with JSON, e.g. `CHAT_ONLINE='{"timeout_s": 10}'`. Every HTTP attempt, including the SDK's
-retries, reserves its estimated cost and writes its real usage to the same cost ledger.
+`init_chat_model` against the gateway (`LLM_BASE_URL`, `LLM_API_KEY`). Profiles differ in connect
+and read timeouts, a deadline per call (online 12 s, cheap 10 s), retries and `max_tokens` (which
+covers reasoning and answer tokens of the reasoning model); override one with JSON, e.g.
+`CHAT_ONLINE='{"read_timeout_s": 8}'`. The ledger transport does the retries (never after a read
+timeout) and every attempt reserves its estimated cost and writes its usage to the cost ledger.
 `rag.llm.structured_output(model, Schema)` returns Pydantic objects via `function_calling` (the
 gateway rejects `json_schema`). `CHAT_BACKEND=fake` switches every profile to a `FakeChatModel`
 with a fixed reply; it is never switched automatically.
