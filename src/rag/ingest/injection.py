@@ -159,6 +159,15 @@ _DATA_ZH = (
     r"(?:聊天记录|对话记录|对话内容|历史消息|系统提示词?"
     r"|用户(?:的)?(?:问题|数据|消息|信息|输入|文件|邮箱|隐私|聊天记录))"
 )
+_OBJECT_EN = rf"(?:{_SECRET_EN}|{_DATA_EN})"
+# Up to three words before the object, but not "with/using/via/in/by": "send requests with your
+# access token to the API" is how a client authenticates, not exfiltration.
+_FILLER = r"(?:(?!(?:with|using|via|in|by|through)\b)[\w'’-]+\s+){0,3}?"
+# One object or a list joined by "and", "or" or commas: "API keys and environment variables".
+_OBJECTS_EN = (
+    rf"{_OBJECT_EN}(?:\s*(?:,|and|or|&|plus)\s+(?:the\s+|all\s+|your\s+|any\s+)?"
+    rf"(?:[\w'’-]+\s+){{0,2}}?{_OBJECT_EN})*"
+)
 _TOOLISH_EN = (
     r"(?:tools?|functions?|commands?|shell|terminal|bash|scripts?|api|endpoint|plugin|webhook)"
 )
@@ -398,8 +407,8 @@ PATTERNS: tuple[InjectionPattern, ...] = (
         "exfiltration",
         "en",
         r"\b(?:send|post|upload|forward|e-?mail|leak|exfiltrate|transmit|share)\s+(?:me\s+)?"
-        r"(?:the\s+|all\s+|your\s+|any\s+|their\s+|its\s+)?(?:[\w'’-]+\s+){0,3}?"
-        rf"(?:{_SECRET_EN}|{_DATA_EN})\s+(?:to|into|at|via|over)\b",
+        rf"(?:the\s+|all\s+|your\s+|any\s+|their\s+|its\s+)?{_FILLER}{_OBJECTS_EN}"
+        r"\s+(?:to|into|at|via|over)\b",
         r"\b(?:paste|copy|enter|type|put|include|append|embed|encode)\s+"
         r"(?:the\s+|all\s+|your\s+|any\s+)?(?:[\w'’-]+\s+){0,3}?"
         rf"(?:{_SECRET_EN}|{_DATA_EN})\s+(?:[\w'’-]+\s+){{0,3}}?(?:in|into|to|at|on)\s+"
@@ -750,9 +759,14 @@ def scan_text(text: str) -> list[InjectionHit]:
         for hit in found:
             hit.start = m.start()
         hits.extend(found)
+    # Snippets of invisible text say what it is: the decoded tag text, the code points of a run.
     for name in ("hidden_unicode_tags", "invisible_run") if has_tags else ("invisible_run",):
         for m in _BY_NAME[name].regex.finditer(text):
-            hits.append(_signal_hit(name, m.start(), m.group(0)))
+            if name == "hidden_unicode_tags":
+                shown = "".join(chr(ord(c) - 0xE0000) for c in m.group(0))[:200]
+            else:
+                shown = " ".join(f"U+{ord(c):04X}" for c in m.group(0)[:20])
+            hits.append(_signal_hit(name, m.start(), shown))
     hits.extend(_base64_hits(text))
 
     # A `normalized` hit that only repeats a hit of another view is dropped; every other view
