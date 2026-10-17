@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002 (the docstrings show the full-width brackets that are escaped)
 """Context builder: retrieved chunks to numbered, delimited fragments (design s10-3, s11-3).
 
     ctx = build_context([result.chunks], budget_tokens=cfg.answer.context_tokens,
@@ -38,7 +39,33 @@ DEFAULT_METADATA_KEYS: tuple[str, ...] = ("title_path", "source_rel")
 TITLE_SEPARATOR = " > "
 
 # `<doc_fragment` or `</doc_fragment`, any case, spaces allowed: what a chunk must not contain.
-_DELIMITER = re.compile(rf"<(\s*/?\s*{FRAGMENT_TAG})", re.IGNORECASE)
+# Characters a model may not see: zero-width space, non-joiner, joiner, word joiner, BOM.
+_ZERO_WIDTH = "".join(chr(c) for c in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF))
+_GAP = f"[{_ZERO_WIDTH}]*"
+_SPACE_OR_GAP = rf"[\s{_ZERO_WIDTH}]*"
+_FULL_WIDTH_OFFSET = 0xFEE0  # ASCII "!".."~" + offset = the full-width form
+
+
+def _look_alike(char: str) -> str:
+    """Regex class for one ASCII character of the tag name and its full-width forms."""
+    forms = {char.lower(), char.upper()}
+    forms |= {chr(ord(c) + _FULL_WIDTH_OFFSET) for c in tuple(forms)}
+    return "[" + "".join(sorted(forms)) + "]"
+
+
+# The `<` of anything that reads as `<doc_fragment` or `</doc_fragment`: any case, ASCII or
+# full-width letters, `<` as ASCII, full-width or small form, spaces or zero-width characters in
+# between. Only the `<` is replaced, so the text stays readable.
+_LESS_THAN = "[<" + chr(0xFF1C) + chr(0xFE64) + "]"
+_SLASH = "[/" + chr(0xFF0F) + "]"
+_TAG_NAME = _GAP.join(_look_alike(char) for char in FRAGMENT_TAG)
+_DELIMITER = re.compile(rf"{_LESS_THAN}(?={_SPACE_OR_GAP}{_SLASH}?{_SPACE_OR_GAP}{_TAG_NAME})")
+# A line starting with a bracketed number looks like the `[n]` line before a fragment.
+_OPEN_BRACKETS = r"\[" + chr(0x3010) + chr(0xFF3B)
+_CLOSE_BRACKETS = r"\]" + chr(0x3011) + chr(0xFF3D)
+_NUMBER_LINE = re.compile(
+    rf"^([ \t{chr(0x3000)}]*)(?=[{_OPEN_BRACKETS}]\s*\d+\s*[{_CLOSE_BRACKETS}])", re.MULTILINE
+)
 # Characters counted as one token each: CJK ideographs, kana, Hangul, full-width forms.
 _WIDE = re.compile(r"[　-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]")
 _CHARS_PER_TOKEN = 3.0  # other text; English is nearer 4, code nearer 3: err on the high side
@@ -55,9 +82,15 @@ def estimate_tokens(text: str) -> int:
 
 
 def escape_delimiters(text: str) -> str:
-    """Neutralize anything that reads as a fragment delimiter (`<doc_fragment`, `</doc_fragment`
-    in any case and spacing) by writing its `<` as `&lt;` (s11-3)."""
-    return _DELIMITER.sub(r"&lt;\1", text)
+    """Neutralize what could pass for a fragment boundary in untrusted text (s11-3):
+
+    - the `<` of anything that reads as `<doc_fragment` or `</doc_fragment` (any case, full-width
+      letters or brackets, spaces or zero-width characters in between) becomes `&lt;`;
+    - a line starting with a bracketed number (`[2]`, `【2】`, `［2］`), which looks like the
+      number line before a fragment, gets a backslash in front of the bracket.
+    """
+    text = _DELIMITER.sub("&lt;", text)
+    return _NUMBER_LINE.sub(lambda match: match.group(1) + "\\", text)
 
 
 class Fragment(BaseModel):
