@@ -15,7 +15,7 @@
 | 3 | P0-03 | HF 数据下载：从 hf-mirror 下载文档集和 65 道评测题，核对 2,647 篇和 65 题，存到本地（不进仓库） | P0-01 | s1-1、s14-2、s14-6 | 否 | 完成 |
 | 4 | P0-04 | 读取、清洗、切块：Markdown 读取器、清洗规则（在管道之前跑）、按标题切加 token 上限（重排模型分词器）、并入太短的块、整页切完再编号、元数据白名单 | P0-01、P0-03 | s5-2、s5-4、s6-2、s7-1、s7-2 | 否 | 完成 |
 | 5 | P0-05 | 向量：向量客户端工厂、L0 缓存、批量和重试、花费账本、预算检查 | P0-01 | s7-4（算向量）、s12-1、s16-7 | 少量（几分钱的实测） | 完成 |
-| 6 | P0-06 | 写入和增量更新：EsVectorStore（先写后删、bulk 逐条检查）、IngestionPipeline UPSERTS_AND_DELETE、docstore 存盘、run 之前的防误删检查、读取失败用旧版本代替、数据代号 | P0-02、P0-04、P0-05 | s7-4、s7-6 | 否（用假向量测） | 待做 |
+| 6 | P0-06 | 写入和增量更新：EsVectorStore（先写后删、bulk 逐条检查）、IngestionPipeline UPSERTS_AND_DELETE、docstore 存盘、run 之前的防误删检查、读取失败用旧版本代替、数据代号 | P0-02、P0-04、P0-05 | s7-4、s7-6 | 否（用假向量测） | 完成 |
 | 7 | P0-07 | 两路检索：EsHybridRetriever（一次 _msearch 发 BM25 和 kNN、过滤条件、一路失败标 degraded）、RRF、按正文去重 | P0-02、P0-06 | s9-1、s9-2、s9-3 | 否 | 待做 |
 | 8 | P0-08 | 重排和阈值：BatchedTimeoutRerank（本机 bge-reranker-base、分批、按剩余时间停、并发上限）、RerankThreshold、相邻段扩展 | P0-07 | s10-1、s10-2、s10-3、s9-1 | 否（本机模型） | 待做 |
 | 9 | P0-09 | search_docs：MCP 服务（mcp 2.3 MCPServer，stdio 和 streamable-http）和 HTTP 接口、过滤条件白名单、权限过滤入口、错误类别 | P0-08 | s16-1、s16-4、s16-8 | 否 | 待做 |

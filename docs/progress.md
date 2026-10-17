@@ -11,9 +11,10 @@
 | 2026-10-17 08:56 | P1-01 | 完成 | 2 轮 | 109 个单元测试通过（另有 4 个 llm 测试跑过一次，评审后回答和流式两个又跑了一次，都通过） | 0.0027 | 网关只支持 function_calling 结构化输出，json_schema 返回 400；流式可用，第一段正文约 1 秒到；deepseek-v4-flash 是推理模型，推理 token 算在输出里，max_tokens 要给推理留够：回答至少 2048（online 用 4096），只输出小 JSON 的 cheap 用 1024；在线回答连接超时 3 秒、读超时 10 秒、一次调用最多 12 秒；对话模型的价格仍是估计值（每百万 token 输入 2 元、输出 8 元） |
 | 2026-10-17 09:44 | P0-04 | 完成 | 2 轮 | 142 个单元测试通过（本 spec 新增 33 个；评审时在 P0-05 之上是 124 个） | 0 | 全量 2,647 篇切成 26,372 块，token 中位数 232、最长 374；HF 导出丢了首字符的 2,481 篇已按证据补回 |
 | 2026-10-17 10:54 | P0-10 | 完成 | 1 轮 | 167 个单元测试通过（本 spec 新增 25 个） | 0 | 65 题最少能分辨 6 题的差，即 9.2 个百分点；65 道 HF 公开题已导出到 evals/datasets/hf_docs/huggingface_doc_qa_eval.jsonl；运行评测的入口由 P0-12 写；P0-07 要填 RetrievalResult.routes 并用固定规则排同分的段，P0-09 返回 search_docs 时去掉 routes |
+| 2026-10-17 12:17 | P0-06 | 完成 | 3 轮 | 198 个单元测试、21 个集成测试通过 | 0.047 | 50 篇真实向量写入 kb_hf_docs_v1（438 块，94,040 token，31 秒）；docstore 绑定索引 uuid，索引重建后不再用旧的 docstore；假向量写进 fake_kb_hf_docs_v1，不进真索引；共享 .git/config 的 core.bare 曾被改成 true，已改回 |
 
 ## 已知问题
 
 ## 花费累计
 
-0.0028 元（0.002792 元：对话模型 0.002752 元，向量模型 0.00004 元；账本 C:/workspace/rag-platform-data/cost/ledger.jsonl，`uv run python -m rag.cost summary` 查看）
+0.0498 元（0.049812 元：对话模型 0.002752 元，向量模型 0.04706 元；账本 C:/workspace/rag-platform-data/cost/ledger.jsonl，`uv run python -m rag.cost summary` 查看）
