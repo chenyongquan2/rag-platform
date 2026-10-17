@@ -15,6 +15,7 @@ directly (stdout stays free for the MCP stdio transport).
 from __future__ import annotations
 
 import atexit
+import contextlib
 import copy
 import json
 import logging
@@ -22,6 +23,7 @@ import logging.handlers
 import queue
 import sys
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -167,6 +169,8 @@ class _SkipWriterRecords(logging.Filter):
 
 
 LOG_QUEUE_SIZE = 10_000
+# Longest wait for the writer thread when logging is taken down (also at process exit).
+STOP_TIMEOUT_S = 5.0
 _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s"
 
 _listeners: list[tuple[logging.handlers.QueueListener, logging.Handler]] = []
@@ -215,25 +219,70 @@ def _install(root: logging.Logger, handler: logging.Handler, context: logging.Fi
     root.addHandler(handler)
 
 
-def flush_logging() -> None:
-    """Wait until the writer threads have written every queued line."""
+def flush_logging(timeout_s: float = STOP_TIMEOUT_S) -> bool:
+    """Wait until the writer threads have written every queued line; False after `timeout_s`."""
+    deadline = time.monotonic() + timeout_s
     for listener, _ in list(_listeners):
-        listener.queue.join()
+        while listener.queue.unfinished_tasks:  # type: ignore[attr-defined]
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+    return True
 
 
-def teardown_logging() -> None:
+def _stop_writer(listener: logging.handlers.QueueListener, timeout_s: float) -> int:
+    """Queue the stop marker and wait for the writer thread, each at most until `timeout_s`
+    has passed; returns the number of lines still queued when the thread did not finish."""
+    thread = listener._thread  # type: ignore[attr-defined]
+    if thread is None:
+        return 0
+    deadline = time.monotonic() + timeout_s
+    line_queue = listener.queue
+    with contextlib.suppress(queue.Full):
+        line_queue.put(listener._sentinel, timeout=timeout_s)  # type: ignore[attr-defined]
+    thread.join(max(0.0, deadline - time.monotonic()))
+    left = 0
+    if thread.is_alive():
+        while True:
+            try:
+                item = line_queue.get_nowait()
+            except queue.Empty:
+                break
+            line_queue.task_done()
+            if item is not listener._sentinel:  # type: ignore[attr-defined]
+                left += 1
+        # The thread is a daemon: it stops after its current line, or with the process.
+        with contextlib.suppress(queue.Full):
+            line_queue.put_nowait(listener._sentinel)  # type: ignore[attr-defined]
+    listener._thread = None  # type: ignore[attr-defined]
+    return left
+
+
+def teardown_logging(timeout_s: float = STOP_TIMEOUT_S) -> None:
     """Remove the handlers `setup_logging` installed, write the queued lines, stop the writer
-    threads and restore the root level."""
+    threads and restore the root level. A writer stuck on the disk or the file lock is given
+    `timeout_s`; the lines it did not write are counted on stderr (logging is being taken down,
+    so stderr is the only place left to say so)."""
     global _previous_root_level
     root = logging.getLogger()
+    dropped_earlier = 0
     for handler in list(root.handlers):
         if getattr(handler, OWN_HANDLER_ATTR, False):
             root.removeHandler(handler)
             handler.close()
+            dropped_earlier += getattr(handler, "dropped", 0)
+    not_written = 0
     while _listeners:
         listener, file_handler = _listeners.pop()
-        listener.stop()
+        not_written += _stop_writer(listener, timeout_s)
         file_handler.close()
+    if not_written or dropped_earlier:
+        print(
+            f"rag.observe.logs: {not_written} log lines not written (the writer thread did not "
+            f"finish within {timeout_s} s); {dropped_earlier} log lines dropped earlier because "
+            "the queue was full",
+            file=sys.stderr,
+        )
     if _previous_root_level is not None:
         root.setLevel(_previous_root_level)
         _previous_root_level = None

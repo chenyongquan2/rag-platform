@@ -7,6 +7,7 @@ import logging
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from collections.abc import Iterator
 from datetime import datetime
@@ -14,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from rag.observe import logs as logs_module
 from rag.observe import request_span, shutdown_observability
 from rag.observe.logs import (
     OWN_HANDLER_ATTR,
@@ -222,3 +224,37 @@ def test_two_processes_share_one_log_file(tmp_path: Path) -> None:
     rows = _all_rows(log_dir, "rag.jsonl")
     messages = sorted(r["message"].split()[0] for r in rows if r["logger"] == "rag.test.process")
     assert messages == sorted(f"p{n}-{i}" for n in range(2) for i in range(60))
+
+
+def test_teardown_is_bounded_when_the_writer_is_stuck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A writer thread stuck on the disk (or the file lock) must not hang shutdown or exit:
+    the stop marker and the join wait at most `timeout_s`, the lines left are counted on
+    stderr."""
+    monkeypatch.setattr(logs_module, "LOG_QUEUE_SIZE", 2)
+    setup_logging(observe_settings(log_dir=str(tmp_path), log_stderr_level="OFF"), "svc")
+    ((_listener, file_handler),) = logs_module._listeners
+    release, started = threading.Event(), threading.Event()
+
+    def stuck(line: str) -> None:
+        started.set()
+        release.wait(30)
+
+    file_handler.writer.append_line = stuck  # type: ignore[attr-defined, method-assign]
+    log = logging.getLogger("rag.test.stuck")
+    log.warning("line 0")
+    assert started.wait(10)  # the writer thread holds line 0
+    for i in range(1, 5):
+        log.warning("line %d", i)  # 2 wait in the full queue, 2 are dropped
+    try:
+        begin = time.monotonic()
+        teardown_logging(timeout_s=0.3)
+        assert time.monotonic() - begin < 3
+    finally:
+        release.set()
+    err = capsys.readouterr().err
+    assert "2 log lines not written" in err
+    assert "2 log lines dropped earlier" in err
+    assert logs_module._listeners == []
+    assert _own_handlers() == []
