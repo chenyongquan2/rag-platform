@@ -1,6 +1,6 @@
 # P0-10 Retrieval evaluation harness
 
-Status: review
+Status: done
 Phase: P0
 Depends on: P0-01 (data classes, KB config), P0-03 (eval questions, doc_id scheme). Independent of the retriever (P0-07/08): tested with fakes.
 Design sections: s14-1, s14-2, s14-4, s14-5, s14-6, s10-1 (also s9-1 per-route results, s5-4 doc_id = page, s16-2 evals/ layout)
@@ -14,7 +14,8 @@ rerank latency and nDCG for rerank_n 10, 20, 30.
 
 ## Interface
 - `rag.types.RouteHit(chunk_id, doc_id, rank, score=None)`; `RetrievalResult.routes: dict[str, list[RouteHit]]`
-  (route name, e.g. `bm25`/`vector` -> that route's own ranked list; for eval and trace, left out of the JSON sent to callers).
+  (route name, e.g. `bm25`/`vector` -> that route's own ranked list; serialized; the search_docs response of P0-09
+  drops it at its boundary with `model_dump(exclude={"routes"})`).
 - `rag.eval.retrieval.Retriever` protocol: `retrieve(question: str, kb: str, top_k: int) -> RetrievalResult`.
   Final list = `result.chunks` in list order (ties must already be broken by the retriever); routes = `result.routes`.
 - `rag.eval.questions`: `LabeledQuestion(qid, question, answer, relevant_pages, relevant_chunks=[])` (a page is a
@@ -26,7 +27,8 @@ rerank latency and nDCG for rerank_n 10, 20, 30.
   seed=0) -> PermutationResult`, `wilson_interval(successes, n, *, confidence=0.95)`, `paired_changes(a, b) ->
   PairedChanges`, `min_detectable_difference(n, *, alpha=0.05, worsened=0) -> MinDetectable | None`.
 - `rag.eval.retrieval.metrics`: `hit_at_k`, `mrr_at_k`, `ndcg_at_k`, `recall_at_k(ranked, relevant, k)`,
-  `compute_metrics(ranked, relevant, ks) -> dict[str, float] | None`.
+  `compute_metrics(ranked, relevant, ks) -> dict[str, float] | None`, `cap_ks(ks, list_len)` (a k above the final
+  list length becomes that length, with a warning); `rag.eval.stats.CHANGE_TOL` (one "changed" threshold).
 - `rag.eval.retrieval`: `run_retrieval_eval(retriever, question_set, *, kb_config, top_k=None, ks=(1, 3, 5, 10),
   label, provenance, clock, now) -> RunRecord`; `collect_provenance(*, settings, models, repo_root) -> Provenance`, `make_run_id(kb, label)`, `write_run(record, *, public,
   reports_root="evals/reports") -> Path` (`public/<run_id>/` or git-ignored `private/<run_id>/`: `results.json`,
@@ -36,7 +38,7 @@ rerank latency and nDCG for rerank_n 10, 20, 30.
   [--iterations N] [--seed S] [--alpha A] [--out FILE]` and `... export-hf [--manifest P] [--out P] [--no-download]`.
 
 ## Acceptance criteria
-- [x] AC1 Per-route hits ride on `RetrievalResult` and stay out of its JSON — `tests/unit/test_types.py::test_retrieval_result_routes_kept_out_of_json`
+- [x] AC1 Per-route hits ride on `RetrievalResult` and survive a JSON round trip; excluding them is explicit — `tests/unit/test_types.py::test_retrieval_result_routes_roundtrip_json`
 - [x] AC2 Question sets round-trip through JSONL with a file sha256; duplicate qids, malformed lines and pages of another kb are rejected; HF eval questions become page labels — `tests/unit/test_eval_questions.py::test_question_set_roundtrip_and_hash`, `::test_question_set_rejects_bad_input`, `::test_labels_from_hf_eval_questions`, `::test_export_hf_cli_writes_question_set`
 - [x] AC3 The committed HF set has 65 unique questions, each with one `hf_docs:` page label — `tests/unit/test_eval_questions.py::test_committed_hf_question_set`
 - [x] AC4 Hit@k, MRR, Recall@k, nDCG@k match hand-computed values — `tests/unit/test_eval_metrics.py::test_metrics_hand_computed`
@@ -46,21 +48,22 @@ rerank latency and nDCG for rerank_n 10, 20, 30.
 - [x] AC8 Exact McNemar p: 2 better/0 worse = 0.5, 5/1 = 0.21875, 0/0 = 1, symmetric — `tests/unit/test_eval_stats.py::test_mcnemar_exact_known_tables`
 - [x] AC9 Sign-flip permutation test: exact enumeration when 2^changed <= iterations, else seeded Monte Carlo (same seed, same p) — `::test_permutation_exact_for_few_changes`, `::test_permutation_monte_carlo_is_seeded`
 - [x] AC10 Wilson interval on known values — `::test_wilson_interval_known_values`
-- [x] AC11 Improved/worsened/unchanged counts; minimum detectable difference for 65 questions = 6 questions (9.2 points) — `::test_paired_changes_counts`, `::test_min_detectable_difference`
-- [x] AC12 A run scores the final list and every route at page and chunk level, records per-hit route ranks and latency; a retriever error is recorded and scored 0 — `tests/unit/test_eval_run.py::test_run_scores_final_list_and_routes`, `::test_run_records_retriever_errors`
-- [x] AC13 A run writes `results.json` and `report.md` with git commit, KB config snapshot and hash, index version, data generation, question-set hash, model ids, lock hash; private runs go to the git-ignored dir; an existing run dir is refused — `::test_write_run_record_and_provenance`, `::test_private_runs_go_to_ignored_dir`
+- [x] AC11 Improved/worsened/unchanged counts with the same threshold as the permutation test; minimum detectable difference for 65 questions = 6 questions (9.2 points) — `::test_paired_changes_counts`, `::test_min_detectable_difference`
+- [x] AC12 A run scores the final list and every route at page and chunk level, records per-hit route ranks and latency; a retriever error is recorded and scored 0; a k above top_k is capped with a warning — `tests/unit/test_eval_run.py::test_run_scores_final_list_and_routes`, `::test_run_records_retriever_errors`, `::test_ks_above_top_k_are_capped_with_a_warning`
+- [x] AC13 A run writes `results.json` and `report.md` (resolution line per level, from the questions labelled at that level) with git commit and dirty flag (untracked files count, eval reports do not), KB config snapshot and hash, index version, data generation, question-set hash, model ids, lock hash; private runs go to the git-ignored dir; an existing run dir is refused — `::test_write_run_record_and_provenance`, `::test_private_runs_go_to_ignored_dir`, `::test_git_dirty_counts_untracked_files`
 - [x] AC14 Compare: McNemar for Hit@k, permutation for MRR/nDCG/Recall, changed questions with their top hits; CLI prints both and resolves run ids — `tests/unit/test_eval_compare.py::test_compare_runs_statistics`, `::test_compare_cli_prints_tests_and_changed_questions`
-- [x] AC15 Rerank curve: the reranker gets the first n fused candidates for each n, latency and nDCG per n, Markdown table — `tests/unit/test_eval_rerank_curve.py::test_rerank_curve_measures_each_n`
+- [x] AC15 Rerank curve: the reranker gets the first n fused candidates for each n, latency and nDCG per n (k capped at final_k), Markdown table — `tests/unit/test_eval_rerank_curve.py::test_rerank_curve_measures_each_n`
 
 ## Out of scope
 The real retriever and reranker (P0-07, P0-08); the full 65-question run and the real latency curve (P0-12); answer,
 refusal and judge metrics, synthetic questions, dev/held-out splits (P1); CI smoke gate (s14-5, later).
 
 Also (checked by running, not by a test): `export-hf` from the pinned eval parquet wrote the 65 questions
-(sha256 `f895405b…`); `python -m rag.data.hf verify` reports 0 missing eval sources. 132 unit tests pass.
+(sha256 `f895405b…`; source, license and changes in `evals/datasets/hf_docs/NOTICE.md`); `python -m rag.data.hf verify`
+reports 0 missing eval sources. 167 unit tests pass after the rebase on P0-04 (25 added by this spec).
 
 ## Handoff (filled at the end)
-- Files: `src/rag/types.py` (`RouteHit`, `RetrievalResult.routes`), `src/rag/eval/{__init__,stats,questions}.py`, `src/rag/eval/retrieval/{__init__,__main__,cli,protocol,metrics,record,runner,report,compare,rerank_curve}.py`, `src/rag/testing/{__init__,retrieval}.py`, `evals/datasets/hf_docs/huggingface_doc_qa_eval.jsonl`, `tests/unit/test_eval_{stats,metrics,questions,run,compare,rerank_curve}.py`, `tests/unit/test_types.py`, `README.md`, `docs/decisions.md`.
-- Decisions (docs/decisions.md): code in `src/rag/eval/`, data and reports in `evals/`; per-route lists as a typed `RetrievalResult.routes` excluded from caller JSON; page = doc_id, k counts list positions, a page repeated in the list counts once, MRR cut at max(k); final list scored in list order (P0-07 must break score ties deterministically); permutation test exact when 2^changed <= iterations, else seeded; minimum detectable difference = fewest improved questions with exact McNemar p <= 0.05 (65 questions: 6, 9.2 points); reports under `evals/reports/public|private/<run_id>/`, `public` passed explicitly; retriever errors scored 0 and listed; HF set committed with stripped whitespace and without `context`; rerank curve interleaves n per question and times only the reranker call after one warm-up call.
-- Open issues: no `run` CLI yet; P0-12 builds the retriever, calls `run_retrieval_eval` and `write_run(public=is_public_kb_file(...))`, and passes model versions (e.g. the reranker snapshot revision) via `collect_provenance(models=...)`. P0-07 must fill `RetrievalResult.routes` and break RRF ties deterministically. Rebase on main conflicts only in `docs/decisions.md` (both specs append at the end).
-- Review rounds: pending.
+- Files: `src/rag/types.py` (`RouteHit`, `RetrievalResult.routes`), `src/rag/eval/{__init__,stats,questions}.py`, `src/rag/eval/retrieval/{__init__,__main__,cli,protocol,metrics,record,runner,report,compare,rerank_curve}.py`, `src/rag/testing/{__init__,retrieval}.py`, `evals/datasets/hf_docs/{huggingface_doc_qa_eval.jsonl,NOTICE.md}`, `tests/unit/test_eval_{stats,metrics,questions,run,compare,rerank_curve}.py`, `tests/unit/test_types.py`, `README.md`, `docs/decisions.md`.
+- Decisions (docs/decisions.md): code in `src/rag/eval/`, data and reports in `evals/`; per-route lists as a typed, serialized `RetrievalResult.routes`, dropped only in the search_docs response; page = doc_id, k counts list positions and is capped at the final list length, a page repeated in the list counts once, MRR cut at max(k); final list scored in list order (P0-07 must break score ties deterministically); permutation test exact when 2^changed <= iterations, else seeded; minimum detectable difference = fewest improved questions with exact McNemar p <= 0.05 (65 questions: 6, 9.2 points), written per level; reports under `evals/reports/public|private/<run_id>/`, `public` passed explicitly; dirty = changed or untracked files outside `evals/reports/`; retriever errors scored 0 and listed; HF set committed with stripped whitespace and without `context`; rerank curve interleaves n per question and times only the reranker call after one warm-up call.
+- Open issues: no `run` CLI yet; P0-12 builds the retriever, calls `run_retrieval_eval` and `write_run(public=is_public_kb_file(...))`, and passes model versions (e.g. the reranker snapshot revision) via `collect_provenance(models=...)`. P0-07 must fill `RetrievalResult.routes` and break RRF ties deterministically. P0-09 must drop `routes` from the search_docs response (`model_dump(exclude={"routes"})`).
+- Review rounds: 1 (APPROVE with minor notes, all fixed: NOTICE for the HF set; k capped at the final list; `routes` serialized, excluded at the search_docs boundary; resolution per level; one change threshold; untracked files make a run dirty; README example without a hard-coded `public=True`).
