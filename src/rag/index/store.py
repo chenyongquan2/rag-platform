@@ -168,7 +168,8 @@ class EsVectorStore(BasePydanticVectorStore):
 
     # ---- writes -----------------------------------------------------------------------------
 
-    def _source(self, node: BaseNode, run_id: str) -> tuple[str, dict[str, Any]]:
+    def _check(self, node: BaseNode) -> str:
+        """The chunk's doc id; raises `StoreFieldError` if the chunk cannot be written."""
         doc_id = node.ref_doc_id or node.metadata.get("doc_id")
         if not doc_id or doc_id not in self._fields:
             raise StoreFieldError(f"{node.node_id}: no write fields for document {doc_id!r}")
@@ -181,43 +182,53 @@ class EsVectorStore(BasePydanticVectorStore):
                 f"(or are write-time fields set by the store: {list(RUN_FIELDS)}); add them to "
                 "rag.index.mapping first"
             )
+        return str(doc_id)
+
+    def _source(self, node: BaseNode, run_id: str) -> dict[str, Any]:
+        """The `_source` of a checked chunk (copies its vector)."""
+        doc_id = self._check(node)
         source: dict[str, Any] = {k: v for k, v in node.metadata.items() if v is not None}
         written = self._fields[doc_id]
         source.update(
             chunk_id=node.node_id,
             doc_id=doc_id,
             content=node.get_content(metadata_mode=MetadataMode.NONE),
-            embedding=list(node.embedding),
+            embedding=list(node.embedding or []),
             ingest_run_id=run_id,
             content_hash=written.content_hash,
             source_version=written.source_version,
         )
-        return doc_id, source
+        return source
 
     def add(self, nodes: Sequence[BaseNode], **_: Any) -> list[str]:
         """Bulk-index the chunks; raise `BulkWriteError` if any item failed.
 
-        Every chunk is checked before the first request, so a bad chunk sends nothing.
+        Every chunk is checked before the first request, so a bad chunk sends nothing. Request
+        bodies are built one batch at a time, so only one batch of vectors is copied at once.
         """
-        if self._run_id is None:
+        run_id = self._run_id
+        if run_id is None:
             raise StoreFieldError("call begin_run(run_id, fields) before add()")
-        prepared = [self._source(node, self._run_id) for node in nodes]
+        doc_ids = [self._check(node) for node in nodes]
         ids: list[str] = []
-        for batch in _batches(prepared, self.bulk_batch_size):
+        for start in range(0, len(nodes), self.bulk_batch_size):
+            batch = nodes[start : start + self.bulk_batch_size]
+            batch_docs = doc_ids[start : start + self.bulk_batch_size]
             operations: list[dict[str, Any]] = []
-            for _doc_id, source in batch:
-                operations.append({"index": {"_index": self.index_name, "_id": source["chunk_id"]}})
-                operations.append(source)
+            for node in batch:
+                operations.append({"index": {"_index": self.index_name, "_id": node.node_id}})
+                operations.append(self._source(node, run_id))
             resp = self._es.bulk(operations=operations, refresh=False)
+            del operations
             failed: list[BulkItemFailure] = []
-            for item, (doc_id, source) in zip(resp["items"], batch, strict=True):
+            for item, node, doc_id in zip(resp["items"], batch, batch_docs, strict=True):
                 result = next(iter(item.values()))
                 status = int(result.get("status", 0))
                 if status >= 300 or "error" in result:
                     error = result.get("error") or {}
                     failed.append(
                         BulkItemFailure(
-                            id=str(result.get("_id", source["chunk_id"])),
+                            id=str(result.get("_id", node.node_id)),
                             status=status,
                             error_type=str(error.get("type", "unknown")),
                             reason=str(error.get("reason", ""))[:300],
@@ -225,7 +236,7 @@ class EsVectorStore(BasePydanticVectorStore):
                     )
                 else:
                     self._written[doc_id] = self._written.get(doc_id, 0) + 1
-                    ids.append(source["chunk_id"])
+                    ids.append(node.node_id)
             if failed:
                 raise BulkWriteError(failed, written=len(ids))
         return ids
@@ -237,36 +248,51 @@ class EsVectorStore(BasePydanticVectorStore):
     def refresh(self) -> None:
         self._es.indices.refresh(index=self.index_name)
 
-    def finalize(self) -> FinalizeResult:
+    def _delete_by_query(self, query: dict[str, Any]) -> int:
+        """Delete matching chunks, refresh, return how many; raise `FinalizeError` when
+        Elasticsearch reports failures or a time-out (then only part may be deleted)."""
+        resp = self._es.delete_by_query(
+            index=self.index_name,
+            query=query,
+            refresh=True,
+            conflicts="abort",
+            wait_for_completion=True,
+        )
+        failures = resp.get("failures") or []
+        if failures:
+            raise FinalizeError(
+                f"delete_by_query on {self.index_name} reported {len(failures)} failures, "
+                f"first: {failures[0]}"
+            )
+        if resp.get("timed_out"):
+            raise FinalizeError(
+                f"delete_by_query on {self.index_name} timed out after deleting "
+                f"{resp.get('deleted', 0)} chunks"
+            )
+        return int(resp.get("deleted", 0))
+
+    def finalize(self, also_clean: Iterable[str] = ()) -> FinalizeResult:
         """Delete chunks of pending pages that this run did not write, then refresh.
 
+        `also_clean` adds pages LlamaIndex did not mark (new to the docstore) whose chunks from
+        another run must go too: a run that failed after writing them never saved its docstore.
         Call after the pipeline run and `refresh()`: with the new chunks visible, the query
         cannot meet a chunk that this run is overwriting.
         """
         if self._run_id is None:
             raise StoreFieldError("call begin_run(run_id, fields) before finalize()")
         pending = list(self._pending)
+        targets = list(dict.fromkeys([*pending, *also_clean]))
         deleted = 0
-        for batch in _batches(pending, self.delete_batch_size):
-            resp = self._es.delete_by_query(
-                index=self.index_name,
-                query={
+        for batch in _batches(targets, self.delete_batch_size):
+            deleted += self._delete_by_query(
+                {
                     "bool": {
                         "filter": [{"terms": {"doc_id": list(batch)}}],
                         "must_not": [{"term": {"ingest_run_id": self._run_id}}],
                     }
-                },
-                refresh=True,
-                conflicts="abort",
-                wait_for_completion=True,
+                }
             )
-            failures = resp.get("failures") or []
-            if failures:
-                raise FinalizeError(
-                    f"delete_by_query on {self.index_name} reported {len(failures)} failures, "
-                    f"first: {failures[0]}"
-                )
-            deleted += int(resp.get("deleted", 0))
         result = FinalizeResult(
             updated_docs=[d for d in pending if d in self._written],
             removed_docs=[d for d in pending if d not in self._written],
@@ -274,6 +300,37 @@ class EsVectorStore(BasePydanticVectorStore):
         )
         self._pending = {}
         return result
+
+    def sweep(self, doc_ids: Iterable[str]) -> int:
+        """Delete every chunk of these pages (pages in the index the docstore does not know)."""
+        targets = list(doc_ids)
+        deleted = 0
+        for batch in _batches(targets, self.delete_batch_size):
+            deleted += self._delete_by_query({"terms": {"doc_id": list(batch)}})
+        return deleted
+
+    def indexed_doc_ids(self, *, page_size: int = 1000) -> set[str]:
+        """Every doc id that has a chunk in the index (composite aggregation, paged)."""
+        found: set[str] = set()
+        after: dict[str, Any] | None = None
+        while True:
+            composite: dict[str, Any] = {
+                "size": page_size,
+                "sources": [{"doc_id": {"terms": {"field": "doc_id"}}}],
+            }
+            if after is not None:
+                composite["after"] = after
+            resp = self._es.search(
+                index=self.index_name, size=0, aggs={"doc_ids": {"composite": composite}}
+            )
+            agg = resp["aggregations"]["doc_ids"]
+            found.update(str(b["key"]["doc_id"]) for b in agg["buckets"])
+            after = agg.get("after_key")
+            if not agg["buckets"] or after is None:
+                return found
+
+    def chunk_count(self) -> int:
+        return int(self._es.count(index=self.index_name)["count"])
 
     # ---- reads ------------------------------------------------------------------------------
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import math
+import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
@@ -95,7 +96,20 @@ class _FakeIndices:
             )
         self._es.mappings[index] = copy.deepcopy(dict(mappings or {}))
         self._es.docs[index] = {}
+        self._es.uuids[index] = uuid.uuid4().hex
         return {"acknowledged": True, "index": index}
+
+    def delete(self, *, index: str) -> dict[str, Any]:
+        """Delete an index and every alias on it (as Elasticsearch does)."""
+        self._es.require(index)
+        for name in (self._es.mappings, self._es.docs, self._es.uuids):
+            del name[index]
+        self._es.aliases = {a: i for a, i in self._es.aliases.items() if i != index}
+        return {"acknowledged": True}
+
+    def get_settings(self, *, index: str) -> dict[str, Any]:
+        self._es.require(index)
+        return {index: {"settings": {"index": {"uuid": self._es.uuids[index]}}}}
 
     def exists(self, *, index: str) -> bool:
         return index in self._es.mappings or index in self._es.aliases
@@ -172,6 +186,7 @@ class FakeElasticsearch:
         self.docs: dict[str, dict[str, dict[str, Any]]] = {}
         self.mappings: dict[str, dict[str, Any]] = {}
         self.aliases: dict[str, str] = {}
+        self.uuids: dict[str, str] = {}
         """alias -> the one index it points to."""
         self.indices = _FakeIndices(self)
         self.bulk_calls: list[int] = []
@@ -180,6 +195,7 @@ class FakeElasticsearch:
         self.fail_ids: set[str] = set()
         self.delete_failures: list[dict[str, Any]] = []
         self.delete_queries: list[dict[str, Any]] = []
+        self.delete_timed_out = False
 
     def require(self, index: str) -> None:
         if index not in self.mappings:
@@ -259,13 +275,15 @@ class FakeElasticsearch:
         self.require(index)
         self.delete_queries.append({"query": copy.deepcopy(dict(query)), **kwargs})
         if self.delete_failures:
-            return {"deleted": 0, "failures": list(self.delete_failures)}
+            return {"deleted": 0, "failures": list(self.delete_failures), "timed_out": False}
+        if self.delete_timed_out:
+            return {"deleted": 0, "failures": [], "timed_out": True}
         doomed = [i for i, s in self.docs[index].items() if matches(s, i, query)]
         for doc_id in doomed:
             del self.docs[index][doc_id]
         if kwargs.get("refresh"):
             self.refreshes.append(index)
-        return {"deleted": len(doomed), "failures": []}
+        return {"deleted": len(doomed), "failures": [], "timed_out": False}
 
     # ---- reads ------------------------------------------------------------------------------
 
@@ -274,6 +292,24 @@ class FakeElasticsearch:
     ) -> list[tuple[str, dict[str, Any]]]:
         self.require(index)
         return [(i, s) for i, s in self.docs[index].items() if matches(s, i, query)]
+
+    def _composite(
+        self, index: str, query: Mapping[str, Any] | None, aggs: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """A `composite` aggregation with one `terms` source, paged by `after`."""
+        ((name, spec),) = aggs.items()
+        comp = spec["composite"]
+        ((key, source),) = comp["sources"][0].items()
+        field_name = source["terms"]["field"]
+        values = sorted({v for _, s in self._hits(index, query) for v in _values(s, field_name)})
+        after = (comp.get("after") or {}).get(key)
+        if after is not None:
+            values = [v for v in values if v > after]
+        page = values[: comp["size"]]
+        result: dict[str, Any] = {"buckets": [{"key": {key: v}, "doc_count": 1} for v in page]}
+        if page:
+            result["after_key"] = {key: page[-1]}
+        return {name: result}
 
     def count(self, *, index: str, query: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return {"count": len(self._hits(index, query))}
@@ -284,9 +320,12 @@ class FakeElasticsearch:
         index: str,
         query: Mapping[str, Any] | None = None,
         knn: Mapping[str, Any] | None = None,
+        aggs: Mapping[str, Any] | None = None,
         size: int = 10,
         **_: Any,
     ) -> dict[str, Any]:
+        if aggs is not None:
+            return {"hits": {"hits": []}, "aggregations": self._composite(index, query, aggs)}
         if knn is not None:
             hits = self._hits(index, knn.get("filter"))
             scored = [

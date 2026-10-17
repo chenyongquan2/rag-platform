@@ -204,3 +204,65 @@ def test_query_returns_nodes_by_vector(es: FakeElasticsearch) -> None:
         )
     )
     assert only_a.ids == [f"{A}#0"]
+
+
+def test_finalize_also_cleans_given_docs(es: FakeElasticsearch) -> None:
+    """A page that is new to the docstore can still have chunks from a run that failed."""
+    failed_run = EsVectorStore(es, INDEX)
+    failed_run.begin_run("run-1", fields(A))
+    failed_run.add([chunk(A, 0), chunk(A, 1), chunk(A, 2)])  # docstore never saved
+
+    store = EsVectorStore(es, INDEX)
+    store.begin_run("run-2", fields(A))
+    store.add([chunk(A, 0, "only chunk now")])  # LlamaIndex sees A as new: no delete(A)
+    result = store.finalize(also_clean=[A])
+
+    assert set(es.docs[INDEX]) == {f"{A}#0"}
+    assert result.deleted_chunks == 2
+
+
+def test_indexed_doc_ids_and_sweep(es: FakeElasticsearch) -> None:
+    store = EsVectorStore(es, INDEX)
+    store.begin_run("run-1", fields(A, B, C))
+    store.add([chunk(A, 0), chunk(B, 0), chunk(B, 1), chunk(C, 0)])
+
+    assert store.indexed_doc_ids(page_size=2) == {A, B, C}  # pages through the aggregation
+    assert store.sweep([B, C]) == 3
+    assert set(es.docs[INDEX]) == {f"{A}#0"}
+    assert store.sweep([]) == 0
+
+
+def test_delete_by_query_timeout_raises(es: FakeElasticsearch) -> None:
+    store = EsVectorStore(es, INDEX)
+    store.begin_run("run-1", fields(A))
+    store.delete(A)
+    es.delete_timed_out = True
+
+    with pytest.raises(FinalizeError, match="timed out"):
+        store.finalize()
+    with pytest.raises(FinalizeError, match="timed out"):
+        store.sweep([A])
+
+
+def test_add_builds_bulk_bodies_per_batch(
+    es: FakeElasticsearch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = EsVectorStore(es, INDEX, bulk_batch_size=2)
+    store.begin_run("run-1", fields(A))
+    events: list[str] = []
+    build = EsVectorStore._source
+    bulk = es.bulk
+
+    def spy_source(self: EsVectorStore, node: TextNode, run_id: str) -> object:
+        events.append("build")
+        return build(self, node, run_id)
+
+    def spy_bulk(**kwargs: object) -> object:
+        events.append("send")
+        return bulk(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(EsVectorStore, "_source", spy_source)
+    monkeypatch.setattr(es, "bulk", spy_bulk)
+    store.add([chunk(A, n) for n in range(5)])
+
+    assert events == ["build", "build", "send", "build", "build", "send", "build", "send"]
