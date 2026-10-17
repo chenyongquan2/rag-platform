@@ -38,6 +38,9 @@ KEYWORD_FIELDS = (
 )
 INTEGER_FIELDS = ("chunk_index",)
 BOOLEAN_FIELDS = ("has_generated_text", "suspicious_instruction")
+STORED_OBJECT_FIELDS = ("front_matter",)
+"""Kept in `_source` only (`enabled: false`): any keys, nothing indexed. `front_matter` holds a
+page's YAML header (cleaning rule `front_matter`, s5-2), whose keys differ from page to page."""
 VECTOR_FIELD = "embedding"
 
 VectorIndexType = Literal[
@@ -128,6 +131,8 @@ def build_index_body(
         properties[field] = {"type": "integer"}
     for field in BOOLEAN_FIELDS:
         properties[field] = {"type": "boolean"}
+    for field in STORED_OBJECT_FIELDS:
+        properties[field] = {"type": "object", "enabled": False}
     return {
         "settings": {
             "index": {

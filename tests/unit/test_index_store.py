@@ -69,7 +69,8 @@ def test_add_writes_chunk_fields(es: FakeElasticsearch) -> None:
     store = EsVectorStore(es, INDEX)
     store.begin_run("run-1", fields(A))
 
-    ids = store.add([chunk(A, 0, "Install with pip."), chunk(A, 1)])
+    front_matter = {"title": "Install", "tags": ["setup", "pip"]}
+    ids = store.add([chunk(A, 0, "Install with pip.", front_matter=front_matter), chunk(A, 1)])
 
     assert ids == [f"{A}#0", f"{A}#1"]
     source = es.docs[INDEX][f"{A}#0"]
@@ -81,6 +82,7 @@ def test_add_writes_chunk_fields(es: FakeElasticsearch) -> None:
     assert source["parent_id"] == f"{A}#s0"
     assert source["acl_groups"] == ["public"]
     assert source["images"] == []
+    assert source["front_matter"] == front_matter  # stored, not indexed
     assert source["ingest_run_id"] == "run-1"
     assert source["content_hash"] == f"hash-{A}"
     assert source["source_version"] == "src@1"

@@ -334,16 +334,20 @@ def test_data_generation_once_per_changing_run(make_kb: Callable[..., Kb]) -> No
 def test_existing_index_gets_new_fields(make_kb: Callable[..., Kb]) -> None:
     kb = make_kb()
     old_body = build_index_body(analyzer="standard", dims=DIMS)
-    del old_body["mappings"]["properties"]["images"]  # an index made before `images` existed
+    for name in ("images", "front_matter"):  # an index made before these fields existed
+        del old_body["mappings"]["properties"][name]
     create_kb_index(kb.es, kb.names, 1, old_body)
     switch_alias(kb.es, kb.names, kb.index, expected_current=None)
-    kb.connector.put("a.md", page("A", section("a")))
+    front_matter = "---\ntitle: Alpha\ntags: [x, y]\n---\n"
+    kb.connector.put("a.md", front_matter + page("A", section("a")))
 
     report = kb.run()
 
-    assert report.new_index_fields == ["images"]
+    assert report.new_index_fields == ["front_matter", "images"]
     props = kb.es.indices.get_mapping(index=kb.index)[kb.index]["mappings"]["properties"]
     assert props["images"] == {"type": "keyword"}
+    assert props["front_matter"] == {"type": "object", "enabled": False}
+    assert {c["front_matter"]["title"] for c in kb.chunks().values()} == {"Alpha"}
     meta = kb.es.indices.get_mapping(index=kb.index)[kb.index]["mappings"]["_meta"]
     assert meta["embed_model"] == f"fake-embedding@{DIMS}"
     assert all(c["images"] == [] for c in kb.chunks().values())

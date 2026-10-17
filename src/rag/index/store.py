@@ -36,6 +36,7 @@ from rag.index.mapping import (
     BOOLEAN_FIELDS,
     INTEGER_FIELDS,
     KEYWORD_FIELDS,
+    STORED_OBJECT_FIELDS,
     TEXT_FIELDS,
     VECTOR_FIELD,
 )
@@ -44,7 +45,8 @@ RUN_FIELDS = ("ingest_run_id", "content_hash", "source_version")
 """Written per chunk from the run, never taken from metadata (s5-4)."""
 _SET_BY_STORE = {"content", "chunk_id", VECTOR_FIELD, *RUN_FIELDS}
 METADATA_FIELDS = frozenset(
-    {*TEXT_FIELDS, *KEYWORD_FIELDS, *INTEGER_FIELDS, *BOOLEAN_FIELDS} - _SET_BY_STORE
+    {*TEXT_FIELDS, *KEYWORD_FIELDS, *INTEGER_FIELDS, *BOOLEAN_FIELDS, *STORED_OBJECT_FIELDS}
+    - _SET_BY_STORE
 )
 """Chunk metadata keys that have a field in the index mapping (s7-3)."""
 

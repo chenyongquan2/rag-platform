@@ -8,6 +8,7 @@ from rag.index.mapping import (
     BOOLEAN_FIELDS,
     INTEGER_FIELDS,
     KEYWORD_FIELDS,
+    STORED_OBJECT_FIELDS,
     TEXT_FIELDS,
     VectorIndexOptions,
     build_index_body,
@@ -70,7 +71,17 @@ def test_mapping_matches_design() -> None:
     for field in BOOLEAN_FIELDS:
         assert props[field] == {"type": "boolean"}
     assert set(TEXT_FIELDS) == {"content", "title_path"}
-    expected = {*TEXT_FIELDS, *KEYWORD_FIELDS, *INTEGER_FIELDS, *BOOLEAN_FIELDS, "embedding"}
+    # YAML front matter is kept with the chunk but not indexed (spec P0-06).
+    assert set(STORED_OBJECT_FIELDS) == {"front_matter"}
+    assert props["front_matter"] == {"type": "object", "enabled": False}
+    expected = {
+        *TEXT_FIELDS,
+        *KEYWORD_FIELDS,
+        *INTEGER_FIELDS,
+        *BOOLEAN_FIELDS,
+        *STORED_OBJECT_FIELDS,
+        "embedding",
+    }
     assert set(props) == expected
 
 
