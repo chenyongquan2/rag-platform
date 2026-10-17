@@ -109,6 +109,13 @@ class RetrievalConfig(_Strict):
     - `num_candidates`: HNSW candidates per shard of the kNN route (tuned on the question set).
     - `title_boost`: weight of `title_path` against `content` in the BM25 `multi_match`.
     - `rrf_k`: the constant of reciprocal rank fusion, score = sum over routes 1 / (k + rank).
+    - `rerank_n`: fused candidates sent to the reranker (s10-1); later ones are dropped.
+    - `final_k`: chunks returned when the caller gives no top_k.
+    - `threshold`: rerank score (sigmoid, 0 to 1) a chunk needs to be returned (s10-2).
+    - `expand`: context added around each returned chunk (s10-3, s7-2): `none`, `neighbors`
+      (same page, chunk_index within `expand_window`) or `parent` (its heading section).
+    - `expand_max_tokens`: reranker tokens of returned chunks plus added context; context that
+      does not fit is left out, returned chunks always stay.
     """
 
     top_k_per_route: int = Field(default=20, gt=0)
@@ -117,7 +124,10 @@ class RetrievalConfig(_Strict):
     rrf_k: int = Field(default=60, ge=0)
     rerank_n: int = Field(default=30, gt=0)
     final_k: int = Field(default=8, gt=0)
-    threshold: float = 0.3
+    threshold: float = Field(default=0.3, ge=0, le=1)
+    expand: Literal["none", "neighbors", "parent"] = "none"
+    expand_window: int = Field(default=1, ge=1)
+    expand_max_tokens: int = Field(default=4000, gt=0)
 
     @model_validator(mode="after")
     def _final_k_within_rerank_n(self) -> Self:

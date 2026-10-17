@@ -36,9 +36,12 @@ retrieval:
   num_candidates: 100  # kNN candidates; tune on the question set (s9-1)
   title_boost: 2.0     # title_path weight against content in the BM25 multi_match
   rrf_k: 60
-  rerank_n: 30
+  rerank_n: 30         # fused candidates sent to the reranker (s10-1); set from the P0-12 curve
   final_k: 8
-  threshold: 0.3
+  threshold: 0.3       # rerank score (0 to 1) a chunk needs; calibrated in P0-12 (s10-2)
+  expand: none         # none | neighbors | parent: context added around returned chunks (s10-3)
+  expand_window: 1     # neighbors: chunks on each side
+  expand_max_tokens: 4000
 eval:
   dir: evals/datasets/hf_docs
 access:
