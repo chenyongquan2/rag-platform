@@ -171,7 +171,7 @@ class ServiceSettings(BaseSettings):
     docstore_url: str = "file://data/docstore"
     checkpoint_url: str = "sqlite://data/checkpoints/langgraph.db"
     lock_url: str = "file://data/locks"
-    otlp_endpoint: str = "http://127.0.0.1:24317"  # OTel Collector, OTLP gRPC
+    otlp_endpoint: str = "http://127.0.0.1:24317"  # OTel Collector, OTLP gRPC (see otlp_protocol)
     kb_dir: str = "kb"
 
     # Model gateway (OpenAI-compatible). Empty means "not configured"; callers must check.
@@ -225,6 +225,33 @@ class ServiceSettings(BaseSettings):
     chat_online: ChatProfile = Field(default_factory=lambda: _chat_profile_default("online"))
     chat_offline: ChatProfile = Field(default_factory=lambda: _chat_profile_default("offline"))
     chat_cheap: ChatProfile = Field(default_factory=lambda: _chat_profile_default("cheap"))
+
+    # Observability (spec P0-11, design s15-1). `otlp`: traces and metrics go over OTLP to the
+    # Collector at `otlp_endpoint` (gRPC: the endpoint as is; http/protobuf: `/v1/traces` and
+    # `/v1/metrics` are appended). `memory`: kept in memory for tests. `off`: nothing recorded.
+    otel_mode: Literal["otlp", "memory", "off"] = "otlp"
+    otlp_protocol: Literal["grpc", "http/protobuf"] = "grpc"
+    otlp_timeout_s: float = Field(default=5.0, gt=0)
+    otel_metric_export_interval_s: float = Field(default=30.0, gt=0)
+    # OpenInference spans for LlamaIndex and LangChain/LangGraph calls. With trace content on,
+    # prompts, answers and retrieved texts go into the spans (local only in P0); embedding
+    # vectors never do.
+    otel_auto_instrument: bool = True
+    otel_trace_content: bool = True
+    # Commit put on every span's resource; empty = ask git (containers set GIT_COMMIT).
+    git_commit: str = ""
+    # Business records: one JSON line per request for eval and failure analysis. Relative
+    # paths are taken from the repo root; empty disables. Rotated by size, `backups` old files.
+    business_record_path: str = "data/observe/records/business.jsonl"
+    business_record_max_bytes: int = Field(default=20_000_000, gt=0)
+    business_record_backups: int = Field(default=5, ge=0)
+    # JSON log lines in `<log_dir>/<service name>.jsonl` (relative to the repo root; empty: no
+    # file); stderr gets lines at `log_stderr_level` and above (OFF: none).
+    log_dir: str = "data/observe/logs"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    log_stderr_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "OFF"] = "WARNING"
+    log_max_bytes: int = Field(default=10_000_000, gt=0)
+    log_backups: int = Field(default=3, ge=0)
 
     # Hugging Face data (spec P0-03). huggingface.co is blocked here; the mirror serves the same
     # `/datasets/<repo>/resolve/<revision>/<path>` URLs. `HF_ENDPOINT` is also what huggingface_hub

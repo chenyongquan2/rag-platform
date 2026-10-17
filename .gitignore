@@ -16,5 +16,6 @@ data/docstore/
 data/checkpoints/
 data/locks/
 data/otel/
+data/observe/
 data/cost/
 data/reports/
