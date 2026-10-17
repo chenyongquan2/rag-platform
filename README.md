@@ -38,7 +38,7 @@ docker compose down                                 # stop (Elasticsearch data s
 |---|---|---|
 | Elasticsearch (single node, Basic, 2 GB heap) | `docker.elastic.co/elasticsearch/elasticsearch:9.5.5` | `http://127.0.0.1:29200` |
 | Redis cache (allkeys-lru, 256 MB, no persistence) | `redis:8.10.2-alpine` | `redis://127.0.0.1:26379/0` |
-| OTel Collector (OTLP in; traces to Jaeger and `data/otel/traces.jsonl`) | `otel/opentelemetry-collector-contrib:0.162.0` | gRPC `127.0.0.1:24317`, HTTP `127.0.0.1:24318` |
+| OTel Collector (OTLP in; traces to Jaeger and `data/otel/traces.jsonl`, at most 4 x 20 MB; metrics in Prometheus format) | `otel/opentelemetry-collector-contrib:0.162.0` | gRPC `127.0.0.1:24317`, HTTP `127.0.0.1:24318`, metrics `http://127.0.0.1:28889/metrics` |
 | Jaeger (all-in-one, in-memory) | `jaegertracing/jaeger:2.22.0` | UI `http://127.0.0.1:36686` |
 
 Host ports are the standard port + 20000 and bound to 127.0.0.1 only. **Elasticsearch security is
@@ -90,6 +90,29 @@ timeout) and every attempt reserves its estimated cost and writes its usage to t
 `rag.llm.structured_output(model, Schema)` returns Pydantic objects via `function_calling` (the
 gateway rejects `json_schema`). `CHAT_BACKEND=fake` switches every profile to a `FakeChatModel`
 with a fixed reply; it is never switched automatically.
+
+## Observability
+
+`rag.observe` (spec P0-11, design s15-1): call `init_observability(settings, "<service>")` once at
+startup. It exports traces and metrics over OTLP to the Collector (`OTLP_PROTOCOL=grpc`, default,
+or `http/protobuf` with `OTLP_ENDPOINT=http://127.0.0.1:24318`), instruments LlamaIndex and
+LangChain/LangGraph with OpenInference (`OTEL_AUTO_INSTRUMENT`, `OTEL_TRACE_CONTENT`; embedding
+vectors are never recorded), writes JSON logs with trace and request ids to
+`data/observe/logs/<service>.jsonl` and feeds token and CNY counters from the cost ledger.
+
+```python
+with request_span("search_docs", kb=kb, caller=caller, config_version=cfg_sha) as scope:
+    with layer_span("retrieve", attributes={attributes.ROUTE: "bm25"}):
+        ...
+    scope.set_result(result)              # flags -> span attributes and error metrics
+    write_business_record(business_record_from_result(result, tool="search_docs", ...))
+```
+
+Business records (one JSON line per request: per-route top 10, rerank scores, threshold decision,
+flags, timings, trace id) go to `data/observe/records/business.jsonl`. Records and logs rotate by
+size; `data/observe/` is git-ignored. Attribute and metric names live in
+`rag/observe/attributes.py`. Tests use `rag.testing.memory_observability()` (`OTEL_MODE=memory`);
+`OTEL_MODE=off` records nothing.
 
 ## Retrieval evaluation
 

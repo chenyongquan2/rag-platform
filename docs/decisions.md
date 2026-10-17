@@ -486,3 +486,48 @@ P0-05 的 `total_spent` 每次读整个账本文件，`reserve` 在一把全进�
 - 来源又改回去的页面：失败的那次把 a 写成了新版本，下次之前来源改回了 docstore 里的旧版本。哈希和 docstore 一样，管道当它没变，ES 里留着失败那次的版本。现在摄取在写 ES 之前，把这次要写的页面记进 docstore 旁边的 `<索引名>.dirty.json`，跑成功才删这个文件。下次摄取时，列表里的页面即使哈希没变，也重新处理一遍。
 
 另外两处小改动：bulk 请求按批生成，不再先把全部块的向量复制一份；delete_by_query 返回 timed_out 时也当失败处理，这次摄取失败、docstore 不保存。
+
+### 2026-10-17 P0-11：程序发给 Collector 默认用 OTLP gRPC，HTTP 用设置切换
+设置 `otlp_protocol` 有两个值：`grpc`（默认，`otlp_endpoint` 原样使用，`http://` 开头表示不加密）和 `http/protobuf`（在 `otlp_endpoint` 后面加 `/v1/traces` 和 `/v1/metrics`）。集成测试用两种协议各发一条 trace，都能在 Jaeger 里查到；另外起了一个临时的 Collector 容器，两种协议发出的指标都能在它的 Prometheus 接口里看到。默认选 gRPC 的原因：
+- P0-02 已经把 `otlp_endpoint` 的默认值定成 Collector 的 gRPC 端口，也测过这条路，换默认值要连带改 P0-02 的设置测试和集成测试。
+- `opentelemetry-exporter-otlp` 本来就把 grpcio 装上了，不多装包。
+- 一条长连接发所有数据，不用每批数据新建一次 HTTP 请求。
+
+还考虑过默认用 HTTP：OTel 规范建议 SDK 默认用 http/protobuf，公司网络或反向代理只允许 HTTP 通过时也能用。下面两种情况把默认值改成 HTTP：P8 的容器用先启动主进程、再 fork 出多个工作进程的服务器，而 grpcio 在 fork 之后出问题；或者公司网络只允许 HTTP 通过。Collector 发给 Langfuse 只能用 HTTP（设计 15.1），这是 Collector 那一段的配置，和程序用哪种协议无关。
+
+### 2026-10-17 P0-11：辅助函数用自己保存的 tracer 和 meter，不依赖 OTel 的全局对象
+`init_observability(settings, service_name)` 返回一个 `Observability` 对象，里面有 tracer、meter、所有指标和业务记录的写入器；`request_span`、`layer_span` 和指标都从当前这个对象取 tracer 和 meter。原因：OTel 一个进程只允许设置一次全局的 TracerProvider 和 MeterProvider，单元测试要反复建立、关闭很多次。`otlp` 模式下，第一次建立时也把这两个对象设成全局的，这样以后接入的其他 OTel 自动打点（比如 HTTP 客户端）建的 span 也进同一条 trace。三种模式：`otlp` 发给 Collector，`memory` 把 span 和指标留在内存里给测试读，`off` 什么都不记，但辅助函数照常能用，请求 id 也照常生成。同一个进程里再调一次 `init_observability` 直接返回已有的对象；`shutdown_observability()` 把缓存的数据发出去，去掉自动打点和成本账本的监听函数，然后才能重新建立。还考虑过每次都用 `trace.get_tracer()` 取全局 tracer：测试里第二次建立的 provider 设不进去，span 会发到上一个已经关掉的 provider。
+
+### 2026-10-17 P0-11：OpenInference 自动打点的内容开关全部写明，向量永远不进 trace
+`otel_auto_instrument`（默认开）控制 LlamaIndex 和 LangChain/LangGraph 两个打点包。两个包都用我们自己的 TracerProvider，`separate_trace_from_runtime_context=False`，框架建的 span 的父 span 就是调用它的那个 `layer_span`（单元测试用假的向量模型和假的对话模型验证过，LangGraph 的图也是）。`TraceConfig` 的每一项都在代码里写明，不读 `OPENINFERENCE_*` 环境变量，也不用库的默认值：
+- 向量一律隐藏：每段文字 1024 个浮点数，一次批量算向量就有几万个数字，trace 文件很快就满。
+- 提示词、回答、检索到的原文跟着 `otel_trace_content`（默认开）。P0 的 trace 只在本机的 Jaeger 和本地文件里，看得到内容方便查问题；以后数据要发到托管服务（LangSmith）时，私有知识库要关掉这一项。
+- span 的上限也写明：每个 span 最多 512 个属性（OpenInference 给每个检索到的段记好几个属性，30 段就超过 SDK 默认的 128 个），每个属性值最多 16384 个字符，长原文截断，原文本身在 ES 里，业务记录里有它的 id。
+
+### 2026-10-17 P0-11：字段名和指标名都放在 rag/observe/attributes.py
+我们自己的字段用 `rag.` 开头（`rag.kb`、`rag.request_id`、`rag.config_version`、`rag.data_generation`、`rag.route`、`rag.rerank_n`、`rag.error.category` 等）。OTel 规范里已经有的用规范的名字：`service.name`、`service.version`、`error.type`（异常的类名），git 提交用 `vcs.ref.head.revision`，模型用量的指标用 GenAI 规范的 `gen_ai.request.model` 和 `gen_ai.token.type`。指标名也在这个文件里：`rag.requests`、`rag.errors`、`rag.requests.degraded`、`rag.requests.rerank_timeout`、`rag.step.duration`（秒）、`rag.model.tokens`、`rag.model.cost`（元）。有一个单元测试检查 `rag/observe/` 下其他文件里没有直接写这类名字。git 提交优先取设置 `git_commit`（容器里用环境变量 `GIT_COMMIT` 传进来），没有就在启动时跑一次 `git rev-parse HEAD`，取不到写 `unknown`。
+
+### 2026-10-17 P0-11：指标怎么记
+- 请求数按知识库、工具名和结果（`ok`、`error`、`cancelled`）分开。任务被取消或进程被中断算 `cancelled`，不算服务出错。
+- 错误数按错误类别分开。类别的来源有三个：调用方把结果传给 `RequestScope.set_result()` 时，结果里的标记（degraded、rerank_timeout 等）；`add_error_category()` 手动加的；异常离开 span 时 `classify` 回调给的类别，或者异常自己带的 `error_category` 属性。都没有时记 `unclassified`，表示没归类的异常，多半是代码错误。里层 span 定下的类别会写到异常对象上，外层的请求 span 记同一个类别。degraded 和 rerank_timeout 除了算进错误数，还各有一个计数，设计 15.1 要单独看这两个比例。
+- 每一步的耗时用直方图，单位是秒，分桶边界在代码里写明（5 毫秒到 120 秒，共 19 个边界）。SDK 默认的边界是按毫秒数设计的，最大到 10000，用秒记录时大部分桶都用不上。请求本身也按工具名记一次耗时。
+- token 和花费：`rag.cost` 加了 `add_record_listener`，账本每写一行就调一次监听函数，`init_observability` 注册的监听函数把输入、输出 token 和元数加到计数上，按模型、用途（embedding 或 chat）和档位（ingest、query、online 等）分开。这样 `rag.cost` 不用依赖 OTel；监听函数出错只写日志，不影响已经发生的模型调用和已经写好的账本行。还考虑过在 P0-05 的向量客户端和 P1-01 的对话模型传输层里各加一段记指标的代码：要改两处，以后新加一种模型调用时，很容易忘了加这段代码。
+- 指标里不放请求 id 这类每次都不一样的值，否则 Prometheus 里的序列数会一直涨。
+
+### 2026-10-17 P0-11：Collector 把指标转成 Prometheus 格式，不写文件
+`deploy/otel-collector.yaml` 加了 metrics 管道：从 OTLP 接收指标，由 prometheus 导出器在容器的 8889 端口提供 Prometheus 格式，主机端口 127.0.0.1:28889（按 compose 的规则，标准端口加 20000）。本机磁盘只剩大约 16 GB，指标只放在 Collector 的内存里，一个序列 10 分钟没有更新就删掉；P5 起由 Prometheus 定时来取，长期保存也是 Prometheus 的事（设计 15.1）。还考虑过再加一个写文件的导出器：指标每 30 秒一批，文件会一直变大，而 P0 没有人去读它。要让正在运行的 Collector 用上新配置，需要在主目录执行 `docker compose up -d`，重新创建 Collector 和 Jaeger 两个容器。这次没有动正在运行的 Collector：另一位开发者在用这些服务做 P0-06。新配置先用同版本的镜像跑了 `validate`，又在别的端口起了一个临时容器，发了指标、看到了结果，然后删掉了。
+
+### 2026-10-17 P0-11：本地文件都有大小上限
+- Collector 的 trace 文件：原来是 50 MB 一个、留 5 个旧文件、7 天，最多占 300 MB。现在是 20 MB 一个、留 3 个旧文件、3 天，最多 80 MB。打开自动打点以后，每次请求的 trace 带着提示词和检索到的原文，文件长得比 P0-02 测试时快很多。
+- Collector 和 Jaeger 容器自己的标准输出日志：Docker 默认不限制大小，一直留着，也占 C 盘（Docker Desktop 的虚拟磁盘）。现在这两个容器各最多 3 个 10 MB 的文件。没有动 ES 和 Redis：改它们的配置会让下次 `docker compose up -d` 重新创建 ES 容器，影响正在做 P0-06 的人。
+- 业务记录：默认 `data/observe/records/business.jsonl`，20 MB 一个，留 5 个旧文件，最多 120 MB。每次请求一行，大约 3 到 4 KB，20 MB 能放大约 5000 次请求。
+- 日志：每个服务一个文件 `data/observe/logs/<服务名>.jsonl`，10 MB 一个，留 3 个旧文件，每个服务最多 40 MB。
+- `data/observe/` 已经加进 .gitignore。相对路径从仓库根目录算，不从当前工作目录算：MCP 客户端启动服务时的工作目录不一定是仓库。
+
+### 2026-10-17 P0-11：业务记录用自己写的轮转，日志用标准库的轮转
+业务记录每写一行都先拿文件锁、打开文件、追加、关闭。文件大小加上这一行超过上限时，先把旧文件依次改名（`business.jsonl` 改成 `.1`，`.1` 改成 `.2`，最老的删掉），再写。这样几个进程可以写同一个文件；Windows 上文件被别的进程打开着就改不了名，每次写完就关文件，能避开这个问题。写失败（磁盘满、路径不对）只写一条警告日志并返回 False，不让请求因为记录写不进去而失败。还考虑过用标准库的 `RotatingFileHandler`：它一直开着文件，两个进程写同一个文件时，Windows 上改名会失败。
+
+日志用标准库的 `RotatingFileHandler`，因为每个服务写自己的文件，不会有两个进程改同一个文件的名。每行 JSON 有时间（UTC）、级别、logger 名、消息、服务名、trace_id、span_id、请求 id，还有 `extra={...}` 传进来的字段；有异常时加上完整的堆栈。不在请求和 span 里的日志，这三个 id 写 null。标准错误输出默认只显示 WARNING 及以上的短文本；标准输出不写日志，MCP 的 stdio 方式要用标准输出传消息。
+
+### 2026-10-17 P0-11：业务记录的字段
+每行一个 JSON 对象：`schema_version`（现在是 1）、时间（UTC）、请求 id、trace id、工具名、调用方、知识库、配置版本（由调用方传，P0-09 用知识库配置的 sha256）、索引版本、数据代号、每一路按名次排的前 10 个段 id 和分数、重排分、阈值判断（阈值、第一名分数、阈值有没有生效、第一名过没过、留下几段、去掉几段）、最终返回的段 id 和分数、结果的标记（错误类别）、每一步耗时（毫秒）、`extra`（以后的轮数、引用核对结果、用户反馈）。`business_record_from_result()` 从 `RetrievalResult` 填好其中能填的字段，trace id 取当前 span 的；重排分和阈值判断由调用方传，P0-07 和 P0-08 写出这两部分以后，P0-09 再把它们传进来。
