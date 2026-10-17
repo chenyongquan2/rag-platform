@@ -9,8 +9,16 @@ numbers that match none, and counts sentences left without a citation as unsuppo
 
 Sentence ends: `。！？` always; `.!?` when followed by a space, a line end, the end of the text
 or a marker (so `1.5`, `config.json` and `e.g.` do not end a sentence); a line break. Markers
-right after a sentence end still belong to that sentence. Inline code and fenced code are kept
-whole, so `x[0]` in code is not a marker.
+right after a sentence end still belong to that sentence. Inline code, fenced code and indented
+code lines are kept whole, so `x[0]` in code is not a marker. An ASCII bracket right after an
+ASCII letter, digit, `_`, `(`, `)`, `[`, `{`, `}`, `=` or a code bracket (`logits[1]`, `f(x)[1]`,
+`Size([1, 2])`, `x=[1, 2]`) is code too and stays in the text, unless Chinese punctuation follows
+(`窗口是 127[2]。`); right after Chinese text, after another marker, or written with full-width
+brackets it is a marker (`中文[1][2]`, `D［3］`).
+
+The answer is "not found" when it is the fixed sentence, or when every sentence that is not a
+not-found statement ("The documentation does not contain ...", "手册里没有找到...") carries no
+marker at all ("I'm sorry. The documentation does not contain the answer.").
 """
 
 from __future__ import annotations
@@ -29,20 +37,31 @@ _PREFIX = r"(?:(?:fragments?|sources?|docs?|refs?|片段|来源|资料)\s*)?"
 _MARKER = rf"[\[【［]\s*{_PREFIX}{_NUMBER}(?:\s*[,，、;；]\s*{_PREFIX}{_NUMBER})*\s*[\]】］]"
 _MARKER_RE = re.compile(_MARKER, re.IGNORECASE)
 _TOKEN = re.compile(
-    r"(?P<fence>```.*?(?:```|\Z))"
+    r"(?P<indented>^(?: {4,}|\t)[^\n]*)"
+    r"|(?P<fence>```.*?(?:```|\Z))"
     r"|(?P<code>`[^`\n]+`)"
     rf"|(?P<marker>{_MARKER})"
     r"|(?P<newline>\n)"
     r"|(?P<end>[。！？]+[”’）」』]*|[.!?]+[\"'”’)）」』]*(?=\s|\Z|[\[【［]))"
     r"|(?P<text>[^`\n\[【［。！？.!?]+|.)",
-    re.DOTALL | re.IGNORECASE,
+    re.DOTALL | re.IGNORECASE | re.MULTILINE,
 )
+# The character right before a bracket that makes the bracket code, not a marker.
+_CODE_BEFORE_BRACKET = re.compile(r"[A-Za-z0-9_()\[\]{}=]")
+# Markers, then Chinese punctuation: `127[2]。` in a Chinese answer is a citation, not code.
+_CJK_PUNCT_AFTER = re.compile(rf"(?:\s*{_MARKER})*\s*[。！？，；：、]", re.IGNORECASE)
 _LIST_MARK = re.compile(r"^[ \t]*(?:[-*+•]|\d{1,3}[.)、]|#{1,6})[ \t]+", re.MULTILINE)
 _ABBREVIATION = re.compile(r"(?:^|\W)(?:e\.g|i\.e|vs|cf|approx|incl|resp|fig|eq)$", re.IGNORECASE)
 _SPACE_BEFORE_PUNCT = re.compile(r"[ \t]+(?=[.!?。！？,，;；:：)）])")
 _SPACES = re.compile(r"[ \t]{2,}")
 _WORD_CHAR = re.compile(r"\w")
 _NOT_FOUND_NOISE = re.compile(r"[\s\"'“”‘’「」『』`*_.。!！]")
+# A sentence saying the fragments have no answer, on the normalized key (no spaces, lower case).
+_NOT_FOUND_STATEMENT = re.compile(
+    r"^(?:the)?(?:provided)?(?:documentation|docs|manual|fragments?|context|documents?)"
+    r"(?:does|do)not(?:contain|include|provide|mention|say|cover)"
+    r"|^(?:手册|文档|片段|资料)(?:里|中)?(?:没有|并没有|未)(?:找到|提到|提供|包含|说明|涉及)"
+)
 
 
 @dataclass(frozen=True)
@@ -79,6 +98,11 @@ def _not_found_key(text: str) -> str:
 
 
 _NOT_FOUND_KEYS = frozenset(_not_found_key(sentence) for sentence in NOT_FOUND.values())
+
+
+def _is_not_found_statement(text: str) -> bool:
+    key = _not_found_key(text)
+    return key in _NOT_FOUND_KEYS or bool(_NOT_FOUND_STATEMENT.match(key))
 
 
 def _numbers(marker: str) -> list[int]:
@@ -131,8 +155,13 @@ def parse_answer(text: str) -> ParsedAnswer:
     if _not_found_key(text) in _NOT_FOUND_KEYS:
         return ParsedAnswer(not_found=True, sentences=())
     collector = _Sentences()
-    for match in _TOKEN.finditer(_LIST_MARK.sub("", text)):
+    source = _LIST_MARK.sub("", text.strip())
+    previous_kind: str | None = None
+    for match in _TOKEN.finditer(source):
         kind, value = match.lastgroup, match.group()
+        if kind == "marker" and _is_code_bracket(source, match, previous_kind):
+            kind = "text"
+        previous_kind = kind
         if kind == "marker":
             collector.markers.extend(_numbers(value))
         elif kind == "newline":
@@ -146,11 +175,23 @@ def parse_answer(text: str) -> ParsedAnswer:
             collector.add_text(value)
     collector.flush()
 
-    sentences = collector.sentences
-    kept = [s for s in sentences if _not_found_key(s.text) not in _NOT_FOUND_KEYS]
-    if sentences and not kept:
+    statements = [s for s in collector.sentences if _is_not_found_statement(s.text)]
+    kept = [s for s in collector.sentences if not _is_not_found_statement(s.text)]
+    if statements and not any(s.markers for s in kept):
         return ParsedAnswer(not_found=True, sentences=())
     return ParsedAnswer(not_found=False, sentences=tuple(kept))
+
+
+def _is_code_bracket(source: str, match: re.Match[str], previous_kind: str | None) -> bool:
+    """An ASCII bracket right after code characters (`logits[1]`) is code, unless Chinese
+    punctuation follows it (`127[2]。`). Full-width brackets and a bracket right after a marker
+    are always markers."""
+    start = match.start()
+    if start == 0 or previous_kind == "marker" or not match.group().startswith("["):
+        return False
+    if not _CODE_BEFORE_BRACKET.match(source[start - 1]):
+        return False
+    return not _CJK_PUNCT_AFTER.match(source, match.end())
 
 
 def check_citations(parsed: ParsedAnswer, context: AnswerContext) -> CheckedAnswer:

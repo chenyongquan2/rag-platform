@@ -100,3 +100,62 @@ def test_parse_drops_not_found_sentence_from_an_answer() -> None:
     assert [s.text for s in parsed.sentences] == ["A is B."]
     assert parse_answer("").sentences == ()
     assert not parse_answer("   ").not_found
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Brackets right after a word or a closing bracket are code, not markers; text intact.
+        (
+            "Take logits[1] for the positive class [2].",
+            [("Take logits[1] for the positive class.", [2])],
+        ),
+        ("Use outputs[0][1] here [1].", [("Use outputs[0][1] here.", [1])]),
+        ("Call f(x)[1] first [3].", [("Call f(x)[1] first.", [3])]),
+        ("The shape is torch.Size([1, 2]) [2].", [("The shape is torch.Size([1, 2]).", [2])]),
+        ("Set x=[1, 2] before [1].", [("Set x=[1, 2] before.", [1])]),
+        ("Pass logits[1].", [("Pass logits[1].", [])]),
+        # Indented code lines are kept whole.
+        (
+            "Write this [1].\n    a[1] = 3\nDone [2].",
+            [("Write this.", [1]), ("a[1] = 3", []), ("Done.", [2])],
+        ),
+        ("Write this [1].\n\ta[1, 2] = 3", [("Write this.", [1]), ("a[1, 2] = 3", [])]),
+        # Markers right after Chinese text, after another marker, in full-width brackets, or
+        # followed by Chinese punctuation still count.
+        ("模型支持中文[1][2]。", [("模型支持中文。", [1, 2])]),
+        (
+            "默认窗口是 r=127[2]。用法见 pipeline[1][3]，很简单。",
+            [
+                ("默认窗口是 r=127。", [2]),
+                ("用法见 pipeline，很简单。", [1, 3]),
+            ],
+        ),
+        ("C 是 D［3］。", [("C 是 D。", [3])]),
+    ],
+)
+def test_parse_keeps_code_brackets(text: str, expected: list[tuple[str, list[int]]]) -> None:
+    parsed = parse_answer(text)
+    assert [(s.text, list(s.markers)) for s in parsed.sentences] == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"I'm sorry. {NOT_FOUND['en']}",
+        "The documentation does not contain the answer.",
+        "Sorry, I cannot help. The provided fragments do not mention LongT5.",
+        "抱歉。手册里没有找到答案。",
+        "文档中没有提到这个参数。",
+    ],
+)
+def test_parse_not_found_with_uncited_extras(text: str) -> None:
+    parsed = parse_answer(text)
+    assert parsed.not_found
+    assert parsed.sentences == ()
+
+
+def test_parse_not_found_variant_beside_cited_sentences_is_dropped() -> None:
+    parsed = parse_answer("A is B [1]. The fragments do not mention C.")
+    assert not parsed.not_found
+    assert [s.text for s in parsed.sentences] == ["A is B."]
