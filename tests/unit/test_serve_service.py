@@ -367,3 +367,24 @@ def test_close_during_load() -> None:
     err = _error(service.search_docs, CREDS, kb="hf_docs", query="q", deadline_ms=1000)
     assert err.category == ErrorCategory.NOT_READY
     service.close()  # twice is fine
+
+
+def test_config_only_version_while_loading(tmp_path: Path) -> None:
+    # Before the chain exists, records and spans carry a version of the KB config alone
+    # (marked `config:`), not an empty string.
+    from rag.retrieve.pipeline import search_config_version
+
+    path = tmp_path / "records.jsonl"
+    gate = threading.Event()
+    builder = FakePipelineBuilder({"hf_docs": FakeSearchPipeline("hf_docs")}, prepare_gate=gate)
+    with memory_observability(business_record_path=str(path)) as obs:
+        service = _service(builder=builder, load=False, search_deadline_ms=50)
+        service.start()
+        _error(service.search_docs, CREDS, kb="hf_docs", query="q", deadline_ms=20)
+        _error(service.get_context, CREDS, chunk_id="hf_docs:p1.md#0")
+        gate.set()
+        roots = [s for s in obs.span_exporter.get_finished_spans() if s.parent is None]
+    expected = "config:" + search_config_version(service.configs["hf_docs"], service.settings, "")
+    records = _records(path)
+    assert [r["config_version"] for r in records] == [expected, expected]
+    assert {s.attributes[attr.CONFIG_VERSION] for s in roots} == {expected}

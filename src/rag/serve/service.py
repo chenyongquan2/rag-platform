@@ -418,7 +418,7 @@ class SearchService:
             request_id=request_id,
             caller=caller,
             cfg=cfg,
-            config_version=pipeline.config_version if pipeline is not None else "",
+            config_version=self._config_version(cfg, pipeline),
             extra=extra,
         ) as call:
             if cfg is None:
@@ -491,7 +491,7 @@ class SearchService:
             request_id=request_id,
             caller=caller,
             cfg=cfg,
-            config_version=pipeline.config_version if pipeline is not None else "",
+            config_version=self._config_version(cfg, pipeline),
             extra=extra,
         ) as call:
             if kb is None:
@@ -583,6 +583,20 @@ class SearchService:
         if cfg is not None and not kb_visible(caller, cfg):
             cfg = None
         return caller, cfg
+
+    def _config_version(
+        self, cfg: KnowledgeBaseConfig | None, pipeline: SearchBackend | None
+    ) -> str:
+        """The chain's version; before the chain exists (load running, or the KB unavailable) a
+        version of the KB config and reranker alone, marked `config:` because the index's
+        embedding model is not known yet; empty for an unknown or hidden KB."""
+        if pipeline is not None:
+            return pipeline.config_version
+        if cfg is None:
+            return ""
+        from rag.retrieve.pipeline import search_config_version
+
+        return "config:" + search_config_version(cfg, self.settings, "")
 
     def _check_search_args(
         self, query: Any, top_k: Any, deadline_ms: Any, max_top_k: int, request_id: str

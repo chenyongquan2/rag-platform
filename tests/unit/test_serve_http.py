@@ -165,3 +165,73 @@ def test_rejected_bodies_write_records(tmp_path: Path) -> None:
     ]
     assert records[0]["request_id"] == "b-1" and records[0]["trace_id"]
     assert {"search_docs", "get_context"} <= set(spans)
+
+
+def _rpc(r: Any) -> dict[str, Any]:
+    """The JSON-RPC message of a streamable-http answer (JSON or one SSE event)."""
+    assert r.status_code == 200, r.text
+    if r.headers["content-type"].startswith("text/event-stream"):
+        data = [line[5:].strip() for line in r.text.splitlines() if line.startswith("data:")]
+        return json.loads(data[-1])
+    return r.json()
+
+
+def test_mcp_over_streamable_http() -> None:
+    # The MCP endpoint mounted at /mcp of the same app answers tools/call like stdio does.
+    from rag.serve.mcp_server import build_mcp_server
+
+    service = _service()
+    app = build_http_app(service, mcp=build_mcp_server(service, transport="streamable-http"))
+    headers = {"Accept": "application/json, text/event-stream", "Host": "127.0.0.1:28080"}
+    with TestClient(app, base_url="http://127.0.0.1:28080") as client:
+        assert service.wait_ready(5)
+        init = client.post(
+            "/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"},
+                },
+            },
+        )
+        assert _rpc(init)["result"]["serverInfo"]["name"] == "rag-platform"
+        session = {**headers}
+        if "mcp-session-id" in init.headers:
+            session["Mcp-Session-Id"] = init.headers["mcp-session-id"]
+        version = _rpc(init)["result"]["protocolVersion"]
+        session["MCP-Protocol-Version"] = version
+        r = client.post(
+            "/mcp", headers=session, json={"jsonrpc": "2.0", "method": "notifications/initialized"}
+        )
+        assert r.status_code in (200, 202)
+        call = client.post(
+            "/mcp",
+            headers=session,
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "search_docs", "arguments": {"kb": "hf_docs", "query": "q"}},
+            },
+        )
+        result = _rpc(call)["result"]
+        assert result["isError"] is False
+        search = SearchResponse.model_validate(result["structuredContent"])
+        assert search.kb == "hf_docs" and search.chunks
+        listing = client.post(
+            "/mcp",
+            headers=session,
+            json={
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "list_knowledge_bases", "arguments": {}},
+            },
+        )
+        kbs = _rpc(listing)["result"]["structuredContent"]["knowledge_bases"]
+        assert [k["kb"] for k in kbs] == ["hf_docs"]
