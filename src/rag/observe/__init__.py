@@ -27,7 +27,13 @@ from rag.observe.setup import (
     shutdown_observability,
     write_business_record,
 )
-from rag.observe.spans import RequestScope, layer_span, request_span, set_error_category
+from rag.observe.spans import (
+    RequestScope,
+    activate_span,
+    layer_span,
+    request_span,
+    set_error_category,
+)
 
 __all__ = [
     "BusinessRecord",
@@ -39,6 +45,7 @@ __all__ = [
     "RequestScope",
     "RotatingJsonlWriter",
     "ThresholdDecision",
+    "activate_span",
     "attributes",
     "bind_request",
     "business_record_from_result",

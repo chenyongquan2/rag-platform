@@ -84,6 +84,14 @@ def _trace_id(span: Span) -> str | None:
     return format(context.trace_id, "032x") if context.is_valid else None
 
 
+def activate_span(span: Span) -> contextlib.AbstractContextManager[Span]:
+    """Make `span` current inside the block without ending it or marking errors on it: for a
+    `layer_span(..., activate=False)` whose work runs in pieces between yields."""
+    return trace.use_span(
+        span, end_on_exit=False, record_exception=False, set_status_on_exception=False
+    )
+
+
 def set_error_category(category: str, span: Span | None = None) -> None:
     """Note a category on a span (default: the current one) without failing it, e.g. `degraded`
     when one retrieval route failed. Request metrics count the categories of the result passed to
@@ -195,6 +203,11 @@ class layer_span:  # noqa: N801 - used like a function: `with layer_span(...)`, 
     As a context manager it yields the span; as a decorator it opens a new span for each call
     (for async functions around the awaited body). One instance is not reentrant as a context
     manager; the decorator form is.
+
+    `activate=False` (context manager only) starts the span without making it current: an async
+    generator that yields to its caller in the middle of the step makes it current only around
+    its own work with `activate_span(span)`, so the caller's code between two items does not run
+    inside the step's span (spec P1-02).
     """
 
     def __init__(
@@ -203,10 +216,12 @@ class layer_span:  # noqa: N801 - used like a function: `with layer_span(...)`, 
         *,
         attributes: Mapping[str, AttributeValue] | None = None,
         classify: Classifier | None = None,
+        activate: bool = True,
     ) -> None:
         self.step = step
         self.attributes = dict(attributes or {})
         self.classify = classify
+        self.activate = activate
         self._cm: Any = None
         self._span: Span | None = None
         self._start = 0.0
@@ -224,13 +239,17 @@ class layer_span:  # noqa: N801 - used like a function: `with layer_span(...)`, 
                 **self.attributes,
             }
         )
-        self._cm = obs.tracer.start_as_current_span(
-            self.step,
-            attributes=span_attributes,
-            record_exception=False,
-            set_status_on_exception=False,
-        )
-        self._span = self._cm.__enter__()
+        if self.activate:
+            self._cm = obs.tracer.start_as_current_span(
+                self.step,
+                attributes=span_attributes,
+                record_exception=False,
+                set_status_on_exception=False,
+            )
+            self._span = self._cm.__enter__()
+        else:
+            self._cm = None
+            self._span = obs.tracer.start_span(self.step, attributes=span_attributes)
         self._start = time.perf_counter()
         return self._span
 
@@ -240,7 +259,7 @@ class layer_span:  # noqa: N801 - used like a function: `with layer_span(...)`, 
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> bool | None:
-        assert self._span is not None and self._cm is not None
+        assert self._span is not None and (self._cm is not None or not self.activate)
         outcome = attr.OUTCOME_OK
         if isinstance(exc, Exception):
             outcome = attr.OUTCOME_ERROR
@@ -251,7 +270,10 @@ class layer_span:  # noqa: N801 - used like a function: `with layer_span(...)`, 
         get_observability().metrics.record_step(
             self.step, time.perf_counter() - self._start, outcome=outcome, kb=self._kb
         )
-        cm, self._cm, self._span = self._cm, None, None
+        cm, span, self._cm, self._span = self._cm, self._span, None, None
+        if cm is None:
+            span.end()
+            return None
         return cm.__exit__(exc_type, exc, tb)
 
     def __call__(self, fn: F) -> F:

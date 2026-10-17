@@ -18,15 +18,16 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.trace import StatusCode
 
 from rag.observe import (
-    attributes as attr,
-)
-from rag.observe import (
+    activate_span,
     current_request_id,
     current_trace_id,
     layer_span,
     request_span,
     set_error_category,
     shutdown_observability,
+)
+from rag.observe import (
+    attributes as attr,
 )
 from rag.observe.context import current_span_id
 from rag.testing import FakeChatModel, FakeEmbedding, memory_observability
@@ -186,6 +187,36 @@ def test_layer_span_decorator_sync_and_async() -> None:
     rerank_span = next(s for s in children if s.name == "rerank")
     # The span is opened when the coroutine runs and is still current after the await.
     assert span_after_await == [format(rerank_span.context.span_id, "016x")]
+
+
+def test_layer_span_without_activation() -> None:
+    """Spec P1-02: a step that yields to its caller makes its span current only around its own
+    work; the span still ends, nests under the request and records failures."""
+    seen: dict[str, str | None] = {}
+    with memory_observability() as obs:
+        with request_span("ask_docs", kb="k") as scope:
+            with layer_span("generate", activate=False) as span:
+                seen["outside"] = current_span_id()
+                with activate_span(span):
+                    seen["inside"] = current_span_id()
+                seen["after"] = current_span_id()
+            with pytest.raises(ValueError), layer_span("generate", activate=False):
+                raise ValueError("bug")
+        spans = obs.span_exporter.get_finished_spans()
+
+    root = format(scope.span.get_span_context().span_id, "016x")
+    first, failed = (s for s in spans if s.name == "generate")
+    assert seen == {
+        "outside": root,
+        "inside": format(first.context.span_id, "016x"),
+        "after": root,
+    }
+    assert (
+        first.parent is not None and first.parent.span_id == scope.span.get_span_context().span_id
+    )
+    assert first.status.status_code is not StatusCode.ERROR
+    assert failed.status.status_code is StatusCode.ERROR
+    assert dict(failed.attributes or {})[attr.ERROR_TYPE] == "ValueError"
 
 
 class _GraphState(TypedDict):

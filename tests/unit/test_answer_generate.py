@@ -18,6 +18,8 @@ import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_core.outputs import ChatGenerationChunk
+from opentelemetry import trace
+from pydantic import Field
 
 import rag.answer.generate as generate_module
 from rag.answer import (
@@ -30,10 +32,11 @@ from rag.answer import (
     stream_answer,
 )
 from rag.answer.prompts import NOT_FOUND
-from rag.config import AnswerConfig, ServiceSettings
+from rag.config import AnswerConfig, ModelPrice, ServiceSettings
 from rag.cost import BudgetExceeded, CostLedger
 from rag.llm import make_chat_model
 from rag.observe import attributes as attr
+from rag.observe import request_span
 from rag.testing import FakeChatModel, StreamingFakeChatModel, memory_observability
 from rag.types import AnswerStatus, Chunk, ErrorCategory
 
@@ -134,6 +137,8 @@ def test_default_model_is_online_profile(monkeypatch: pytest.MonkeyPatch) -> Non
         (QUESTION, f"**{NOT_FOUND['en'].rstrip('.')}**", "en"),
         ("LongT5 的默认窗口是多少？", NOT_FOUND["zh"], "zh"),
         ("LongT5 的默认窗口是多少？", NOT_FOUND["en"], "zh"),
+        (QUESTION, "I'm sorry. The documentation does not contain the answer.", "en"),
+        ("LongT5 的默认窗口是多少？", "抱歉。手册里没有找到答案。", "zh"),
     ],
 )
 def test_not_found_sentence(question: str, reply: str, language: str) -> None:
@@ -183,6 +188,15 @@ def test_parse_retry_recovers() -> None:
     assert second[:2] == first
     assert isinstance(second[2], AIMessage) and second[2].content == "LongT5 uses local attention."
     assert isinstance(second[3], HumanMessage) and "[n]" in str(second[3].content)
+    assert "did not cite any fragment" in str(second[3].content)
+
+    # Numbers outside the context: the reminder names them and the valid range.
+    model = FakeChatModel(responses=["LongT5 uses local attention [7].", "It does [1]."])
+    answer = asyncio.run(
+        generate_answer(QUESTION, make_context(), kb="hf_docs", config=CONFIG, model=model)
+    )
+    reminder = str(model.calls[1][3].content)
+    assert answer.found and "[7]" in reminder and "[1] to [3]" in reminder
 
 
 def test_parse_failure_retries_once_then_flags() -> None:
@@ -368,3 +382,73 @@ def test_generate_cost_from_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert span[attr.GEN_AI_USAGE_OUTPUT_TOKENS] == 120
     assert span[attr.ANSWER_COST_CNY] == pytest.approx(row["cny"])
     assert span[attr.USAGE_ESTIMATED] is False
+
+
+# ---- what runs between two deltas belongs to the caller ---------------------------------------
+
+
+def test_caller_code_between_deltas_is_outside_the_span(tmp_path: Path) -> None:
+    caller_ledger = CostLedger(
+        tmp_path / "caller.jsonl",
+        prices={"caller-model": ModelPrice(input_cny_per_m=1.0)},
+        budget_stop_cny=10.0,
+    )
+    model = StreamingFakeChatModel(responses=["LongT5 uses local attention [1]."], chunk_chars=4)
+
+    async def consume() -> list[Any]:
+        current: list[Any] = []
+        async for event in stream_answer(
+            QUESTION, make_context(), kb="hf_docs", config=CONFIG, model=model
+        ):
+            if isinstance(event, AnswerDelta):
+                current.append(trace.get_current_span())
+                # The caller's own model call between two deltas is not this answer's cost.
+                caller_ledger.record(kind="chat", model="caller-model", prompt_tokens=100)
+        return current
+
+    with memory_observability() as obs:
+        with request_span("ask_docs", kb="hf_docs") as scope:
+            current = asyncio.run(consume())
+        generate = _span(obs)
+        request = _span(obs, "ask_docs")
+
+    assert len(current) > 3
+    assert all(span is scope.span for span in current)  # not the generate span
+    assert generate.parent is not None and generate.parent.span_id == request.context.span_id
+    assert dict(generate.attributes)[attr.ANSWER_MODEL_CALLS] == 0
+    assert len(caller_ledger.entries()) == len(current)
+
+
+class ClosableChatModel(StreamingFakeChatModel):
+    """Records when the model's own stream is closed."""
+
+    closed: list[str] = Field(default_factory=list)
+
+    async def _astream(  # type: ignore[override]
+        self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        try:
+            async for chunk in super()._astream(messages, stop, run_manager, **kwargs):
+                yield chunk
+        finally:
+            self.closed.append("closed")
+
+
+def test_closing_the_answer_stream_early_closes_the_model_stream() -> None:
+    model = ClosableChatModel(responses=["LongT5 uses local attention [1]. " * 4], chunk_chars=3)
+
+    async def first_delta_then_close() -> Any:
+        events = stream_answer(QUESTION, make_context(), kb="hf_docs", config=CONFIG, model=model)
+        first = await anext(events)
+        await events.aclose()
+        for _ in range(3):  # let the event loop finish closing the model's generator
+            await asyncio.sleep(0)
+        return first
+
+    with memory_observability() as obs:
+        first = asyncio.run(first_delta_then_close())
+        generate = dict(_span(obs).attributes)
+
+    assert isinstance(first, AnswerDelta)
+    assert model.closed == ["closed"]
+    assert generate[attr.ERROR_TYPE] == "GeneratorExit"  # the span ended, as cancelled

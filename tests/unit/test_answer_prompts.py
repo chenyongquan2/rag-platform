@@ -128,10 +128,27 @@ def test_injected_chunk_cannot_change_instructions() -> None:
 def test_retry_messages_add_a_reminder() -> None:
     ctx = build_context([[chunk("a#0", "LongT5 uses local attention.")]], 4000)
     messages = build_messages("What is r?", ctx, "en")
-    again = retry_messages(messages, "It is local attention.", "en")
+    again = retry_messages(messages, "It is local attention.", "en", fragment_count=1)
     assert again[:2] == messages
     assert isinstance(again[2], AIMessage) and again[2].content == "It is local attention."
     assert isinstance(again[3], HumanMessage)
-    assert "[n]" in str(again[3].content) and NOT_FOUND["en"] in str(again[3].content)
-    zh = retry_messages(build_messages("r 是什么？", ctx, "zh"), "x", "zh")
-    assert NOT_FOUND["zh"] in str(zh[3].content)
+    reminder = str(again[3].content)
+    assert "did not cite any fragment" in reminder
+    assert "[n]" in reminder and NOT_FOUND["en"] in reminder
+    zh = retry_messages(build_messages("r 是什么？", ctx, "zh"), "x", "zh", fragment_count=1)
+    assert "没有标出任何片段编号" in str(zh[3].content) and NOT_FOUND["zh"] in str(zh[3].content)
+
+
+def test_retry_reminder_names_unknown_numbers() -> None:
+    ctx = build_context([[chunk("a#0", "LongT5 uses local attention.")]], 4000)
+    messages = build_messages("What is r?", ctx, "en")
+    again = retry_messages(
+        messages, "A [7]. B [0].", "en", fragment_count=3, unknown_markers=[7, 0]
+    )
+    reminder = str(again[3].content)
+    assert "[7][0]" in reminder and "[1] to [3]" in reminder
+    assert "did not cite any fragment" not in reminder
+    one = retry_messages(messages, "A [4].", "zh", fragment_count=1, unknown_markers=[4])
+    reminder = str(one[3].content)
+    assert "[4]" in reminder and "只有一个片段 [1]" in reminder
+    assert NOT_FOUND["zh"] in reminder

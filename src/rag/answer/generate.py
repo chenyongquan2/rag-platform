@@ -18,7 +18,9 @@ The model is always streamed, also for `generate_answer`: the profile's read tim
 the gap between two chunks, not the whole generation (spec P1-01 open issue).
 
 The `generate` step span carries the context, the answer and the citation check numbers, and the
-tokens and CNY of the ledger lines the model calls wrote while it was open.
+tokens and CNY of the ledger lines written while the model was working for this answer. The span
+is current only during the model's own steps, not while the caller handles an event, so the
+caller's spans and model calls between two events are not counted here.
 """
 
 from __future__ import annotations
@@ -27,12 +29,13 @@ import contextlib
 import logging
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import BaseMessage
 from opentelemetry.trace import Span
 
 from rag.answer.context import AnswerContext
@@ -47,8 +50,14 @@ from rag.answer.prompts import (
 from rag.config import AnswerConfig, ServiceSettings
 from rag.cost import add_record_listener
 from rag.llm import chat_error_category, make_chat_model
+from rag.observe import (
+    activate_span,
+    current_request_id,
+    layer_span,
+    new_request_id,
+    set_error_category,
+)
 from rag.observe import attributes as attr
-from rag.observe import current_request_id, layer_span, new_request_id, set_error_category
 from rag.types import (
     Answer,
     AnswerSentence,
@@ -211,6 +220,35 @@ def _set_answer_attributes(
         set_error_category(category, span)
 
 
+@contextlib.contextmanager
+def _active(span: Span, rows: list[dict[str, Any]]) -> Iterator[None]:
+    """Our own work inside the step: the span is current (framework spans nest under it) and
+    ledger lines written now are this answer's. Never held across a yield to the caller."""
+    token = _LEDGER_ROWS.set(rows)
+    try:
+        with activate_span(span):
+            yield
+    finally:
+        _LEDGER_ROWS.reset(token)
+
+
+async def _model_text(
+    chat: BaseChatModel, messages: list[BaseMessage], span: Span, rows: list[dict[str, Any]]
+) -> AsyncIterator[str]:
+    """Text pieces of one streamed model call. Each step of the model's stream runs inside
+    `_active`; closing this generator closes the model's stream at once (`aclosing`)."""
+    async with contextlib.aclosing(chat.astream(messages)) as stream:
+        while True:
+            with _active(span, rows):
+                try:
+                    chunk = await anext(stream)
+                except StopAsyncIteration:
+                    return
+            text = _content_text(chunk.content)
+            if text:
+                yield text
+
+
 async def stream_answer(
     question: str,
     context: AnswerContext,
@@ -225,7 +263,9 @@ async def stream_answer(
 
     `model` defaults to `make_chat_model("online", settings)`; it is only built when there is a
     fragment to answer from. `request_id` defaults to the current request's or a new one.
-    Consume the stream to the end (or close it with `contextlib.aclosing`) so the span ends.
+    The `generate` span is current, and ledger lines count for this answer, only while the model
+    is working; the caller's code between two events runs outside both. Closing the stream early
+    closes the model's stream and ends the span as cancelled.
     """
     language = answer_language(question, config.language)
     request_id = request_id or current_request_id() or new_request_id()
@@ -233,56 +273,58 @@ async def stream_answer(
     outcome = _Outcome()
     rows: list[dict[str, Any]] = []
     _install_ledger_listener()
-    token = _LEDGER_ROWS.set(rows)
-    try:
-        with layer_span(STEP, attributes=_context_attributes(context, language)) as span:
-            if context.fragments:
-                chat = model if model is not None else make_chat_model("online", settings)
-                messages = build_messages(question, context, language)
-                while True:
-                    outcome.attempts += 1
-                    if outcome.attempts > 1:
-                        yield AnswerRetry(outcome.attempts, ErrorCategory.ANSWER_PARSE_FAILED)
-                    parts: list[str] = []
-                    try:
-                        async for chunk in chat.astream(messages):
-                            text = _content_text(chunk.content)
-                            if text:
-                                parts.append(text)
-                                yield AnswerDelta(text, outcome.attempts)
-                    except Exception as exc:
-                        category = chat_error_category(exc)
-                        if category is None:
-                            raise
-                        logger.warning("answer generation failed (%s): %s", category, exc)
-                        outcome.error = category
-                        break
-                    output = "".join(parts)
-                    outcome.parsed = parse_answer(output)
-                    if outcome.parsed.not_found:
-                        outcome.checked = None
-                        break
-                    outcome.checked = check_citations(outcome.parsed, context)
-                    if outcome.checked.has_valid_citation:
-                        break
-                    if outcome.attempts > config.parse_retries:
-                        outcome.parse_failed = True
-                        break
-                    logger.info("answer cites no fragment; retrying (attempt %d)", outcome.attempts)
-                    messages = retry_messages(messages, output, language)
-            answer = _build_answer(
-                outcome,
-                context,
-                language,
-                kb=kb,
-                request_id=request_id,
-                elapsed_ms=(time.perf_counter() - start) * 1000,
-            )
-            _set_answer_attributes(span, answer, outcome, rows)
-    finally:
-        # A stream closed from another context (e.g. garbage collected) cannot reset the var.
-        with contextlib.suppress(ValueError):
-            _LEDGER_ROWS.reset(token)
+    attributes = _context_attributes(context, language)
+    with layer_span(STEP, attributes=attributes, activate=False) as span:
+        if context.fragments:
+            chat = model if model is not None else make_chat_model("online", settings)
+            messages = build_messages(question, context, language)
+            while True:
+                outcome.attempts += 1
+                if outcome.attempts > 1:
+                    yield AnswerRetry(outcome.attempts, ErrorCategory.ANSWER_PARSE_FAILED)
+                parts: list[str] = []
+                try:
+                    async with contextlib.aclosing(
+                        _model_text(chat, messages, span, rows)
+                    ) as pieces:
+                        async for text in pieces:
+                            parts.append(text)
+                            yield AnswerDelta(text, outcome.attempts)
+                except Exception as exc:
+                    category = chat_error_category(exc)
+                    if category is None:
+                        raise
+                    logger.warning("answer generation failed (%s): %s", category, exc)
+                    outcome.error = category
+                    break
+                output = "".join(parts)
+                outcome.parsed = parse_answer(output)
+                if outcome.parsed.not_found:
+                    outcome.checked = None
+                    break
+                outcome.checked = check_citations(outcome.parsed, context)
+                if outcome.checked.has_valid_citation:
+                    break
+                if outcome.attempts > config.parse_retries:
+                    outcome.parse_failed = True
+                    break
+                logger.info("answer cites no fragment; retrying (attempt %d)", outcome.attempts)
+                messages = retry_messages(
+                    messages,
+                    output,
+                    language,
+                    fragment_count=len(context.fragments),
+                    unknown_markers=outcome.checked.removed_markers,
+                )
+        answer = _build_answer(
+            outcome,
+            context,
+            language,
+            kb=kb,
+            request_id=request_id,
+            elapsed_ms=(time.perf_counter() - start) * 1000,
+        )
+        _set_answer_attributes(span, answer, outcome, rows)
     yield AnswerDone(answer)
 
 

@@ -12,6 +12,7 @@ the answer cannot be deduced from the context, do not give an answer").
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -86,15 +87,28 @@ _USER_TEMPLATES: dict[AnswerLanguage, str] = {
     ),
 }
 
-_RETRY_REMINDERS: dict[AnswerLanguage, str] = {
+# Retry reminder: what was wrong, then the rule again (spec P1-02 review: name unknown numbers).
+_NO_MARKER: dict[AnswerLanguage, str] = {
+    "en": "Your answer did not cite any fragment number.",
+    "zh": "上一次的回答没有标出任何片段编号。",
+}
+_UNKNOWN_MARKERS: dict[AnswerLanguage, str] = {
+    "en": "Your answer cited {markers}, but no fragment has that number: {valid}.",
+    "zh": "上一次的回答标了 {markers}，但没有这个编号的片段：{valid}。",
+}
+_VALID_RANGE: dict[AnswerLanguage, tuple[str, str]] = {
+    "en": ("the only fragment is [1]", "the fragments are [1] to [{n}]"),
+    "zh": ("只有一个片段 [1]", "片段编号是 [1] 到 [{n}]"),
+}
+_RETRY_RULE: dict[AnswerLanguage, str] = {
     "en": (
-        "Your answer did not cite any fragment number. Answer the question again following the "
-        "rules: end every sentence with the fragment numbers in square brackets, like [n], or "
-        f"output exactly: {NOT_FOUND['en']}"
+        " Answer the question again following the rules: end every sentence with the numbers of "
+        "the fragments it is based on, in square brackets, like [n], or output exactly: "
+        f"{NOT_FOUND['en']}"
     ),
     "zh": (
-        "上一次的回答没有标出任何片段编号。请按规则重新回答：每句话末尾用方括号标出片段编号，"
-        f"例如 [n]；片段里没有答案时只输出：{NOT_FOUND['zh']}"
+        "请按规则重新回答：每句话末尾用方括号标出这句话依据的片段编号，例如 [n]；"
+        f"片段里没有答案时只输出：{NOT_FOUND['zh']}"
     ),
 }
 
@@ -137,8 +151,34 @@ def build_messages(
     return [SystemMessage(SYSTEM_PROMPTS[language]), HumanMessage(user)]
 
 
+def retry_reminder(
+    language: AnswerLanguage, *, fragment_count: int, unknown_markers: Sequence[int] = ()
+) -> str:
+    """What was wrong with an answer that cited no fragment, and the citation rule again.
+
+    With `unknown_markers` (numbers that matched no fragment) the reminder names them and the
+    numbers that exist; without, it says that nothing was cited.
+    """
+    if unknown_markers:
+        markers = "".join(f"[{m}]" for m in dict.fromkeys(unknown_markers))
+        one, several = _VALID_RANGE[language]
+        valid = one if fragment_count == 1 else several.format(n=fragment_count)
+        problem = _UNKNOWN_MARKERS[language].format(markers=markers, valid=valid)
+    else:
+        problem = _NO_MARKER[language]
+    return problem + _RETRY_RULE[language]
+
+
 def retry_messages(
-    messages: list[BaseMessage], previous: str, language: AnswerLanguage
+    messages: list[BaseMessage],
+    previous: str,
+    language: AnswerLanguage,
+    *,
+    fragment_count: int,
+    unknown_markers: Sequence[int] = (),
 ) -> list[BaseMessage]:
-    """The first call's messages, the answer that cited nothing, and a reminder of the format."""
-    return [*messages, AIMessage(previous), HumanMessage(_RETRY_REMINDERS[language])]
+    """The first call's messages, the answer that cited nothing valid, and a reminder."""
+    reminder = retry_reminder(
+        language, fragment_count=fragment_count, unknown_markers=unknown_markers
+    )
+    return [*messages, AIMessage(previous), HumanMessage(reminder)]
