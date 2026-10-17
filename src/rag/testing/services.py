@@ -12,6 +12,7 @@ import copy
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from typing import Any
 
 from elasticsearch import BadRequestError, NotFoundError
@@ -97,7 +98,40 @@ class _FakeIndices:
         return {"acknowledged": True, "index": index}
 
     def exists(self, *, index: str) -> bool:
-        return index in self._es.mappings
+        return index in self._es.mappings or index in self._es.aliases
+
+    def get_alias(self, *, name: str | None = None, index: str | None = None) -> _Response:
+        aliases = self._es.aliases
+        if name is not None:
+            if name not in aliases:  # callers use options(ignore_status=404)
+                return _Response({}, _Meta(404))
+            return _Response({aliases[name]: {"aliases": {name: {}}}})
+        assert index is not None
+        self._es.require(index)
+        return _Response({index: {"aliases": {a: {} for a, i in aliases.items() if i == index}}})
+
+    def resolve_index(self, *, name: str, **_: Any) -> dict[str, Any]:
+        return {"indices": [{"name": n} for n in sorted(self._es.mappings) if fnmatch(n, name)]}
+
+    def update_aliases(self, *, actions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        aliases = dict(self._es.aliases)
+        for action in actions:
+            ((op, spec),) = action.items()
+            if op == "remove":
+                if aliases.get(spec["alias"]) != spec["index"]:
+                    raise NotFoundError(
+                        "aliases_not_found_exception",
+                        _Meta(404),  # type: ignore[arg-type]
+                        {"error": {"type": "aliases_not_found_exception"}},
+                    )
+                del aliases[spec["alias"]]
+            elif op == "add":
+                self._es.require(spec["index"])
+                aliases[spec["alias"]] = spec["index"]
+            else:
+                raise NotImplementedError(f"FakeElasticsearch update_aliases: {op}")
+        self._es.aliases = aliases
+        return {"acknowledged": True}
 
     def get_mapping(self, *, index: str) -> dict[str, Any]:
         self._es.require(index)
@@ -137,6 +171,8 @@ class FakeElasticsearch:
     def __init__(self) -> None:
         self.docs: dict[str, dict[str, dict[str, Any]]] = {}
         self.mappings: dict[str, dict[str, Any]] = {}
+        self.aliases: dict[str, str] = {}
+        """alias -> the one index it points to."""
         self.indices = _FakeIndices(self)
         self.bulk_calls: list[int] = []
         """Number of operations (documents) in each bulk request."""

@@ -233,6 +233,16 @@ class ServiceSettings(BaseSettings):
     hf_data_dir: str = "data/raw/hf"
     hf_timeout_s: float = Field(default=60.0, gt=0)
 
+    # Ingestion job (spec P0-06, design s7-4, s16-8). A run stops before changing anything when
+    # more than `ingest_max_read_failure_ratio` of the documents fail to read, or when it would
+    # pass fewer than `ingest_min_input_ratio` times the documents in the docstore (a source that
+    # failed to mount looks like a mass delete). Reports go to `<ingest_report_dir>/<kb>/`.
+    ingest_max_read_failure_ratio: float = Field(default=0.05, ge=0, le=1)
+    ingest_min_input_ratio: float = Field(default=0.5, ge=0, le=1)
+    ingest_bulk_batch_size: int = Field(default=500, gt=0)
+    ingest_lock_timeout_s: float = Field(default=5.0, ge=0)
+    ingest_report_dir: str = "data/reports"
+
     # Money: stop real model jobs when spent + estimate would exceed budget_stop_cny.
     budget_cny: float = Field(default=30.0, ge=0)
     budget_stop_cny: float = Field(default=28.0, ge=0)

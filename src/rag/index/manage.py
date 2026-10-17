@@ -183,3 +183,36 @@ def init_kb(es: Elasticsearch, names: KbIndexNames, body: dict[str, Any]) -> tup
     index = create_kb_index(es, names, 1, body)
     switch_alias(es, names, index, expected_current=None)
     return index, True
+
+
+def ensure_index_fields(es: Elasticsearch, index: str, body: dict[str, Any]) -> list[str]:
+    """Add the fields of `body` that `index` does not have yet; return their names.
+
+    Adding fields to a mapping is allowed on a live index and changes no existing document, so an
+    index created before a field was added to `rag.index.mapping` can still take new chunks (the
+    mapping is strict). Fields that exist are left alone; changing their definition needs a new
+    index version (s7-5).
+    """
+    current = es.indices.get_mapping(index=index)[index]["mappings"].get("properties", {})
+    missing = {k: v for k, v in body["mappings"]["properties"].items() if k not in current}
+    if missing:
+        es.indices.put_mapping(index=index, properties=missing)
+    return sorted(missing)
+
+
+def index_embed_model(es: Elasticsearch, index: str) -> str | None:
+    """The embedding model the index was written with (`_meta.embed_model`), None if not set."""
+    meta = es.indices.get_mapping(index=index)[index]["mappings"].get("_meta") or {}
+    value = meta.get("embed_model")
+    return str(value) if value else None
+
+
+def set_index_embed_model(es: Elasticsearch, index: str, model_id: str) -> None:
+    """Record the embedding model in the index's `_meta` (other `_meta` keys are kept).
+
+    Vectors of two models in one index cannot be compared with each other, and with the same
+    dimensions nothing would report it (s7-5); the ingest job refuses a run with another model.
+    """
+    meta = dict(es.indices.get_mapping(index=index)[index]["mappings"].get("_meta") or {})
+    meta["embed_model"] = model_id
+    es.indices.put_mapping(index=index, meta=meta)
