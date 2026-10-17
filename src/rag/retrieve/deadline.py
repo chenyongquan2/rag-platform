@@ -14,16 +14,18 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class Deadline:
-    """`at` is a reading of `clock` (monotonic seconds) after which the request has failed."""
+    """`at` is a reading of `clock` (monotonic seconds) after which the request has failed;
+    `total_s` is the whole time limit it was created with (0 when unknown)."""
 
     at: float
     clock: Callable[[], float] = field(default=time.monotonic, repr=False, compare=False)
+    total_s: float = field(default=0.0, compare=False)
 
     @classmethod
     def after_ms(cls, ms: float, *, clock: Callable[[], float] = time.monotonic) -> Deadline:
         if ms <= 0:
             raise ValueError(f"a deadline needs a positive time limit, got {ms} ms")
-        return cls(at=clock() + ms / 1000.0, clock=clock)
+        return cls(at=clock() + ms / 1000.0, clock=clock, total_s=ms / 1000.0)
 
     def remaining_s(self) -> float:
         """Seconds left, 0 when the deadline has passed (never negative)."""

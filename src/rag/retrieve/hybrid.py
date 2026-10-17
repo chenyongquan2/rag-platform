@@ -14,8 +14,10 @@ client (P0-05); if it fails, or is not ready while enough time is left for the s
 BM25 search is sent (degraded). Only when no route answers does the retriever raise
 `RetrievalError` (`retrieval_failed` or `retrieval_timeout`).
 
-Deadline: the request's `Deadline` (s16-2) bounds everything. The embedding is waited for at
-most until `es_reserve_ms` before the deadline; the `_msearch` gets the remaining time as its
+Deadline: the request's `Deadline` (s16-2) bounds everything. A query vector in the L0 cache
+is used whenever the cache answers within half of the remaining time. The gateway call is
+waited for at most until min(`es_reserve_ms`, `es_reserve_ratio` x the request's time limit)
+before the deadline, the time kept for the search; the `_msearch` gets the remaining time as its
 HTTP time-out, and each search inside it an Elasticsearch `timeout` `es_margin_ms` shorter, so a
 slow route is reported as timed out before the HTTP request itself is cut off.
 """
@@ -37,6 +39,7 @@ from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
 
 from rag.config import RetrievalConfig
 from rag.index.mapping import VECTOR_FIELD
+from rag.retrieve.deadline import Deadline
 from rag.retrieve.filters import build_es_filter
 from rag.retrieve.fusion import rrf_fuse
 from rag.retrieve.query import HybridQuery, RetrievalTrace
@@ -131,18 +134,22 @@ class EsHybridRetriever(BaseRetriever):
         config: RetrievalConfig,
         es_reserve_ms: int,
         es_margin_ms: int,
+        es_reserve_ratio: float = 0.2,
         embed_threads: int = DEFAULT_EMBED_THREADS,
         callback_manager: CallbackManager | None = None,
     ) -> None:
         super().__init__(callback_manager=callback_manager)
         if es_reserve_ms < 0 or es_margin_ms < 0:
             raise ValueError("es_reserve_ms and es_margin_ms must be >= 0")
+        if not 0 <= es_reserve_ratio < 1:
+            raise ValueError(f"es_reserve_ratio must be in [0, 1), got {es_reserve_ratio}")
         self._es = es
         self._embed_model = embed_model
         self.kb = kb
         self.index = index
         self.config = config
         self.es_reserve_ms = es_reserve_ms
+        self.es_reserve_ratio = es_reserve_ratio
         self.es_margin_ms = es_margin_ms
         # Query embeddings run in these threads so the wait can stop at the deadline; a call
         # still running then finishes in the background (bounded by the query profile's own
@@ -151,14 +158,29 @@ class EsHybridRetriever(BaseRetriever):
         self._executor = ThreadPoolExecutor(
             max_workers=embed_threads, thread_name_prefix="query-embed"
         )
+        # L0 cache lookups get their own threads: they must still answer while the gateway
+        # threads are all waiting on a gateway that does not respond.
+        self._cache_executor = ThreadPoolExecutor(
+            max_workers=embed_threads, thread_name_prefix="query-embed-cache"
+        )
 
     @property
     def embed_model(self) -> BaseEmbedding:
         return self._embed_model
 
+    def es_reserve_s(self, deadline: Deadline) -> float:
+        """Time kept for the `_msearch` while waiting for the gateway: min(`es_reserve_ms`,
+        `es_reserve_ratio` x the request's whole time limit), so a short deadline is not used
+        up by the reserve alone (an `_msearch` takes about 20 ms)."""
+        cap = self.es_reserve_ms / 1000.0
+        if deadline.total_s <= 0:
+            return cap
+        return min(cap, self.es_reserve_ratio * deadline.total_s)
+
     def close(self) -> None:
         """Stop the query-embedding threads (calls already running finish on their own)."""
         self._executor.shutdown(wait=False, cancel_futures=True)
+        self._cache_executor.shutdown(wait=False, cancel_futures=True)
 
     # ---- request bodies ---------------------------------------------------------------------
 
@@ -203,8 +225,12 @@ class EsHybridRetriever(BaseRetriever):
         """The query vector, or None and the reason the vector route cannot run."""
         if query.embedding is not None:
             return list(query.embedding), None
-        assert query.deadline is not None
-        wait_s = query.deadline.remaining_s() - self.es_reserve_ms / 1000.0
+        deadline = query.deadline
+        assert deadline is not None
+        cached = self._cached_vector(query.query_str, deadline)
+        if cached is not None:
+            return cached, None
+        wait_s = deadline.remaining_s() - self.es_reserve_s(deadline)
         if wait_s <= 0:
             return None, EMBED_TIMEOUT
         future = self._executor.submit(self._embed_model.get_query_embedding, query.query_str)
@@ -218,6 +244,45 @@ class EsHybridRetriever(BaseRetriever):
                 return None, EMBED_TIMEOUT
             logger.warning("query embedding failed; BM25 only: %s: %s", type(exc).__name__, exc)
             return None, f"embedding: {type(exc).__name__}"
+
+    def _cached_vector(self, text: str, deadline: Deadline) -> list[float] | None:
+        """The L0 cache's vector for `text` (no gateway call), waited for at most half of the
+        remaining time; None on a miss, a cache error or no answer in time. Checked before the
+        gateway budget applies, so a cached question keeps its vector route under any deadline.
+        On a miss the gateway client looks the cache up once more (one extra Redis GET)."""
+        lookup = getattr(self._embed_model, "cached_query_embedding", None)
+        if not callable(lookup):
+            return None
+        wait_s = deadline.remaining_s() / 2.0
+        if wait_s <= 0:
+            return None
+        future = self._cache_executor.submit(lookup, text)
+        try:
+            vector = future.result(timeout=wait_s)
+        except Exception as exc:  # a cache problem only means "not cached"
+            future.cancel()
+            logger.warning("L0 cache lookup failed or slow: %s", type(exc).__name__)
+            return None
+        return list(vector) if vector is not None else None
+
+    def _resolve_index(self, deadline: Deadline) -> str:
+        """The index behind the alias, for a result without hits (hits name it themselves).
+        Empty when the alias is unknown, the request fails or no time is left."""
+        remaining_s = deadline.remaining_s()
+        if remaining_s <= 0:
+            return ""
+        try:
+            resp = self._es.options(
+                request_timeout=remaining_s, ignore_status=404
+            ).indices.get_alias(name=self.index)
+        except (TransportError, ApiError) as exc:
+            logger.warning("alias %s not resolved: %s", self.index, type(exc).__name__)
+            return ""
+        meta = getattr(resp, "meta", None)
+        if meta is not None and getattr(meta, "status", 200) != 200:
+            return ""
+        body = getattr(resp, "body", resp)
+        return ",".join(sorted(body))
 
     def _msearch(
         self, query: HybridQuery, searches: list[tuple[str, dict[str, Any]]], trace: RetrievalTrace
@@ -317,6 +382,8 @@ class EsHybridRetriever(BaseRetriever):
                 route_errors=reasons,
             )
         trace.degraded = bool(trace.failed_routes)
+        if not trace.index_version:
+            trace.index_version = self._resolve_index(query.deadline)
 
         fused = rrf_fuse(trace.routes, k=self.config.rrf_k)
         nodes: list[NodeWithScore] = []

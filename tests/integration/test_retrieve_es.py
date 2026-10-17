@@ -101,7 +101,7 @@ def _routes(
 
 def test_filter_restricts_both_routes(es: Elasticsearch, make_names: NamesFactory) -> None:
     names = make_names()
-    _write_docs(es, names)
+    index = _write_docs(es, names)
     retriever = _retriever(es, names)
 
     # Without caller filters both routes see the three public chunks of this kb (the kNN
@@ -113,6 +113,18 @@ def test_filter_restricts_both_routes(es: Elasticsearch, make_names: NamesFactor
         BM25: {"d1"},
         VECTOR: {"d1"},
     }
+
+    # A filter nothing matches: both routes answer with no hits, the result still names the
+    # index behind the alias (resolved with one get_alias call).
+    query = HybridQuery(
+        "install pip",
+        acl_groups=("public",),
+        filters={"doc_type": "none"},
+        deadline=Deadline.after_ms(10_000),
+    )
+    assert retriever.retrieve(query) == []
+    assert query.trace.routes == {BM25: [], VECTOR: []}
+    assert query.trace.index_version == index
 
 
 def test_acl_and_kb_enforced_on_both_routes(es: Elasticsearch, make_names: NamesFactory) -> None:

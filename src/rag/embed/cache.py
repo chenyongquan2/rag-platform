@@ -261,6 +261,12 @@ class CachedEmbedding(BaseEmbedding):
             found.update(fresh)
         return [found[h] for h in hashes]
 
+    def cached_query_embedding(self, query: str) -> Embedding | None:
+        """The cached vector of `query`, or None on a miss; never calls `inner`. A cache error
+        counts as a miss (the Redis cache already treats its errors that way)."""
+        text_hash = text_sha256(query)
+        return self._cache.get_many(self.cache_model, [text_hash]).get(text_hash)
+
     def _get_query_embedding(self, query: str) -> Embedding:
         return self._embed([query])[0]
 

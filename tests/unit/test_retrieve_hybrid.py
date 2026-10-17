@@ -12,7 +12,7 @@ from llama_index.core.base.embeddings.base import BaseEmbedding, Embedding
 
 from rag.config import RetrievalConfig
 from rag.cost import BudgetExceeded
-from rag.embed import EmbeddingError
+from rag.embed import CachedEmbedding, EmbeddingError, InMemoryEmbeddingCache, text_sha256
 from rag.retrieve.deadline import Deadline
 from rag.retrieve.hybrid import BM25, VECTOR, EsHybridRetriever, HybridQuery, RetrievalError
 from rag.testing import FakeEmbedding
@@ -55,6 +55,7 @@ def _retriever(
     *,
     config: RetrievalConfig | None = None,
     es_reserve_ms: int = 100,
+    es_reserve_ratio: float = 0.2,
     es_margin_ms: int = 200,
 ) -> EsHybridRetriever:
     return EsHybridRetriever(
@@ -64,6 +65,7 @@ def _retriever(
         index=ALIAS,
         config=config or RetrievalConfig(),
         es_reserve_ms=es_reserve_ms,
+        es_reserve_ratio=es_reserve_ratio,
         es_margin_ms=es_margin_ms,
     )
 
@@ -324,3 +326,73 @@ def test_plain_query_bundle_is_refused() -> None:
     with pytest.raises(ValueError, match="acl_groups"):
         _retriever(es).retrieve(HybridQuery("q", deadline=Deadline.after_ms(1000)))
     assert es.calls == []
+
+
+def test_reserve_for_es_is_capped_and_proportional() -> None:
+    retriever = _retriever(FakeMsearchClient(), es_reserve_ms=200, es_reserve_ratio=0.2)
+    # min(200 ms, 20% of the request's total time limit)
+    assert retriever.es_reserve_s(Deadline.after_ms(10_000)) == pytest.approx(0.2)
+    assert retriever.es_reserve_s(Deadline.after_ms(1_000)) == pytest.approx(0.2)
+    assert retriever.es_reserve_s(Deadline.after_ms(300)) == pytest.approx(0.06)
+    with pytest.raises(ValueError, match="es_reserve_ratio"):
+        _retriever(FakeMsearchClient(), es_reserve_ratio=1.0)
+
+    # A short deadline still leaves time for the query vector: both routes run.
+    for deadline_ms in (300, 800, 1000):
+        es = FakeMsearchClient(bm25=BM25_HITS, vector=VECTOR_HITS)
+        query = _query(deadline_ms=deadline_ms)
+        _retriever(es, es_reserve_ms=200).retrieve(query)
+        assert query.trace.degraded is False, (deadline_ms, query.trace.failed_routes)
+        assert set(query.trace.routes) == {BM25, VECTOR}
+
+
+def _cached(vectors: dict[str, list[float]]) -> CachedEmbedding:
+    """L0 cache in front of a gateway stand-in that must not be called."""
+    cache = InMemoryEmbeddingCache()
+    cache.put_many("m@4", {text_sha256(text): v for text, v in vectors.items()})
+    gateway = _FailingEmbedding(error=AssertionError("the gateway must not be called"))
+    return CachedEmbedding(gateway, cache, cache_model="m@4")
+
+
+def test_cache_hit_is_used_when_the_network_budget_is_spent() -> None:
+    now = [0.0]
+    deadline = Deadline.after_ms(1000, clock=lambda: now[0])
+    now[0] = 0.9  # 100 ms left, less than the 200 ms kept for the search: no gateway call
+
+    vector = [0.5, 0.5, 0.5, 0.5]
+    es = FakeMsearchClient(bm25=BM25_HITS, vector=VECTOR_HITS)
+    query = HybridQuery("cached question", acl_groups=("public",), deadline=deadline)
+    _retriever(es, _cached({"cached question": vector}), es_reserve_ms=200).retrieve(query)
+    assert query.trace.degraded is False
+    knn = es.calls[0]["searches"][3]["knn"]
+    assert knn["query_vector"] == vector
+
+    # A miss with no time for the gateway: BM25 only, and the gateway was not called.
+    es = FakeMsearchClient(bm25=BM25_HITS, vector=VECTOR_HITS)
+    query = HybridQuery("other question", acl_groups=("public",), deadline=deadline)
+    _retriever(es, _cached({"cached question": vector}), es_reserve_ms=200).retrieve(query)
+    assert query.trace.failed_routes == {VECTOR: "embedding: timeout"}
+
+
+def test_index_version_without_hits() -> None:
+    # No route returns a hit, so no hit names the index: the alias is resolved instead.
+    empty = search_response([])
+    es = FakeMsearchClient(bm25=empty, vector=empty, aliases={ALIAS: "kb_hf_docs_v3"})
+    query = _query()
+    assert _retriever(es).retrieve(query) == []
+    assert query.trace.index_version == "kb_hf_docs_v3"
+    assert query.trace.degraded is False
+    assert es.alias_calls == [ALIAS]
+
+    # With hits the index comes from them; no extra request.
+    es = FakeMsearchClient(bm25=BM25_HITS, vector=VECTOR_HITS, aliases={ALIAS: "other"})
+    query = _query()
+    _retriever(es).retrieve(query)
+    assert query.trace.index_version == INDEX
+    assert es.alias_calls == []
+
+    # An unknown alias leaves it empty rather than failing the search.
+    es = FakeMsearchClient(bm25=empty, vector=empty)
+    query = _query()
+    _retriever(es).retrieve(query)
+    assert query.trace.index_version == ""

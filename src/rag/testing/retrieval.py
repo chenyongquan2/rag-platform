@@ -76,10 +76,35 @@ def search_error(status: int, error_type: str, reason: str) -> dict[str, Any]:
     }
 
 
+class _Meta:
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+
+class _AliasResponse:
+    def __init__(self, body: dict[str, Any], status: int) -> None:
+        self.body = body
+        self.meta = _Meta(status)
+
+
+class _FakeIndices:
+    def __init__(self, client: FakeMsearchClient) -> None:
+        self._client = client
+
+    def get_alias(self, *, name: str, **_: Any) -> _AliasResponse:
+        """Like `es.options(ignore_status=404).indices.get_alias(name=...)`."""
+        self._client.alias_calls.append(name)
+        index = self._client.aliases.get(name)
+        if index is None:
+            return _AliasResponse({"error": "alias missing", "status": 404}, 404)
+        return _AliasResponse({index: {"aliases": {name: {}}}}, 200)
+
+
 class _Options:
     def __init__(self, client: FakeMsearchClient, options: dict[str, Any]) -> None:
         self._client = client
         self._options = options
+        self.indices = client.indices
 
     def msearch(self, **kwargs: Any) -> dict[str, Any]:
         return self._client._msearch(self._options, **kwargs)
@@ -91,7 +116,8 @@ class FakeMsearchClient:
     A body with `knn` is the `vector` route, any other the `bm25` route; each gets the answer
     scripted in `responses[route]` (default: no hits). `raises` makes the whole request fail
     instead; `delay_s` sleeps before answering. Every call is recorded in `calls` as
-    `{"index", "searches", "options"}` (deep copies).
+    `{"index", "searches", "options"}` (deep copies). `aliases` (alias -> index) answers
+    `indices.get_alias`; each lookup is recorded in `alias_calls`.
     """
 
     def __init__(
@@ -101,6 +127,7 @@ class FakeMsearchClient:
         vector: Mapping[str, Any] | None = None,
         raises: BaseException | None = None,
         delay_s: float = 0.0,
+        aliases: Mapping[str, str] | None = None,
     ) -> None:
         self.responses: dict[str, Mapping[str, Any]] = {}
         if bm25 is not None:
@@ -110,6 +137,9 @@ class FakeMsearchClient:
         self.raises = raises
         self.delay_s = delay_s
         self.calls: list[dict[str, Any]] = []
+        self.aliases = dict(aliases or {})
+        self.alias_calls: list[str] = []
+        self.indices = _FakeIndices(self)
 
     def options(self, **options: Any) -> _Options:
         return _Options(self, dict(options))
