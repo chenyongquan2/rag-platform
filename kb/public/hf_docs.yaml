@@ -7,7 +7,7 @@ source:
   connector: hf_dataset
   dataset: m-ric/huggingface_doc
   manifest: data/manifests/hf_docs.json   # pinned files, sha256, rows, license (spec P0-03)
-  limit: 50            # null = all 2,647 documents; start small until the flow runs end to end
+  limit: null          # null = all 2,647 documents (full run since P0-12); --limit N for a quick run
 language: en
 pipelines:
   ".md": &markdown
