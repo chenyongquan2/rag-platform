@@ -21,6 +21,7 @@ import yaml
 from llama_index.core.bridge.pydantic import BaseModel, Field, PrivateAttr
 from llama_index.core.schema import BaseNode, MetadataMode, TransformComponent
 
+from rag.ingest.injection import find_suspicious_instructions, scan_text
 from rag.ingest.language import UNDETERMINED, detect_language
 from rag.ingest.markdown import close_open_fence, heading_title, mask_code
 from rag.ingest.meta import add_metadata
@@ -538,43 +539,13 @@ class DetectLanguage(CleanRule):
 
 
 # --- suspicious_instruction -----------------------------------------------------------------
-
-_SECRET_EN = (
-    # Not plain "token": in ML text tokens are pieces of text ("send a token to an expert").
-    r"(?:api[\s_-]?keys?|secrets?|passwords?|(?:access|auth|api|secret|bearer)\s+tokens?"
-    r"|credentials|environment\s+variables|env\s+vars?)"
-)
-_SECRET_ZH = r"(?:密钥|秘钥|口令|密码|令牌|凭证|环境变量|token|key)"
-_SUSPICIOUS = [
-    re.compile(p, re.I)
-    for p in [
-        r"\b(?:ignore|disregard|forget)\s+(?:all\s+|any\s+)?(?:of\s+)?(?:the\s+|your\s+|my\s+)?"
-        r"(?:previous|prior|above|earlier|preceding)\s+(?:instructions?|prompts?|requirements?|rules|directions)",
-        r"\byou\s+are\s+now\s+(?:a|an|the|in|my)\b",
-        r"\b(?:send|post|upload|forward|email|leak|exfiltrate|paste)\s+(?:me\s+)?(?:the\s+|all\s+|your\s+|any\s+)?"
-        rf"(?:\w+\s+){{0,3}}{_SECRET_EN}\s+(?:to|into)\b",
-        r"\b(?:reveal|print|show|output|repeat)\s+(?:me\s+)?(?:your\s+|the\s+)?(?:system\s+prompt|hidden\s+instructions)",
-        r"\bnew\s+instructions?\s*:",
-        r"忽略(?:之前|以上|上面|前面|先前|上述|所有)(?:的)?(?:所有|全部)?(?:要求|指令|指示|规则|提示|说明)",
-        r"你现在是",
-        rf"把.{{0,30}}{_SECRET_ZH}.{{0,20}}(?:发送|发|上传|转发|贴|告诉)",
-        r"(?:泄露|输出|显示|打印)(?:你的)?(?:系统提示|系统提示词|隐藏指令)",
-    ]
-]
-
-
-def find_suspicious_instructions(text: str) -> list[str]:
-    """Snippets that read like instructions to a model (design s6-2, s11-3), English and Chinese.
-
-    Kept narrow on purpose: tutorials often say "send the request to" or 「把模型上传到 Hub」;
-    only sending secrets, overriding earlier instructions or role changes count.
-    """
-    return [m.group(0) for pattern in _SUSPICIOUS for m in pattern.finditer(text)]
+# The patterns, views and false-positive guards live in `rag.ingest.injection` (spec P1-03).
 
 
 @steps.register("suspicious_instruction")
 class SuspiciousInstruction(CleanRule):
-    """Set metadata `suspicious_instruction` (True/False) from the node's own text.
+    """Set metadata `suspicious_instruction` (True/False) from the node's own text
+    (`rag.ingest.injection.scan_text`: zh and en patterns, hidden-text tricks).
 
     In the clean chain it flags units; as a chunk step (after the splitters) it sets the flag per
     chunk, replacing the value inherited from the unit (design s11-3: 命中的块标记).
@@ -584,7 +555,7 @@ class SuspiciousInstruction(CleanRule):
 
     def apply(self, nodes: list[BaseNode]) -> list[BaseNode]:
         for node in nodes:
-            hit = bool(find_suspicious_instructions(node.get_content(MetadataMode.NONE)))
+            hit = bool(scan_text(node.get_content(MetadataMode.NONE)))
             self._stats.units_hit += hit
             add_metadata(node, "suspicious_instruction", hit)
         return nodes
