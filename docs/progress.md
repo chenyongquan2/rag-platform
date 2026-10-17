@@ -14,9 +14,10 @@
 | 2026-10-17 12:17 | P0-06 | 完成 | 3 轮 | 198 个单元测试、21 个集成测试通过 | 0.047 | 50 篇真实向量写入 kb_hf_docs_v1（438 块，94,040 token，31 秒）；docstore 绑定索引 uuid，索引重建后不再用旧的 docstore；假向量写进 fake_kb_hf_docs_v1，不进真索引；共享 .git/config 的 core.bare 曾被改成 true，已改回 |
 | 2026-10-17 13:29 | P0-11 | 完成 | 2 轮 | 228 个单元测试、2 个新集成测试通过 | 0 | 程序用 OTLP gRPC 发给 Collector（设 OTLP_PROTOCOL=http/protobuf 可改用 HTTP，两种都测过）；Collector 写的 trace 文件最多占 80 MB，指标转成 Prometheus 格式，在 127.0.0.1:28889 读取；同一个服务名的几个进程写同一个日志文件，每行拿文件锁再写；正在运行的 Collector 要在主目录执行 docker compose up -d 才会用上新配置（会重建 Collector 和 Jaeger 两个容器） |
 | 2026-10-17 14:22 | P0-07 | 完成 | 3 轮 | 270 个单元测试、27 个集成测试通过（本 spec 新增 42 个单元测试、4 个集成测试；另有 1 个 llm 测试跑过，通过） | 0.0006 | _msearch 约 17 毫秒，主要耗时在算问题向量（中位数约 810 毫秒），已先查 L0 缓存；65 题冒烟评测在 50 篇的索引上从头到尾跑完了，只有第 025 题的来源页在这 50 篇里，三个列表都排第 1；调用方能用的过滤字段只有 doc_type、language、source_rel_prefix，kb 和权限组由服务端加；每个搜索单独设的 ES timeout 对 kNN 是否生效还没验证，留给 P0-12 在全量数据上测 |
+| 2026-10-17 17:35 | P1-02 | 完成 | 2 轮 | 360 个单元测试通过（本 spec 新增 90 个；另有 1 个 llm 测试跑过一次，通过） | 0.0034 | 回答写成带 [n] 编号的纯文本，流式和不流式同一种格式；格式遵守率在 P1-04 用 65 题量 |
 
 ## 已知问题
 
 ## 花费累计
 
-0.0504 元（0.050407 元：对话模型 0.002752 元，向量模型 0.047655 元；账本 C:/workspace/rag-platform-data/cost/ledger.jsonl，`uv run python -m rag.cost summary` 查看）
+0.0538 元（0.053829 元：对话模型 0.006174 元，向量模型 0.047655 元；账本 C:/workspace/rag-platform-data/cost/ledger.jsonl，`uv run python -m rag.cost summary` 查看）
