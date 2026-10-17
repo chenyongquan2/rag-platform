@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -13,7 +12,7 @@ import pytest
 
 from rag.config import KnowledgeBaseConfig, ServiceSettings
 from rag.cost import BudgetExceeded
-from rag.data import SourceDocument, make_doc_id
+from rag.data import make_doc_id
 from rag.embed import make_embedding
 from rag.factories import make_lock_provider
 from rag.index.generation import DEFAULT_KEY_PREFIX
@@ -31,6 +30,7 @@ from rag.ingest.job import (
     main,
 )
 from rag.testing.fakes import FakeEmbedding
+from rag.testing.ingest import ListConnector, page, section
 from rag.testing.services import FakeElasticsearch, FakeRedis
 
 KB = "t"
@@ -55,49 +55,8 @@ def words(text: str) -> list[str]:
     return text.split()
 
 
-def section(seed: str, n: int = 12) -> str:
-    return " ".join(f"{seed}{i}" for i in range(n)) + "."
-
-
-def page(name: str, *sections: str) -> str:
-    body = "\n\n".join(f"## Part {i}\n\n{text}" for i, text in enumerate(sections))
-    return f"# {name}\n\n{body}\n"
-
-
 def doc_id(name: str) -> str:
     return make_doc_id(KB, f"docs/{name}")
-
-
-def source(name: str, text: str, version: str = "src@1") -> SourceDocument:
-    rel = f"docs/{name}"
-    return SourceDocument(
-        doc_id=make_doc_id(KB, rel),
-        kb=KB,
-        source_rel=rel,
-        source_url=None,
-        ext=PurePosixPath(name).suffix,
-        content=text.encode("utf-8"),
-        source_version=version,
-    )
-
-
-class ListConnector:
-    """Snapshot connector over an editable list of documents."""
-
-    mode = "snapshot"
-
-    def __init__(self) -> None:
-        self.docs: dict[str, SourceDocument] = {}
-
-    def put(self, name: str, text: str, version: str = "src@1") -> None:
-        doc = source(name, text, version)
-        self.docs[doc.doc_id] = doc
-
-    def remove(self, name: str) -> None:
-        del self.docs[doc_id(name)]
-
-    def documents(self) -> Iterator[SourceDocument]:
-        yield from list(self.docs.values())
 
 
 @dataclass
@@ -107,7 +66,7 @@ class Env:
     cfg: KnowledgeBaseConfig
     es: FakeElasticsearch = field(default_factory=FakeElasticsearch)
     redis: FakeRedis = field(default_factory=FakeRedis)
-    connector: ListConnector = field(default_factory=ListConnector)
+    connector: ListConnector = field(default_factory=lambda: ListConnector(KB))
     names: KbIndexNames = field(default_factory=lambda: KbIndexNames(KB))
 
     def job(self, **kwargs: Any) -> IngestJob:
