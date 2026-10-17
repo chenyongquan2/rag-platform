@@ -28,6 +28,7 @@ from rag.observe import (
     set_error_category,
     shutdown_observability,
 )
+from rag.observe.context import current_span_id
 from rag.testing import FakeChatModel, FakeEmbedding, memory_observability
 
 OBSERVE_SRC = Path(__file__).resolve().parents[2] / "src" / "rag" / "observe"
@@ -162,9 +163,12 @@ def test_layer_span_decorator_sync_and_async() -> None:
     def embed(x: int) -> tuple[int, str | None]:
         return x, current_trace_id()
 
+    span_after_await: list[str | None] = []
+
     @layer_span("rerank")
     async def rerank(x: int) -> int:
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0)
+        span_after_await.append(current_span_id())
         return x * 2
 
     with memory_observability() as obs:
@@ -180,7 +184,8 @@ def test_layer_span_decorator_sync_and_async() -> None:
     for child in children:
         assert child.parent is not None and child.parent.span_id == root.context.span_id
     rerank_span = next(s for s in children if s.name == "rerank")
-    assert rerank_span.end_time - rerank_span.start_time >= 15_000_000  # covers the await (ns)
+    # The span is opened when the coroutine runs and is still current after the await.
+    assert span_after_await == [format(rerank_span.context.span_id, "016x")]
 
 
 class _GraphState(TypedDict):
