@@ -101,6 +101,7 @@ class MarkdownReader(BaseReader):
             "doc_type": DOC_TYPES.get(ext, ext.lstrip(".") or "text"),
             "language": self.language,
             "acl_groups": list(self.acl_groups),
+            "images": [],  # Markdown images stay in the text; image handling comes later
             "pipeline_version": self.pipeline_version,
         }
         doc = Document(

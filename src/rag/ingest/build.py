@@ -26,7 +26,7 @@ from rag.ingest.readers import reader_name_for
 from rag.ingest.tokens import TokenizerFn, load_tokenizer
 from rag.registry import readers, steps
 
-INGEST_CODE_VERSION = "1"
+INGEST_CODE_VERSION = "2"
 """Raise when a reader, rule or step changes its output for the same config, so every page is
 processed again (the version is part of the Document metadata and therefore of its hash)."""
 

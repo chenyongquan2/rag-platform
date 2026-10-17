@@ -28,6 +28,7 @@ CONTRACT_FIELDS = {
     "doc_type",
     "language",
     "acl_groups",
+    "images",
     "pipeline_version",
 }
 FORBIDDEN_FIELDS = {
@@ -131,6 +132,7 @@ def test_reader_contract_fields() -> None:
     assert meta["doc_type"] == "markdown"
     assert meta["language"] == "en"
     assert meta["acl_groups"] == ["public"]
+    assert meta["images"] == []  # Markdown images stay in the text for now
     assert meta["pipeline_version"] == pipeline_version(cfg, ".md")
     # Whitelist (s5-4): nothing but title_path may reach the embedding text, title_path and
     # source_rel the prompt; an empty title_path is left out too.
