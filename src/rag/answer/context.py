@@ -55,16 +55,34 @@ def _look_alike(char: str) -> str:
 
 # The `<` of anything that reads as `<doc_fragment` or `</doc_fragment`: any case, ASCII or
 # full-width letters, `<` as ASCII, full-width or small form, spaces or zero-width characters in
-# between. Only the `<` is replaced, so the text stays readable.
+# between, a backslash before the slash (`<\/doc_fragment`, JSON style), and the spellings
+# `doc-fragment`, `doc fragment`, `docfragment` (spec P1-03). Only the `<` is replaced, so the
+# text stays readable.
 _LESS_THAN = "[<" + chr(0xFF1C) + chr(0xFE64) + "]"
 _SLASH = "[/" + chr(0xFF0F) + "]"
-_TAG_NAME = _GAP.join(_look_alike(char) for char in FRAGMENT_TAG)
-_DELIMITER = re.compile(rf"{_LESS_THAN}(?={_SPACE_OR_GAP}{_SLASH}?{_SPACE_OR_GAP}{_TAG_NAME})")
-# A line starting with a bracketed number looks like the `[n]` line before a fragment.
+_BACKSLASH = r"[\\" + chr(0xFF3C) + "]"
+# Between `doc` and `fragment`: nothing, `_` or `-` (ASCII, full-width, small form) or spaces.
+_SEPARATOR_CHARS = "".join(chr(c) for c in (0xFF3F, 0xFF0D, 0xFE4D, 0xFE4E, 0xFE4F, 0xFE63))
+_NAME_SEPARATOR = rf"(?:[_\-{_SEPARATOR_CHARS}]|[\s{_ZERO_WIDTH}]+)?"
+_TAG_NAME = (
+    _GAP.join(_look_alike(char) for char in "doc")
+    + _GAP
+    + _NAME_SEPARATOR
+    + _GAP
+    + _GAP.join(_look_alike(char) for char in "fragment")
+)
+_DELIMITER = re.compile(
+    rf"{_LESS_THAN}(?={_SPACE_OR_GAP}(?:{_BACKSLASH}?{_SPACE_OR_GAP}{_SLASH})?{_SPACE_OR_GAP}{_TAG_NAME})"
+)
+# A line starting with a bracketed number looks like the `[n]` line before a fragment; spaces of
+# any kind (no-break, ideographic) and invisible characters before the bracket do not change that.
 _OPEN_BRACKETS = r"\[" + chr(0x3010) + chr(0xFF3B)
 _CLOSE_BRACKETS = r"\]" + chr(0x3011) + chr(0xFF3D)
+_INVISIBLE_TAGS = chr(0xE0000) + "-" + chr(0xE007F)
 _NUMBER_LINE = re.compile(
-    rf"^([ \t{chr(0x3000)}]*)(?=[{_OPEN_BRACKETS}]\s*\d+\s*[{_CLOSE_BRACKETS}])", re.MULTILINE
+    rf"^((?:[^\S\n]|[{_ZERO_WIDTH}{_INVISIBLE_TAGS}])*)"
+    rf"(?=[{_OPEN_BRACKETS}]\s*\d+\s*[{_CLOSE_BRACKETS}])",
+    re.MULTILINE,
 )
 # Characters counted as one token each: CJK ideographs, kana, Hangul, full-width forms.
 _WIDE = re.compile(r"[　-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]")
@@ -85,9 +103,11 @@ def escape_delimiters(text: str) -> str:
     """Neutralize what could pass for a fragment boundary in untrusted text (s11-3):
 
     - the `<` of anything that reads as `<doc_fragment` or `</doc_fragment` (any case, full-width
-      letters or brackets, spaces or zero-width characters in between) becomes `&lt;`;
-    - a line starting with a bracketed number (`[2]`, `【2】`, `［2］`), which looks like the
-      number line before a fragment, gets a backslash in front of the bracket.
+      letters or brackets, spaces or zero-width characters in between, `<\\/`, and the
+      spellings `doc-fragment`, `doc fragment`, `docfragment`) becomes `&lt;`;
+    - a line starting with a bracketed number (`[2]`, `【2】`, `［2］`, also after spaces or
+      zero-width characters), which looks like the number line before a fragment, gets a
+      backslash in front of the bracket.
     """
     text = _DELIMITER.sub("&lt;", text)
     return _NUMBER_LINE.sub(lambda match: match.group(1) + "\\", text)

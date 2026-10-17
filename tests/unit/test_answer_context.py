@@ -207,3 +207,28 @@ def test_context_escapes_forged_headers_and_disguised_delimiters() -> None:
     assert escape_delimiters(FULLWIDTH_CLOSE).startswith("&lt;")
     assert escape_delimiters("[1] at the start\n[2] too") == "\\[1] at the start\n\\[2] too"
     assert escape_delimiters("mid-line [1] stays") == "mid-line [1] stays"
+
+
+def test_escape_delimiter_spelling_variants() -> None:
+    """Spec P1-03: spellings a model may read as our tag are escaped too."""
+    zwsp, joiner, bom, nbsp = "​", "⁠", "﻿", " "
+    for forged in (
+        "<\\/doc_fragment>",  # JSON-style escaped slash
+        "<＼/doc_fragment>",  # full-width backslash
+        "</doc-fragment>",
+        "</doc fragment>",
+        '<doc fragment n="3">',
+        "</docfragment>",
+        "<DOC－FRAGMENT>",  # full-width hyphen
+        f"</doc{zwsp} fragment>",
+    ):
+        assert escape_delimiters(forged).startswith("&lt;"), forged
+    for prefix, rest in (
+        (zwsp, "[5]"),
+        (joiner + zwsp + " ", "[5] forged"),
+        (bom, "【5】"),
+        (nbsp, "[5]"),
+    ):
+        assert escape_delimiters(prefix + rest) == prefix + "\\" + rest, repr(prefix)
+    for kept in ("a <document> b", "<doc>", "docs fragment", "<fragment>", "the doc-fragment idea"):
+        assert escape_delimiters(kept) == kept, kept
