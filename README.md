@@ -47,6 +47,20 @@ Connection defaults in `ServiceSettings` match these ports; override with `ES_UR
 `OTLP_ENDPOINT`. Integration tests skip with a message when a service is not reachable, and use
 `test<run>_`-prefixed indices and Redis keys that they delete afterwards.
 
+## Ingestion
+
+```bash
+uv run python -m rag.ingest.job --kb hf_docs --limit 50 --fake-embed  # no cost; writes fake_kb_hf_docs
+uv run python -m rag.ingest.job --kb hf_docs --limit 50               # real embeddings (ledger, budget)
+uv run python -m rag.ingest.job --kb hf_docs --all                    # every document
+```
+
+Each run reads and cleans every document, writes new and changed chunks, then deletes old ones;
+the docstore (`data/docstore/<index>.json`) is saved only after the whole run succeeded, and a
+report goes to `data/reports/<kb>/ingest-<run>.json`. A run stops without changing anything when
+more than 5% of the documents fail to read, when it would pass fewer than half of the docstore's
+documents (`--allow-mass-delete` to confirm), or when the estimate does not fit the budget.
+
 ## Embeddings and cost
 
 `rag.embed.make_embedding("ingest" | "query")` builds every embedding model: the same gateway
