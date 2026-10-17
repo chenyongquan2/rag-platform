@@ -8,6 +8,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 import pytest
+from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
     OTLPMetricExporter as GrpcMetricExporter,
 )
@@ -273,3 +274,38 @@ def test_memory_and_off_modes() -> None:
         with layer_span("retrieve") as span:
             assert not span.is_recording()
     assert obs.flush()
+
+
+def test_global_tracer_follows_reinit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Libraries (e.g. the Elasticsearch client) take a tracer from OTel's global provider once
+    and keep it. OTel sets the global only once per process, so the global must follow the
+    active setup: after shutdown and a new init the library's spans reach the new exporter."""
+    exporters: list[_ListSpanExporter] = []
+
+    def fake_exporters(settings: ServiceSettings) -> tuple[SpanExporter, MetricExporter]:
+        exporters.append(_ListSpanExporter())
+        return exporters[-1], _ListMetricExporter()
+
+    monkeypatch.setattr(observe_setup, "make_otlp_exporters", fake_exporters)
+    settings = observe_settings(otel_mode="otlp")
+    init_observability(settings, "svc")
+    library_tracer = trace.get_tracer("elasticsearch-like")  # kept by the library
+    shutdown_observability()
+
+    second = init_observability(settings, "svc")
+    with request_span("search_docs", kb="k"), library_tracer.start_as_current_span("es.search"):
+        pass
+    assert second.flush()
+    spans = {s.name: s for s in exporters[1].spans}
+    assert set(spans) == {"search_docs", "es.search"}
+    assert spans["es.search"].parent.span_id == spans["search_docs"].context.span_id
+    assert exporters[0].spans == []
+
+    shutdown_observability()
+    with library_tracer.start_as_current_span("after") as span:
+        assert not span.is_recording()  # no active setup: nothing recorded
+
+    with memory_observability() as obs:
+        with library_tracer.start_as_current_span("in-memory"):
+            pass
+        assert [s.name for s in obs.span_exporter.get_finished_spans()] == ["in-memory"]

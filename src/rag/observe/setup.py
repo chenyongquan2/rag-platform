@@ -10,8 +10,11 @@ nothing (helpers still work and still bind request ids).
 
 The span and metric helpers always use the tracer and meter of the active `Observability`, not
 OTel's global providers: OTel lets a process set the globals only once, while tests set up and
-tear down many times. In `otlp` mode the providers also become the globals (once per process)
-so other OTel instrumentation joins the same traces.
+tear down many times. Libraries with their own OTel spans (the Elasticsearch client) take a
+tracer from the global provider once and keep it, so the global TracerProvider is registered
+once as `_ActiveTracerProvider`: its tracers send each span to the setup active at that moment,
+also after a shutdown and a new init. The global MeterProvider is set once, to the first `otlp`
+setup's provider (our own metrics never use it).
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
+from typing import Any
 
 from opentelemetry import metrics as metrics_api
 from opentelemetry import trace as trace_api
@@ -197,7 +201,68 @@ class Observability:
 
 _LOCK = threading.RLock()
 _ACTIVE: Observability | None = None
-_GLOBALS_SET = False
+_GLOBAL_TRACER_DONE = False
+_GLOBAL_METER_DONE = False
+
+
+class _ActiveTracer(Tracer):
+    """A tracer handed out by OTel's global provider: each span goes to the tracer provider of
+    the setup active when the span starts (none active: a no-op span)."""
+
+    def __init__(self, scope: tuple[str, str | None, str | None, Any]) -> None:
+        self._scope = scope
+        self._cached: tuple[TracerProvider, Tracer] | None = None
+
+    def _current(self) -> Tracer:
+        provider = get_observability().tracer_provider
+        cached = self._cached
+        if cached is None or cached[0] is not provider:
+            name, version, schema_url, attributes = self._scope
+            cached = (provider, provider.get_tracer(name, version, schema_url, attributes))
+            self._cached = cached
+        return cached[1]
+
+    def start_span(self, *args: Any, **kwargs: Any) -> Any:
+        return self._current().start_span(*args, **kwargs)
+
+    def start_as_current_span(self, *args: Any, **kwargs: Any) -> Any:
+        return self._current().start_as_current_span(*args, **kwargs)
+
+
+class _ActiveTracerProvider(TracerProvider):
+    def get_tracer(
+        self,
+        instrumenting_module_name: str,
+        instrumenting_library_version: str | None = None,
+        schema_url: str | None = None,
+        attributes: Any = None,
+    ) -> Tracer:
+        return _ActiveTracer(
+            (instrumenting_module_name, instrumenting_library_version, schema_url, attributes)
+        )
+
+
+_GLOBAL_TRACER_PROVIDER = _ActiveTracerProvider()
+
+
+def _register_global_providers(obs: Observability) -> None:
+    """Once per process: OTel's global TracerProvider follows the active setup; the global
+    MeterProvider is the first `otlp` setup's provider."""
+    global _GLOBAL_TRACER_DONE, _GLOBAL_METER_DONE
+    if not _GLOBAL_TRACER_DONE:
+        current = trace_api.get_tracer_provider()
+        if isinstance(current, trace_api.ProxyTracerProvider):
+            trace_api.set_tracer_provider(_GLOBAL_TRACER_PROVIDER)
+        elif current is not _GLOBAL_TRACER_PROVIDER:
+            logger.warning(
+                "OTel's global TracerProvider was already set (%s); spans of other libraries "
+                "go there, not to the Collector",
+                type(current).__name__,
+            )
+        _GLOBAL_TRACER_DONE = True
+    if obs.mode == "otlp" and not _GLOBAL_METER_DONE:
+        metrics_api.set_meter_provider(obs.meter_provider)
+        _GLOBAL_METER_DONE = True
 
 
 def _off(service_name: str, resource: Resource) -> Observability:
@@ -261,6 +326,7 @@ def init_observability(
             obs.shutdown()
             raise
         _ACTIVE = obs
+        _register_global_providers(obs)
         logger.info(
             "observability set up: service %s, mode %s, protocol %s",
             service_name,
@@ -286,7 +352,6 @@ def write_business_record(record: BusinessRecord) -> bool:
 
 
 def _build(settings: ServiceSettings, service_name: str) -> Observability:
-    global _GLOBALS_SET
     resource = build_resource(settings, service_name)
     if settings.otel_mode == "off":
         return _off(service_name, resource)
@@ -325,10 +390,6 @@ def _build(settings: ServiceSettings, service_name: str) -> Observability:
         metric_readers=[metric_reader],
         shutdown_on_exit=settings.otel_mode == "otlp",
     )
-    if settings.otel_mode == "otlp" and not _GLOBALS_SET:
-        trace_api.set_tracer_provider(tracer_provider)
-        metrics_api.set_meter_provider(meter_provider)
-        _GLOBALS_SET = True
     version = service_version()
     meter = meter_provider.get_meter(attr.INSTRUMENTATION_SCOPE, version)
     return Observability(
