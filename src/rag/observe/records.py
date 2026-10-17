@@ -6,27 +6,25 @@ looking at timings and may move to another backend. Both carry the trace id, so 
 its trace can be matched.
 
 The writer appends one line per call under a file lock and rotates by size (`path.1` is the
-newest old file), so several processes can share one file. A failed write is logged and
-reported as False, never raised: losing a record must not fail the request.
+newest old file), so several processes can share one file (`rag.observe.rotating`). A failed
+write, also a lock not free within `lock_timeout_s`, is logged and reported as False, never
+raised: losing a record must not fail the request.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import threading
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from filelock import FileLock
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag.config import ServiceSettings
 from rag.config.paths import repo_path
 from rag.observe.context import current_trace_id
+from rag.observe.rotating import LOCK_TIMEOUT_S, RotatingJsonlWriter
 from rag.types import RetrievalResult
 
 logger = logging.getLogger(__name__)
@@ -117,61 +115,20 @@ def business_record_from_result(
     )
 
 
-class RotatingJsonlWriter:
-    """Appends JSON lines to `path`, rotating by size: before a line would push the file past
-    `max_bytes`, `path` becomes `path.1`, `path.1` becomes `path.2`, ..., and files beyond
-    `backups` are deleted (`backups=0`: the file is simply replaced). A line longer than
-    `max_bytes` is written alone into a fresh file.
-
-    The file is opened per line under a file lock, so writers in several processes share the
-    rotation, and on Windows no open handle blocks the renames.
-    """
-
-    def __init__(self, path: str | Path, *, max_bytes: int, backups: int) -> None:
-        if max_bytes <= 0 or backups < 0:
-            raise ValueError("max_bytes must be > 0 and backups >= 0")
-        self.path = Path(path)
-        self.max_bytes = max_bytes
-        self.backups = backups
-        self._lock = threading.Lock()
-
-    def write(self, obj: Mapping[str, Any]) -> bool:
-        data = (json.dumps(obj, ensure_ascii=False, default=str) + "\n").encode("utf-8")
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self._lock, FileLock(str(self.path) + ".lock"):
-                try:
-                    size = self.path.stat().st_size
-                except FileNotFoundError:
-                    size = 0
-                if size > 0 and size + len(data) > self.max_bytes:
-                    self._rotate()
-                with self.path.open("ab") as fh:
-                    fh.write(data)
-        except OSError as exc:
-            logger.warning("could not write business record to %s: %s", self.path, exc)
-            return False
-        return True
-
-    def _backup(self, n: int) -> Path:
-        return self.path.with_name(f"{self.path.name}.{n}")
-
-    def _rotate(self) -> None:
-        if self.backups == 0:
-            self.path.unlink()
-            return
-        self._backup(self.backups).unlink(missing_ok=True)
-        for n in range(self.backups - 1, 0, -1):
-            if self._backup(n).exists():
-                os.replace(self._backup(n), self._backup(n + 1))
-        os.replace(self.path, self._backup(1))
-
-
 class BusinessRecordWriter:
     """Writes `BusinessRecord`s through a `RotatingJsonlWriter`."""
 
-    def __init__(self, path: str | Path, *, max_bytes: int, backups: int) -> None:
-        self._writer = RotatingJsonlWriter(path, max_bytes=max_bytes, backups=backups)
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        max_bytes: int,
+        backups: int,
+        lock_timeout_s: float = LOCK_TIMEOUT_S,
+    ) -> None:
+        self._writer = RotatingJsonlWriter(
+            path, max_bytes=max_bytes, backups=backups, lock_timeout_s=lock_timeout_s
+        )
 
     @property
     def path(self) -> Path:
@@ -189,4 +146,19 @@ class BusinessRecordWriter:
         )
 
     def write(self, record: BusinessRecord) -> bool:
-        return self._writer.write(record.model_dump(mode="json"))
+        try:
+            self._writer.append_line(record.model_dump_json())
+        except OSError as exc:  # includes the lock timeout
+            logger.warning("could not write business record to %s: %s", self.path, exc)
+            return False
+        return True
+
+
+__all__ = [
+    "BusinessRecord",
+    "BusinessRecordWriter",
+    "RankedId",
+    "RotatingJsonlWriter",
+    "ThresholdDecision",
+    "business_record_from_result",
+]

@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from filelock import FileLock
 
 from rag.observe import request_span, shutdown_observability, write_business_record
 from rag.observe.records import (
@@ -164,3 +165,14 @@ def test_write_failure_does_not_raise(tmp_path: Path, caplog: pytest.LogCaptureF
     with caplog.at_level(logging.WARNING, logger="rag.observe.records"):
         assert writer.write(record) is False
     assert "business record" in caplog.text
+
+
+def test_lock_timeout_returns_false(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A writer that cannot get the file lock in time gives up instead of blocking the request."""
+    path = tmp_path / "business.jsonl"
+    writer = BusinessRecordWriter(path, max_bytes=1000, backups=1, lock_timeout_s=0.2)
+    record = business_record_from_result(_result(), tool="search_docs", config_version="x")
+    with FileLock(str(path) + ".lock"), caplog.at_level(logging.WARNING, "rag.observe.records"):
+        assert writer.write(record) is False
+    assert "business record" in caplog.text
+    assert writer.write(record) is True  # the lock is free again
