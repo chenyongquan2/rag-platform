@@ -35,6 +35,7 @@ from llama_index.core.schema import (
 from rag.ingest.markdown import (
     FENCE_OPEN,
     heading_title,
+    indent_of,
     is_closing_fence,
     is_table_row,
     is_title_only,
@@ -51,6 +52,18 @@ from rag.registry import steps
 
 TokenizerFn = Callable[[str], Sequence[Any]]
 _WHITELIST_CONTEXT = {"embed_keys": "embed_keys", "llm_keys": "llm_keys"}
+
+
+_LEADING_BLANK_LINES = re.compile(r"\A(?:[ \t]*\n)+")
+
+
+def trim_block(text: str) -> str:
+    """Drop blank lines at the start and whitespace at the end, keep the first line's indent.
+
+    `str.strip()` would also remove the indentation of an indented opening fence ("    ```py"
+    inside a list item) while its closing fence keeps it, and the fence would no longer close.
+    """
+    return _LEADING_BLANK_LINES.sub("", text).rstrip()
 
 
 def doc_id_of(node: BaseNode) -> str:
@@ -124,7 +137,7 @@ class MarkdownSplit(MarkdownNodeParser):
         parts = list(base)
 
         def flush() -> None:
-            body = "".join(lines).strip()
+            body = trim_block("".join(lines))
             if body:
                 sections.append((body, parts))
 
@@ -257,6 +270,10 @@ class TokenSplit(SentenceSplitter):
     def max_tokens(self) -> int:
         return self.chunk_size
 
+    def _postprocess_chunks(self, chunks: list[str]) -> list[str]:
+        # SentenceSplitter strips each chunk; keep the first line's indentation (see trim_block).
+        return [t for t in (trim_block(c) for c in chunks) if t.strip()]
+
     def split_text_metadata_aware(self, text: str, metadata_str: str) -> list[str]:
         # Same as SentenceSplitter, without its print() when the budget gets small.
         budget = self.chunk_size - len(self._tokenizer(metadata_str))
@@ -311,11 +328,14 @@ class TokenSplit(SentenceSplitter):
 
     def _split_code(self, block: str, chunk_size: int) -> list[_Split]:
         lead = block[: len(block) - len(block.lstrip("\n"))]
-        lines = block[len(lead) :].rstrip("\n").split("\n")
+        # The line break after the closing fence stays, or text right after the block would be
+        # glued to the fence ("```The loop above ...") and the fence would never close.
+        trail = block[len(block.rstrip("\n")) :]
+        lines = block[len(lead) : len(block) - len(trail)].split("\n")
         opener, body = lines[0], lines[1:]
         fence = FENCE_OPEN.match(opener)
         fence_chars = fence.group(1) if fence else "```"
-        if body and is_closing_fence(body[-1], fence_chars):
+        if body and is_closing_fence(body[-1], fence_chars, opener_indent=indent_of(opener)):
             closer, body = body[-1], body[:-1]
         else:
             closer = opener[: len(opener) - len(opener.lstrip())] + fence_chars
@@ -338,11 +358,25 @@ class TokenSplit(SentenceSplitter):
             current_size += size
         if current or not parts:
             parts.append(current)
-        texts = [
-            ("\n\n" if i else lead) + opener + "\n" + "\n".join(part) + "\n" + closer
-            for i, part in enumerate(parts)
-        ]
-        return [_Split(t, is_sentence=True, token_size=self._token_size(t)) for t in texts]
+
+        def wrap(part: list[str], first: bool, last: bool) -> str:
+            head = lead if first else "\n\n"
+            return head + opener + "\n" + "\n".join(part) + "\n" + closer + (trail if last else "")
+
+        def fit(part: list[str], first: bool, last: bool) -> list[_Split]:
+            # Line token counts are an estimate (joining lines can add a token); check the
+            # real size and halve a part that is still over the cap.
+            text = wrap(part, first, last)
+            size = self._token_size(text)
+            if size <= chunk_size:
+                return [_Split(text, is_sentence=True, token_size=size)]
+            if len(part) > 1:
+                half = len(part) // 2
+                return fit(part[:half], first, False) + fit(part[half:], False, last)
+            return super(TokenSplit, self)._split(text, chunk_size)
+
+        last = len(parts) - 1
+        return [s for i, part in enumerate(parts) for s in fit(part, i == 0, i == last)]
 
 
 # --- merge_tiny -----------------------------------------------------------------------------

@@ -18,6 +18,7 @@ from rag.data import SourceDocument, make_doc_id
 from rag.ingest import KbProcessor
 from rag.ingest.chunk import AssignChunkIds, MarkdownSplit, MergeTiny, TokenSplit
 from rag.ingest.clean import SuspiciousInstruction
+from rag.ingest.markdown import has_unclosed_fence
 from rag.ingest.tokens import TokenizerNotCachedError, load_tokenizer
 
 KB = "hf_docs"
@@ -173,6 +174,18 @@ def test_oversized_code_fence_split_into_fenced_parts() -> None:
     assert joined == "\n".join(f"value_{i} = compute({i}) + offset" for i in range(60))
 
 
+def test_prose_right_after_oversized_code_fence_stays_outside_it() -> None:
+    # No blank line between the closing fence and the prose (codeparrot, informer pages).
+    code = "```python\n" + "\n".join(f"value_{i} = compute({i})" for i in range(60)) + "\n```"
+    text = f"## Big\n\n{code}\nThe loop above prints every value.\n\n{para(10, 'after')}"
+    chunks = run([document(text)], chain(max_tokens=60))
+    joined = "\n".join(c.text for c in chunks)
+    assert "```The loop" not in joined
+    assert "```\nThe loop above prints every value." in joined
+    for c in chunks:
+        assert not has_unclosed_fence(c.text), c.text
+
+
 def test_merge_tiny_merges_into_next_within_cap() -> None:
     text = (
         "# Title\n\n"  # heading only: merged into the next chunk
@@ -244,3 +257,44 @@ def test_steps_run_in_ingestion_pipeline() -> None:
 def test_load_tokenizer_missing_model_raises(tmp_path) -> None:
     with pytest.raises(TokenizerNotCachedError, match="no-such-org/no-such-model"):
         load_tokenizer("no-such-org/no-such-model", cache_dir=tmp_path)
+
+
+def test_has_unclosed_fence() -> None:
+    assert has_unclosed_fence("text\n\n```python\nx = 1")
+    assert has_unclosed_fence("```\na\n```\n~~~\nb")
+    assert not has_unclosed_fence("```python\nx = 1\n```\nprose")
+    assert not has_unclosed_fence("````md\n```\ninner\n```\n````")
+    assert not has_unclosed_fence("no code at all")
+    # A fence indented 4+ spaces deeper than the opening one is content (a docstring example).
+    docstring = '```python\ndef f():\n    """\n    ```python\n    >>> f()\n    ```\n    """\n```'
+    assert not has_unclosed_fence(docstring)
+    assert not has_unclosed_fence(docstring + "\n\nAfter the block.")
+    # Fences inside list items are indented as much as their opening fence.
+    assert not has_unclosed_fence("- step\n\n    ```bash\n    ls\n    ```\n")
+
+
+def test_code_parts_fit_when_joining_adds_tokens() -> None:
+    # Joined text can count more tokens than its lines (the real tokenizer gives a trailing line
+    # break its own token); every part must still fit, or SentenceSplitter raises.
+    def tok(text: str) -> list[str]:
+        return text.split() + (["<nl>"] if text.endswith("\n") else [])
+
+    code = "```python\n" + "\n".join(f"v{i} = {i}" for i in range(80)) + "\n```"
+    text = f"## Code\n\n{code}\nAfter the code.\n"
+    chunks = run([document(text)], chain(max_tokens=40, tokenizer=tok))
+    for c in chunks:
+        assert len(tok(c.text)) + len(tok(c.get_metadata_str(MetadataMode.LLM))) <= 40
+        assert not has_unclosed_fence(c.text)
+
+
+def test_indented_fence_in_list_stays_closed_across_chunks() -> None:
+    # A chunk that starts with an indented fence keeps its indentation, so the indented closing
+    # fence still closes it (text_to_video_zero.md); oversized indented blocks are re-fenced.
+    small = "    ```python\n" + "\n".join(f"    a{i} = {i}" for i in range(8)) + "\n    ```"
+    big = "    ```python\n" + "\n".join(f"    b{i} = f({i})" for i in range(40)) + "\n    ```"
+    text = f"## Steps\n\n{para(45)}\n\n- Run:\n\n{small}\n\n- Then:\n\n{big}\n\nDone."
+    chunks = run([document(text)], chain(max_tokens=60))
+    assert len(chunks) > 3
+    for c in chunks:
+        assert not has_unclosed_fence(c.text), c.text
+    assert any(c.text.startswith("    ```python") for c in chunks)

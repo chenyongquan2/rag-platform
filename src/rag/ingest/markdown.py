@@ -28,9 +28,22 @@ class Segment:
     code: bool
 
 
-def is_closing_fence(line: str, fence: str) -> bool:
+def indent_of(line: str) -> int:
+    expanded = line.expandtabs(4)
+    return len(expanded) - len(expanded.lstrip(" "))
+
+
+def is_closing_fence(line: str, fence: str, *, opener_indent: int | None = None) -> bool:
+    """A line of the fence character, at least as long as the opening fence.
+
+    With `opener_indent`, the line may be indented at most 3 spaces more than the opening fence
+    (CommonMark allows 0-3): a deeper-indented fence inside the block, as in an indented
+    docstring example, is content, not the end of the block.
+    """
     stripped = line.strip()
-    return bool(stripped) and set(stripped) == {fence[0]} and len(stripped) >= len(fence)
+    if not stripped or set(stripped) != {fence[0]} or len(stripped) < len(fence):
+        return False
+    return opener_indent is None or indent_of(line) <= opener_indent + 3
 
 
 def split_fenced(text: str) -> list[Segment]:
@@ -42,6 +55,7 @@ def split_fenced(text: str) -> list[Segment]:
     segments: list[Segment] = []
     buf: list[str] = []
     fence = ""
+    opener_indent = 0
 
     def flush(code: bool) -> None:
         if buf:
@@ -56,14 +70,41 @@ def split_fenced(text: str) -> list[Segment]:
             if match and not (match.group(1)[0] == "`" and "`" in match.group(2)):
                 flush(False)
                 fence = match.group(1)
+                opener_indent = indent_of(bare)
             buf.append(line)
         else:
             buf.append(line)
-            if is_closing_fence(bare, fence):
+            if is_closing_fence(bare, fence, opener_indent=opener_indent):
                 flush(True)
                 fence = ""
     flush(bool(fence))
     return segments
+
+
+def has_unclosed_fence(text: str) -> bool:
+    """True when the text opens a fenced code block it does not close (not valid Markdown)."""
+    segments = split_fenced(text)
+    if not segments or not segments[-1].code:
+        return False
+    lines = segments[-1].text.rstrip("\r\n").split("\n")
+    opener = FENCE_OPEN.match(lines[0])
+    fence = opener.group(1) if opener else "```"
+    closed = is_closing_fence(lines[-1], fence, opener_indent=indent_of(lines[0]))
+    return len(lines) < 2 or not closed
+
+
+def close_open_fence(text: str) -> str:
+    """Append the closing fence of a code block left open at the end of the text.
+
+    CommonMark already ends such a block at the end of the document, so the page renders the
+    same; every chunk cut from it stays valid Markdown.
+    """
+    if not has_unclosed_fence(text):
+        return text
+    opener = split_fenced(text)[-1].text.split("\n", 1)[0]
+    match = FENCE_OPEN.match(opener)
+    fence = match.group(1) if match else "```"
+    return text.rstrip("\n") + "\n" + " " * indent_of(opener) + fence
 
 
 @dataclass
