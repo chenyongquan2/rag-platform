@@ -87,6 +87,33 @@ def test_total_spent_sums_ledger(tmp_path: Path) -> None:
     assert total_spent(settings) == pytest.approx(3.0)
 
 
+def test_total_spent_reads_only_new_lines(tmp_path: Path) -> None:
+    """Spec P1-01 review: the budget check runs before every chat attempt, also on the event
+    loop, so it keeps a running total per ledger file and reads only lines added since."""
+    ledger = _ledger(tmp_path)
+    ledger.record(kind="chat", model="chat", prompt_tokens=1_000_000)  # 2.0 CNY
+    assert ledger.total_spent() == pytest.approx(2.0)
+
+    # A line already counted is not read again: change its cost in place (same length).
+    text = ledger.path.read_text(encoding="utf-8")
+    ledger.path.write_text(text.replace('"cny": 2.0', '"cny": 9.0'), encoding="utf-8")
+    assert ledger.total_spent() == pytest.approx(2.0)
+
+    # Lines another process appends are added; another object on the same file shares the total.
+    with ledger.path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": "chat", "model": "chat", "cny": 0.5}) + "\n")
+        fh.write('{"kind": "chat", "cny": 7')  # still being written: not counted yet
+    other = CostLedger(ledger.path, prices=PRICES, budget_stop_cny=28.0)
+    assert other.total_spent() == pytest.approx(2.5)
+    with ledger.path.open("a", encoding="utf-8") as fh:
+        fh.write("}\n")
+    assert ledger.total_spent() == pytest.approx(9.5)
+
+    # A shorter file (rewritten, not appended) is read again from the start.
+    ledger.path.write_text(json.dumps({"cny": 1.25}) + "\n", encoding="utf-8")
+    assert ledger.total_spent() == pytest.approx(1.25)
+
+
 def test_check_budget_raises_over_stop(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path, stop=1.0)
     ledger.record(kind="embedding", model="emb", prompt_tokens=1_500_000)  # 0.75 CNY

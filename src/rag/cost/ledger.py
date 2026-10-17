@@ -5,7 +5,9 @@ every checkout): time (UTC), kind (`embedding`, `chat`), model, prompt/completio
 from the response's `usage`, and the cost in CNY from the price table in the service settings.
 Callers add their own fields (profile, number of inputs).
 
-Requests in flight hold a reservation of their estimated cost (`reserve`), so concurrent
+The amount spent is a running total per file and process that reads only the lines appended
+since the last check (spec P1-01). Requests in flight hold a reservation of their estimated
+cost (`reserve`), so concurrent
 requests in one process cannot together pass the stop. Other processes do not see these
 reservations; with a shared ledger they can overshoot the stop by at most what they have in
 flight at that moment.
@@ -35,6 +37,21 @@ _PER_MILLION = 1_000_000
 # object of this process that writes the same file.
 _RESERVED: dict[str, float] = {}
 _RESERVED_LOCK = threading.Lock()
+
+# Running total per resolved ledger path: (bytes already read, CNY in those bytes).
+_TOTALS: dict[str, tuple[int, float]] = {}
+_TOTALS_LOCK = threading.Lock()
+
+
+def _line_cny(line: bytes, path: Path) -> float:
+    if not line.strip():
+        return 0.0
+    try:
+        row = json.loads(line)
+    except ValueError:
+        logger.warning("cost ledger %s: skipping unreadable line %r", path, line[:80])
+        return 0.0
+    return float(row.get("cny") or 0.0) if isinstance(row, dict) else 0.0
 
 
 class BudgetExceeded(RuntimeError):  # noqa: N818 - the name the spec and plan use
@@ -155,7 +172,33 @@ class CostLedger:
         return rows
 
     def total_spent(self) -> float:
-        return sum(float(row.get("cny") or 0.0) for row in self.entries())
+        """CNY spent according to the ledger file.
+
+        The budget check runs before every request, also on an asyncio event loop (spec P1-01),
+        so this keeps a running total per file in the process and reads only the bytes appended
+        since the last call, by this or any other process. A line still being written counts
+        once its newline is there. A file shorter than what was already read (rewritten rather
+        than appended) is read again from the start.
+        """
+        key = self._key()
+        with _TOTALS_LOCK:
+            offset, total = _TOTALS.get(key, (0, 0.0))
+            try:
+                size = self.path.stat().st_size
+            except FileNotFoundError:
+                _TOTALS.pop(key, None)
+                return 0.0
+            if size < offset:
+                offset, total = 0, 0.0
+            if size > offset:
+                with self.path.open("rb") as fh:
+                    fh.seek(offset)
+                    new = fh.read(size - offset)
+                complete = new[: new.rfind(b"\n") + 1]
+                total += sum(_line_cny(line, self.path) for line in complete.splitlines())
+                offset += len(complete)
+            _TOTALS[key] = (offset, total)
+            return total
 
     def reserved(self) -> float:
         """Estimated cost of this process's requests in flight against this ledger file."""
