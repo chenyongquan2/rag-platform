@@ -18,9 +18,9 @@
 | 6 | P0-06 | 写入和增量更新：EsVectorStore（先写后删、bulk 逐条检查）、IngestionPipeline UPSERTS_AND_DELETE、docstore 存盘、run 之前的防误删检查、读取失败用旧版本代替、数据代号 | P0-02、P0-04、P0-05 | s7-4、s7-6 | 否（用假向量测） | 完成 |
 | 7 | P0-07 | 两路检索：EsHybridRetriever（一次 _msearch 发 BM25 和 kNN、过滤条件、一路失败标 degraded）、RRF、按正文去重 | P0-02、P0-06 | s9-1、s9-2、s9-3 | 否 | 待做 |
 | 8 | P0-08 | 重排和阈值：BatchedTimeoutRerank（本机 bge-reranker-base、分批、按剩余时间停、并发上限）、RerankThreshold、相邻段扩展 | P0-07 | s10-1、s10-2、s10-3、s9-1 | 否（本机模型） | 待做 |
-| 9 | P0-09 | search_docs：MCP 服务（mcp 2.3 MCPServer，stdio 和 streamable-http）和 HTTP 接口、过滤条件白名单、权限过滤入口、错误类别 | P0-08 | s16-1、s16-4、s16-8 | 否 | 待做 |
+| 9 | P0-09 | search_docs：MCP 服务（mcp 2.3 MCPServer，stdio 和 streamable-http）和 HTTP 接口、过滤条件白名单、权限过滤入口、错误类别；接入 rag.observe（服务启动时调 init_observability，每个工具调用包在 request_span 里并传错误类别的判断函数，每次请求写一行业务记录） | P0-08、P0-11 | s16-1、s16-4、s16-8、s15-1 | 否 | 待做 |
 | 10 | P0-10 | 检索评测：题集加载（标到页面）、Hit、MRR、nDCG、Recall（理想值有上限）、分路径指标、McNemar 和配对置换检验、Wilson 区间、报告；送重排 10、20、30 段的延迟曲线脚本 | P0-08 | s14-1、s14-4、s14-6、s10-1 | 否（问题向量走缓存） | 完成（运行评测的入口由 P0-12 写） |
-| 11 | P0-11 | 可观测：OTel 初始化、自己的 span、OpenInference 自动打点、指标、Collector 转发给 Jaeger 和本地日志、评测用的业务记录 JSONL | P0-02、P0-09 | s15-1、s17-8 | 否 | 待做 |
+| 11 | P0-11 | 可观测：OTel 初始化、自己的 span、OpenInference 自动打点、指标、Collector 转发给 Jaeger 和本地日志、评测用的业务记录 JSONL | P0-02、P0-05 | s15-1、s17-8 | 否 | 待做 |
 | 12 | P0-12 | P0 全量运行：全量 2,647 篇摄取（真实向量，约 2.5 元）、65 题检索评测、延迟曲线、写 P0 报告 | P0-01 到 P0-11 | s14-6、s19 | 是（约 2.5 元） | 待做 |
 
 ## P1 生成和评测体系

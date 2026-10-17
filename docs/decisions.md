@@ -496,7 +496,7 @@ P0-05 的 `total_spent` 每次读整个账本文件，`reserve` 在一把全进�
 还考虑过默认用 HTTP：OTel 规范建议 SDK 默认用 http/protobuf，公司网络或反向代理只允许 HTTP 通过时也能用。下面两种情况把默认值改成 HTTP：P8 的容器用先启动主进程、再 fork 出多个工作进程的服务器，而 grpcio 在 fork 之后出问题；或者公司网络只允许 HTTP 通过。Collector 发给 Langfuse 只能用 HTTP（设计 15.1），这是 Collector 那一段的配置，和程序用哪种协议无关。
 
 ### 2026-10-17 P0-11：辅助函数用自己保存的 tracer 和 meter，不依赖 OTel 的全局对象
-`init_observability(settings, service_name)` 返回一个 `Observability` 对象，里面有 tracer、meter、所有指标和业务记录的写入器；`request_span`、`layer_span` 和指标都从当前这个对象取 tracer 和 meter。原因：OTel 一个进程只允许设置一次全局的 TracerProvider 和 MeterProvider，单元测试要反复建立、关闭很多次。`otlp` 模式下，第一次建立时也把这两个对象设成全局的，这样以后接入的其他 OTel 自动打点（比如 HTTP 客户端）建的 span 也进同一条 trace。三种模式：`otlp` 发给 Collector，`memory` 把 span 和指标留在内存里给测试读，`off` 什么都不记，但辅助函数照常能用，请求 id 也照常生成。同一个进程里再调一次 `init_observability` 直接返回已有的对象；`shutdown_observability()` 把缓存的数据发出去，去掉自动打点和成本账本的监听函数，然后才能重新建立。还考虑过每次都用 `trace.get_tracer()` 取全局 tracer：测试里第二次建立的 provider 设不进去，span 会发到上一个已经关掉的 provider。
+`init_observability(settings, service_name)` 返回一个 `Observability` 对象，里面有 tracer、meter、所有指标和业务记录的写入器；`request_span`、`layer_span` 和指标都从当前这个对象取 tracer 和 meter。原因：OTel 一个进程只允许设置一次全局的 TracerProvider 和 MeterProvider，单元测试要反复建立、关闭很多次。全局的 TracerProvider 在第一次建立时设一次（任何模式），设成一个转发用的对象：其他库从它拿到的 tracer 每开一个 span，都交给当时正在用的那套设置。Elasticsearch 客户端这类库只在创建时拿一次 tracer，之后一直用；评审指出，第一版只在第一次 `otlp` 建立时把那时的 provider 设成全局的，关掉再建立以后，这些库的 span 还发给已经关掉的 provider，全部丢失。没有正在用的设置时，这些 span 什么都不记。全局的 MeterProvider 仍然只在第一次 `otlp` 建立时设一次，我们自己的指标不经过它。三种模式：`otlp` 发给 Collector，`memory` 把 span 和指标留在内存里给测试读，`off` 什么都不记，但辅助函数照常能用，请求 id 也照常生成。同一个进程里再调一次 `init_observability` 直接返回已有的对象；`shutdown_observability()` 把缓存的数据发出去，去掉自动打点和成本账本的监听函数，然后才能重新建立。还考虑过每次都用 `trace.get_tracer()` 取全局 tracer：测试里第二次建立的 provider 设不进去，span 会发到上一个已经关掉的 provider。
 
 ### 2026-10-17 P0-11：OpenInference 自动打点的内容开关全部写明，向量永远不进 trace
 `otel_auto_instrument`（默认开）控制 LlamaIndex 和 LangChain/LangGraph 两个打点包。两个包都用我们自己的 TracerProvider，`separate_trace_from_runtime_context=False`，框架建的 span 的父 span 就是调用它的那个 `layer_span`（单元测试用假的向量模型和假的对话模型验证过，LangGraph 的图也是）。`TraceConfig` 的每一项都在代码里写明，不读 `OPENINFERENCE_*` 环境变量，也不用库的默认值：
@@ -511,7 +511,7 @@ P0-05 的 `total_spent` 每次读整个账本文件，`reserve` 在一把全进�
 - 请求数按知识库、工具名和结果（`ok`、`error`、`cancelled`）分开。任务被取消或进程被中断算 `cancelled`，不算服务出错。
 - 错误数按错误类别分开。类别的来源有三个：调用方把结果传给 `RequestScope.set_result()` 时，结果里的标记（degraded、rerank_timeout 等）；`add_error_category()` 手动加的；异常离开 span 时 `classify` 回调给的类别，或者异常自己带的 `error_category` 属性。都没有时记 `unclassified`，表示没归类的异常，多半是代码错误。里层 span 定下的类别会写到异常对象上，外层的请求 span 记同一个类别。degraded 和 rerank_timeout 除了算进错误数，还各有一个计数，设计 15.1 要单独看这两个比例。
 - 每一步的耗时用直方图，单位是秒，分桶边界在代码里写明（5 毫秒到 120 秒，共 19 个边界）。SDK 默认的边界是按毫秒数设计的，最大到 10000，用秒记录时大部分桶都用不上。请求本身也按工具名记一次耗时。
-- token 和花费：`rag.cost` 加了 `add_record_listener`，账本每写一行就调一次监听函数，`init_observability` 注册的监听函数把输入、输出 token 和元数加到计数上，按模型、用途（embedding 或 chat）和档位（ingest、query、online 等）分开。这样 `rag.cost` 不用依赖 OTel；监听函数出错只写日志，不影响已经发生的模型调用和已经写好的账本行。还考虑过在 P0-05 的向量客户端和 P1-01 的对话模型传输层里各加一段记指标的代码：要改两处，以后新加一种模型调用时，很容易忘了加这段代码。
+- 模型调用次数、token 和花费：`rag.cost` 加了 `add_record_listener`，账本每写一行就调一次监听函数，`init_observability` 注册的监听函数把调用次数（`rag.model.calls`，评审后加上）、输入和输出 token、元数加到计数上，按模型、用途（embedding 或 chat）、档位（ingest、query、online 等）和调用方分开（设计 15.1 要看每个调用方每天的调用次数、token 和花费）。调用方取当前请求的；请求之外的调用，或者在没有复制请求上下文的线程里发出的调用，没有调用方这一项。这样 `rag.cost` 不用依赖 OTel；监听函数出错只写日志，不影响已经发生的模型调用和已经写好的账本行。还考虑过在 P0-05 的向量客户端和 P1-01 的对话模型传输层里各加一段记指标的代码：要改两处，以后新加一种模型调用时，很容易忘了加这段代码。
 - 指标里不放请求 id 这类每次都不一样的值，否则 Prometheus 里的序列数会一直涨。
 
 ### 2026-10-17 P0-11：Collector 把指标转成 Prometheus 格式，不写文件
@@ -521,13 +521,17 @@ P0-05 的 `total_spent` 每次读整个账本文件，`reserve` 在一把全进�
 - Collector 的 trace 文件：原来是 50 MB 一个、留 5 个旧文件、7 天，最多占 300 MB。现在是 20 MB 一个、留 3 个旧文件、3 天，最多 80 MB。打开自动打点以后，每次请求的 trace 带着提示词和检索到的原文，文件长得比 P0-02 测试时快很多。
 - Collector 和 Jaeger 容器自己的标准输出日志：Docker 默认不限制大小，一直留着，也占 C 盘（Docker Desktop 的虚拟磁盘）。现在这两个容器各最多 3 个 10 MB 的文件。没有动 ES 和 Redis：改它们的配置会让下次 `docker compose up -d` 重新创建 ES 容器，影响正在做 P0-06 的人。
 - 业务记录：默认 `data/observe/records/business.jsonl`，20 MB 一个，留 5 个旧文件，最多 120 MB。每次请求一行，大约 3 到 4 KB，20 MB 能放大约 5000 次请求。
-- 日志：每个服务一个文件 `data/observe/logs/<服务名>.jsonl`，10 MB 一个，留 3 个旧文件，每个服务最多 40 MB。
+- 日志：每个服务名一个文件 `data/observe/logs/<服务名>.jsonl`，同一个服务名的几个进程写同一个文件，10 MB 一个，留 3 个旧文件，每个服务名最多 40 MB。
 - `data/observe/` 已经加进 .gitignore。相对路径从仓库根目录算，不从当前工作目录算：MCP 客户端启动服务时的工作目录不一定是仓库。
 
-### 2026-10-17 P0-11：业务记录用自己写的轮转，日志用标准库的轮转
-业务记录每写一行都先拿文件锁、打开文件、追加、关闭。文件大小加上这一行超过上限时，先把旧文件依次改名（`business.jsonl` 改成 `.1`，`.1` 改成 `.2`，最老的删掉），再写。这样几个进程可以写同一个文件；Windows 上文件被别的进程打开着就改不了名，每次写完就关文件，能避开这个问题。写失败（磁盘满、路径不对）只写一条警告日志并返回 False，不让请求因为记录写不进去而失败。还考虑过用标准库的 `RotatingFileHandler`：它一直开着文件，两个进程写同一个文件时，Windows 上改名会失败。
+### 2026-10-17 P0-11：业务记录和日志都用自己写的轮转，几个进程可以写同一个文件
+业务记录每写一行都先拿文件锁、打开文件、追加、关闭。文件大小加上这一行超过上限时，先把旧文件依次改名（`business.jsonl` 改成 `.1`，`.1` 改成 `.2`，最老的删掉），再写。这样几个进程可以写同一个文件；Windows 上文件被别的进程打开着就改不了名，每次写完就关文件，能避开这个问题。文件锁最多等 2 秒（评审后加上），等不到就放弃这一行。写失败（磁盘满、路径不对、等锁超时）只写一条警告日志并返回 False，不让请求因为记录写不进去而失败。还考虑过用标准库的 `RotatingFileHandler`：它一直开着文件，两个进程写同一个文件时，Windows 上改名会失败。
 
-日志用标准库的 `RotatingFileHandler`，因为每个服务写自己的文件，不会有两个进程改同一个文件的名。每行 JSON 有时间（UTC）、级别、logger 名、消息、服务名、trace_id、span_id、请求 id，还有 `extra={...}` 传进来的字段；有异常时加上完整的堆栈。不在请求和 span 里的日志，这三个 id 写 null。标准错误输出默认只显示 WARNING 及以上的短文本；标准输出不写日志，MCP 的 stdio 方式要用标准输出传消息。
+日志也用这个写法。第一版的日志用的是标准库的 `RotatingFileHandler`，理由是每个服务写自己的文件。评审指出这个理由不成立：每个用 stdio 方式连接的 MCP 客户端都会自己启动一个服务进程，脚本不传服务名时都用默认的 `rag`，几个进程会写同一个日志文件。让两个进程同时写、每行之间停 5 毫秒，标准库的写法 120 行只留下 78 行，还报了日志错误。还考虑过在文件名里加进程号：每次启动服务都多一组文件，进程退出后没人删，总大小没有上限。
+
+本机每写一行要拿锁、开文件、关文件，大约 6 毫秒（大部分花在建、删锁文件和打开文件上）。业务记录每次请求只写一行，直接在请求里写。日志一次请求可能写好几行，所以请求线程只把这一行格式化成 JSON（trace id 和请求 id 在这个线程的上下文变量里），放进队列；每个进程有一个写日志的线程负责拿锁写文件。队列最多放 1 万行，满了以后新来的行不写，只计数，不让请求等磁盘。`shutdown_observability()` 和进程退出时会先把队列里的行写完。filelock 自己的日志和写日志线程自己产生的日志不写进文件：写它们又会产生新的同类日志。
+
+每行 JSON 有时间（UTC）、级别、logger 名、消息、服务名、trace_id、span_id、请求 id，还有 `extra={...}` 传进来的字段；有异常时加上完整的堆栈。不在请求和 span 里的日志，这三个 id 写 null。标准错误输出默认只显示 WARNING 及以上的短文本；标准输出不写日志，MCP 的 stdio 方式要用标准输出传消息。
 
 ### 2026-10-17 P0-11：业务记录的字段
 每行一个 JSON 对象：`schema_version`（现在是 1）、时间（UTC）、请求 id、trace id、工具名、调用方、知识库、配置版本（由调用方传，P0-09 用知识库配置的 sha256）、索引版本、数据代号、每一路按名次排的前 10 个段 id 和分数、重排分、阈值判断（阈值、第一名分数、阈值有没有生效、第一名过没过、留下几段、去掉几段）、最终返回的段 id 和分数、结果的标记（错误类别）、每一步耗时（毫秒）、`extra`（以后的轮数、引用核对结果、用户反馈）。`business_record_from_result()` 从 `RetrievalResult` 填好其中能填的字段，trace id 取当前 span 的；重排分和阈值判断由调用方传，P0-07 和 P0-08 写出这两部分以后，P0-09 再把它们传进来。
