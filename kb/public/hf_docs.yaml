@@ -39,7 +39,7 @@ retrieval:
   num_candidates: 100  # kNN candidates; tune on the question set (s9-1)
   title_boost: 2.0     # title_path weight against content in the BM25 multi_match
   rrf_k: 60
-  rerank_n: 30         # fused candidates sent to the reranker (s10-1); set from the P0-12 curve
+  rerank_n: 10         # fused candidates sent to the reranker (s10-1); P0-12 curve, docs/decisions.md
   final_k: 8
   threshold: 0.3       # rerank score (0 to 1) a chunk needs; calibrated in P0-12 (s10-2)
   expand: none         # none | neighbors | parent: context added around returned chunks (s10-3)
