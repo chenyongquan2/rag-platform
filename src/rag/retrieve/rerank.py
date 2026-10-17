@@ -13,8 +13,12 @@ down). The time spent waiting for a slot counts against the request's deadline. 
 batch, the first one included, it looks at the time left: when the deadline has passed, or the
 batch would not finish before it, it stops. "Would not finish" is judged by the runner's time
 per pair, a moving average over the batches of all requests, seeded by a warm-up batch when the
-process runner is created, so it also reflects how busy the CPU is. Then the scored candidates
-come first, sorted by rerank score, the unscored ones follow in fusion order, and the trace says
+process runner is created, so it also reflects how busy the CPU is. The estimate only changes
+when a batch runs, so after a slow spell it could stay so high that no batch ever starts again;
+therefore, when no other batch is running, the first batch of a request may run as a probe
+if it fits by the warm-up estimate, and its time brings the average back down. Then the scored
+candidates come first, sorted by rerank score, the unscored ones follow in fusion order, and
+the trace says
 `rerank_timeout` (s16-8). The caller never waits past the deadline: if a batch is still running
 then (it took longer than estimated), the runner returns what was scored so far and the batch
 finishes in the background (its slot is held until it does).
@@ -199,7 +203,10 @@ class RerankRunner:
         self.max_concurrency = max_concurrency
         self.per_pair_s = per_pair_s
         """Moving average of the seconds per pair over all batches (None before the first)."""
+        self.baseline_per_pair_s = per_pair_s
+        """Seconds per pair at warm-up (or the seed): the yardstick for probe batches."""
         self.warmup_s = 0.0
+        self._running = 0  # batches being scored right now (under _estimate_lock)
         self._estimate_lock = threading.Lock()
         self._slots = threading.BoundedSemaphore(max_concurrency)
         # As many threads as slots: a request holding a slot never waits for a thread.
@@ -219,6 +226,7 @@ class RerankRunner:
             self.warmup_s = self._pool.submit(run).result()
         with self._estimate_lock:
             self.per_pair_s = self.warmup_s / len(pairs)
+            self.baseline_per_pair_s = self.per_pair_s
 
     @contextmanager
     def _slot(self) -> Iterator[None]:
@@ -228,9 +236,33 @@ class RerankRunner:
         finally:
             self._slots.release()
 
+    def _admit(self, pairs: int, remaining: float | None, first: bool) -> bool:
+        """Whether a batch of `pairs` may start with `remaining` seconds left (None: no
+        deadline); counts it as running when it may. A batch that would not finish by the
+        estimate may still run as a probe: only as a request's first batch, only while no other
+        batch is running, and only if it would finish by the warm-up estimate."""
+        with self._estimate_lock:
+            allowed = remaining is None
+            if remaining is not None and remaining > 0:
+                estimate = self.per_pair_s
+                allowed = estimate is None or remaining >= estimate * pairs
+                baseline = self.baseline_per_pair_s
+                if not allowed and first and self._running == 0 and baseline is not None:
+                    allowed = remaining >= baseline * pairs
+                    if allowed:
+                        logger.info(
+                            "rerank probe batch: estimate %.0f ms per pair, warm-up %.0f ms",
+                            (estimate or 0.0) * 1000.0,
+                            baseline * 1000.0,
+                        )
+            if allowed:
+                self._running += 1
+            return allowed
+
     def _record(self, seconds: float, pairs: int) -> None:
         measured = seconds / pairs
         with self._estimate_lock:
+            self._running -= 1
             if self.per_pair_s is None:
                 self.per_pair_s = measured
             else:
@@ -294,18 +326,18 @@ class RerankRunner:
                 batch = texts[start : start + self.batch_size]
                 if progress.stop.is_set():
                     return
-                if deadline is not None:
-                    remaining = deadline.remaining_s()
-                    estimate = self.per_pair_s
-                    if remaining <= 0 or (
-                        estimate is not None and remaining < estimate * len(batch)
-                    ):
-                        return
+                remaining = deadline.remaining_s() if deadline is not None else None
+                if not self._admit(len(batch), remaining, first=start == 0):
+                    return
                 began = clock()
-                scores = _check_scores(
-                    self.scorer.predict([(question, text) for text in batch]), len(batch)
-                )
+                try:
+                    raw = self.scorer.predict([(question, text) for text in batch])
+                except BaseException:
+                    with self._estimate_lock:
+                        self._running -= 1
+                    raise
                 self._record(clock() - began, len(batch))
+                scores = _check_scores(raw, len(batch))
                 with progress.lock:
                     if progress.stop.is_set():
                         return

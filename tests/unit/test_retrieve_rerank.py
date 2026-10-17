@@ -232,6 +232,33 @@ def test_batch_that_would_not_finish_is_not_started() -> None:
     assert 0.1 < runner.per_pair_s < 0.3
 
 
+def test_estimate_recovers_after_slow_batches() -> None:
+    # Three slow batches (2 s per pair) push the estimate from 0.5 to ~1.49 s per pair: a batch
+    # of 8 then needs ~11.9 s, more than a 10 s deadline. Without new samples the estimate would
+    # never come down again. An idle runner lets the first batch of a request run as a probe
+    # when it fits by the warm-up estimate, so normal requests are scored again.
+    clock = ManualClock()
+    scorer = FakeCrossEncoder(clock=clock, per_pair_s=2.0)
+    runner = _runner(scorer, max_concurrency=2, per_pair_s=0.5)
+    texts = [f"t{i}" for i in range(8)]
+    for _ in range(3):
+        runner.rerank("q", texts, Deadline.after_ms(60_000, clock=clock))
+    assert runner.per_pair_s == pytest.approx(1.4855)
+
+    scorer.per_pair_s = 0.5
+    scored = [
+        len(runner.rerank("q", texts * 2, Deadline.after_ms(10_000, clock=clock)).scores)
+        for _ in range(5)
+    ]
+    assert all(n >= 8 for n in scored)  # every request is reranked, at least one batch
+    assert scored[-1] == 16  # the estimate is back near 0.5: both batches fit
+    assert runner.per_pair_s < 0.8
+
+    # The probe only runs when the batch fits by the warm-up estimate: here it does not.
+    run = runner.rerank("q", texts, Deadline.after_ms(3000, clock=clock))
+    assert run.scores == [] and run.timed_out
+
+
 def test_warm_up_seeds_the_estimate() -> None:
     scorer = FakeCrossEncoder(sleep_s=0.04)
     runner = _runner(scorer)
