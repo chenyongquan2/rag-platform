@@ -10,6 +10,7 @@ import pytest
 from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
 
 from rag.config import ServiceSettings
+from rag.config import settings as settings_module
 from rag.eval.questions import LabeledQuestion, QuestionSet
 from rag.eval.retrieval import Reranker, rerank_latency_curve
 from rag.retrieve import rerank as rerank_module
@@ -192,24 +193,54 @@ def test_rerank_semaphore_limits_concurrency() -> None:
 
 
 def test_rerank_queue_time_counts_against_deadline() -> None:
-    # The holder keeps the only slot for ~0.37 s (gate 0.25 s + one batch). The second request
-    # has 0.7 s in total and needs 5 batches of ~0.12 s: after the wait ~0.33 s are left, so it
-    # stops after 1 or 2 batches. Without counting the wait all 5 (0.6 s) would have fitted.
-    gate = threading.Event()
-    scorer = FakeCrossEncoder(sleep_s=0.12, gate=gate, gate_texts={"hold"})
+    # The holder keeps the only slot for 3 batches of ~0.12 s (~0.36 s). The second request has
+    # 0.7 s in total and needs 5 batches: after the wait ~0.34 s are left, so it stops after 1
+    # or 2 batches. Without counting the wait all 5 (0.6 s) would have fitted.
+    scorer = FakeCrossEncoder(sleep_s=0.12)
     runner = _runner(scorer, max_concurrency=1)
-    holder = threading.Thread(target=runner.rerank, args=("q", ["hold"], Deadline.after_ms(30_000)))
+    holder = threading.Thread(
+        target=runner.rerank, args=("q", [f"h{i}" for i in range(24)], Deadline.after_ms(30_000))
+    )
     holder.start()
     assert scorer.started.wait(5)
-    threading.Timer(0.25, gate.set).start()
 
     run = runner.rerank("q", [f"t{i}" for i in range(40)], Deadline.after_ms(700))
     holder.join(timeout=10)
 
-    assert run.queue_ms >= 300
+    assert run.queue_ms >= 250
     assert run.timed_out is True
     assert 8 <= len(run.scores) <= 24
     assert run.batches == len(run.scores) // 8
+    runner.close()
+
+
+def test_batch_that_would_not_finish_is_not_started() -> None:
+    clock = ManualClock()
+    scorer = FakeCrossEncoder(clock=clock, per_pair_s=0.1)
+    # Seeded estimate (as after the warm-up batch at load): 0.1 s per pair, 0.8 s per batch.
+    runner = _runner(scorer, max_concurrency=1, per_pair_s=0.1)
+    run = runner.rerank("q", [f"t{i}" for i in range(16)], Deadline.after_ms(500, clock=clock))
+    assert scorer.batches == []  # not even the first batch: it would end 0.3 s past the deadline
+    assert run.timed_out is True and run.scores == [] and run.batches == 0
+    # The slot was not held: the next request gets it at once and scores everything.
+    run = runner.rerank("q", [f"t{i}" for i in range(16)], Deadline.after_ms(5000, clock=clock))
+    assert len(run.scores) == 16 and not run.timed_out
+
+    # The estimate is a moving average over requests: slower batches raise it.
+    scorer.per_pair_s = 0.3
+    runner.rerank("q", [f"t{i}" for i in range(8)], Deadline.after_ms(60_000, clock=clock))
+    assert 0.1 < runner.per_pair_s < 0.3
+
+
+def test_warm_up_seeds_the_estimate() -> None:
+    scorer = FakeCrossEncoder(sleep_s=0.04)
+    runner = _runner(scorer)
+    assert runner.per_pair_s is None
+    runner.warm_up()
+    assert [len(b) for b in scorer.batches] == [8]  # one full batch of realistic pairs
+    assert len(scorer.batches[0][0][1].split()) >= 150
+    assert runner.per_pair_s is not None and runner.per_pair_s >= 0.04 / 8 * 0.5
+    assert runner.warmup_s >= 0.03
     runner.close()
 
 
@@ -233,9 +264,12 @@ def test_cross_encoder_loaded_once_per_process(monkeypatch: pytest.MonkeyPatch) 
     }
     loads: list[tuple[str, dict[str, Any]]] = []
 
+    scorers: list[FakeCrossEncoder] = []
+
     def fake_load(model: str, **kwargs: Any) -> FakeCrossEncoder:
         loads.append((model, kwargs))
-        return FakeCrossEncoder()
+        scorers.append(FakeCrossEncoder())
+        return scorers[-1]
 
     rerank_module.reset_rerank_runners()
     monkeypatch.setattr(rerank_module.CrossEncoderScorer, "load", staticmethod(fake_load))
@@ -247,21 +281,35 @@ def test_cross_encoder_loaded_once_per_process(monkeypatch: pytest.MonkeyPatch) 
         assert runner.scorer is first
         assert runner.batch_size == 8
         assert runner.max_concurrency == settings.rerank_max_concurrency
-        assert loads == [("BAAI/bge-reranker-base", cross_encoder_kwargs(settings))]
+        threads = settings.reranker_torch_threads
+        expected = {**cross_encoder_kwargs(settings), "torch_threads": threads}
+        assert loads == [("BAAI/bge-reranker-base", expected)]
+        # The process runner is warmed up once with a full batch, which seeds its estimate.
+        assert [len(b) for b in scorers[0].batches] == [8]
+        assert runner.per_pair_s is not None
     finally:
         rerank_module.reset_rerank_runners()
 
 
 def test_rerank_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("os.cpu_count", lambda: 16)
+    # Torch threads default to half the physical cores; slots x threads = physical cores.
+    monkeypatch.setattr(settings_module, "physical_cores", lambda: 8)
     settings = ServiceSettings(_env_file=None)  # type: ignore[call-arg]
     assert settings.reranker_model == "BAAI/bge-reranker-base"
     assert settings.reranker_device == "cpu"
     assert settings.reranker_max_length == 512
     assert settings.rerank_batch_size == 8
-    assert settings.rerank_max_concurrency == 8
+    assert settings.reranker_torch_threads == 4
+    assert settings.rerank_max_concurrency == 2
+    monkeypatch.setenv("RERANKER_TORCH_THREADS", "2")
+    assert ServiceSettings(_env_file=None).rerank_max_concurrency == 4  # type: ignore[call-arg]
     monkeypatch.setenv("RERANK_MAX_CONCURRENCY", "3")
     assert ServiceSettings(_env_file=None).rerank_max_concurrency == 3  # type: ignore[call-arg]
+    monkeypatch.delenv("RERANKER_TORCH_THREADS")
+    monkeypatch.delenv("RERANK_MAX_CONCURRENCY")
+    monkeypatch.setattr(settings_module, "physical_cores", lambda: 1)
+    one = ServiceSettings(_env_file=None)  # type: ignore[call-arg]
+    assert (one.reranker_torch_threads, one.rerank_max_concurrency) == (1, 1)
     with pytest.raises(ValueError):
         RerankRunner(FakeCrossEncoder(), batch_size=0, max_concurrency=1)
     with pytest.raises(ValueError):

@@ -26,6 +26,9 @@ dependencies = [
     "torch>=2.6",
     "numpy>=2",
     "scipy>=1.13",
+    # Physical core count for the reranker thread and concurrency defaults (already installed
+    # through docling -> accelerate).
+    "psutil>=5.9",
     # Reranker tokenizer for chunk sizes, read from the local HF cache (already installed with
     # sentence-transformers; imported directly by rag.ingest.tokens).
     "tokenizers>=0.20",

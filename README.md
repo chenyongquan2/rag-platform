@@ -154,7 +154,9 @@ result.chunks, result.routes, result.degraded, result.timings_ms
 `rag.retrieve.make_search_pipeline(...)` (same arguments) adds the rest of the chain:
 `BatchedTimeoutRerank` scores the first `rerank_n` candidates with the local
 `BAAI/bge-reranker-base` cross-encoder (question + title path + body, batches of
-`RERANK_BATCH_SIZE`, at most `RERANK_MAX_CONCURRENCY` reranks at once; the model is loaded once
+`RERANK_BATCH_SIZE`, each on `RERANKER_TORCH_THREADS` torch threads, at most
+`RERANK_MAX_CONCURRENCY` reranks at once (defaults: half the physical cores, and the physical
+cores divided by that); the model is loaded once
 per process from the local HF cache, so set `HF_HUB_OFFLINE=1` and build pipelines at service
 start), stopping by the deadline (`rerank_timeout`: scored first, the rest in fusion order);
 `RerankThreshold` drops chunks below `threshold` (`not_found` with the best 3 in

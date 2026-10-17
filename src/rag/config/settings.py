@@ -8,6 +8,7 @@ from collections.abc import Iterator, Mapping
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit, urlunsplit
 
+import psutil
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -58,6 +59,13 @@ def mask_url(value: str) -> str:
     if not changed:
         return value
     return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+
+
+def physical_cores() -> int:
+    """Physical CPU cores (psutil), else the logical CPUs `os.cpu_count()` reports; at least 1.
+    Torch's CPU kernels gain nothing from hyper-threads, so the reranker defaults count cores."""
+    count = psutil.cpu_count(logical=False)
+    return max(1, count or os.cpu_count() or 1)
 
 
 class ModelPrice(BaseModel):
@@ -190,14 +198,20 @@ class ServiceSettings(BaseSettings):
     # Reranker (spec P0-08, design s10-1). One local cross-encoder per process, loaded from the
     # local HF cache only (`local_files_only`; also set HF_HUB_OFFLINE=1). `reranker_max_length`
     # is the model's 512 positions for question + title path + chunk. Candidates go in batches
-    # of `rerank_batch_size`; the remaining deadline is checked after each batch. At most
-    # `rerank_max_concurrency` requests rerank at the same time (default: half the logical
-    # CPUs); the others wait, and the wait counts against their deadline.
+    # of `rerank_batch_size`; a batch that would not finish before the deadline is not started.
+    # Each rerank runs on `reranker_torch_threads` torch threads (set process-wide at load;
+    # default half the physical cores) and at most `rerank_max_concurrency` requests rerank at
+    # the same time (default physical cores // torch threads, so together they use each
+    # physical core once); the others wait, and the wait counts against their deadline.
     reranker_device: str = "cpu"
     reranker_max_length: int = Field(default=512, gt=0, le=512)
     rerank_batch_size: int = Field(default=8, gt=0)
+    reranker_torch_threads: int = Field(default_factory=lambda: max(1, physical_cores() // 2), ge=1)
     rerank_max_concurrency: int = Field(
-        default_factory=lambda: max(1, (os.cpu_count() or 2) // 2), ge=1
+        default_factory=lambda data: max(
+            1, physical_cores() // max(1, int(data.get("reranker_torch_threads") or 1))
+        ),
+        ge=1,
     )
 
     # Embedding client (spec P0-05, design s7-4, s16-2, s17-1). Ingest and query share model,

@@ -9,18 +9,22 @@ score. Candidates after `top_n` are dropped: they were never candidates for the 
 
 `RerankRunner` scores in batches of `batch_size` (8) in a thread pool behind a semaphore of
 `max_concurrency` slots (reranking is CPU bound; several requests at once slow each other
-down). The time spent waiting for a slot counts against the request's deadline. After each batch
-it looks at the time left: when the deadline has passed, or the next batch would not finish
-before it (judged by the last batch's time per pair), it stops. Then the scored candidates come
-first, sorted by rerank score, the unscored ones follow in fusion order, and the trace says
+down). The time spent waiting for a slot counts against the request's deadline. Before each
+batch, the first one included, it looks at the time left: when the deadline has passed, or the
+batch would not finish before it, it stops. "Would not finish" is judged by the runner's time
+per pair, a moving average over the batches of all requests, seeded by a warm-up batch when the
+process runner is created, so it also reflects how busy the CPU is. Then the scored candidates
+come first, sorted by rerank score, the unscored ones follow in fusion order, and the trace says
 `rerank_timeout` (s16-8). The caller never waits past the deadline: if a batch is still running
-then, the runner returns what was scored so far and the batch finishes in the background (its
-slot is held until it does).
+then (it took longer than estimated), the runner returns what was scored so far and the batch
+finishes in the background (its slot is held until it does).
 
 The model (sentence-transformers `CrossEncoder`, bge-reranker-base) is loaded once per process
 from the local Hugging Face cache (`local_files_only`), with sigmoid as the activation, so scores
 are in [0, 1] (s10-2: the threshold depends on it; scores outside are refused). All knowledge
-bases share it, so rerank scores compare across them (s8-3).
+bases share it, so rerank scores compare across them (s8-3). Loading sets torch's thread count
+for the process (`reranker_torch_threads`): slots x threads should not exceed the physical
+cores, else concurrent reranks fight over them.
 """
 
 from __future__ import annotations
@@ -30,8 +34,9 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
@@ -49,6 +54,14 @@ logger = logging.getLogger(__name__)
 RERANK_SCORE = "rerank_score"
 """Node metadata key of the rerank score (moved to `Chunk.rerank_score` at the layer boundary)."""
 TITLE_SEPARATOR = " > "
+ESTIMATE_WEIGHT = 0.3
+"""Weight of the newest batch in the moving average of the time per pair."""
+WARMUP_QUESTION = "How does retrieval-augmented generation find the passages it cites?"
+WARMUP_PASSAGE = "Guide > Retrieval\n" + " ".join(
+    ["Retrieval-augmented generation searches an index, reranks the passages it finds and"]
+    + ["gives the best ones to a language model, which cites them in its answer."] * 16
+)
+"""About 300 tokens with the question: near the median pair of the HF docs (266 tokens)."""
 
 
 @runtime_checkable
@@ -87,30 +100,31 @@ def cross_encoder_kwargs(settings: ServiceSettings) -> dict[str, Any]:
 class CrossEncoderScorer:
     """`PairScorer` over a sentence-transformers `CrossEncoder` with sigmoid activation."""
 
-    def __init__(self, model: Any, *, name: str, load_s: float = 0.0, warmup_s: float = 0.0):
+    def __init__(self, model: Any, *, name: str, load_s: float = 0.0, torch_threads: int = 0):
         self.model = model
         self.name = name
         self.load_s = load_s
         """Seconds to load the model (imports included)."""
-        self.warmup_s = warmup_s
-        """Seconds of the first, unused call (the first call of a model is slower)."""
+        self.torch_threads = torch_threads
 
     @staticmethod
-    def load(model: str, **kwargs: Any) -> CrossEncoderScorer:
-        """Load `model` with `kwargs` (see `cross_encoder_kwargs`) and run one warm-up pair.
-        Imports torch and sentence-transformers here, so modules that only define the chain
-        stay quick to import."""
+    def load(model: str, *, torch_threads: int, **kwargs: Any) -> CrossEncoderScorer:
+        """Load `model` with `kwargs` (see `cross_encoder_kwargs`) after setting torch's thread
+        count for the process to `torch_threads`. Imports torch and sentence-transformers here,
+        so modules that only define the chain stay quick to import."""
+        if torch_threads < 1:
+            raise ValueError(f"torch_threads must be >= 1, got {torch_threads}")
         start = time.perf_counter()
         import torch
         from sentence_transformers import CrossEncoder
 
+        torch.set_num_threads(torch_threads)
         encoder = CrossEncoder(model, activation_fn=torch.nn.Sigmoid(), **kwargs)
-        loaded = time.perf_counter()
-        scorer = CrossEncoderScorer(encoder, name=model, load_s=loaded - start)
-        scorer.predict([("warm-up", "warm-up")])
-        scorer.warmup_s = time.perf_counter() - loaded
+        scorer = CrossEncoderScorer(
+            encoder, name=model, load_s=time.perf_counter() - start, torch_threads=torch_threads
+        )
         logger.info(
-            "reranker %s loaded in %.1f s (warm-up %.2f s)", model, scorer.load_s, scorer.warmup_s
+            "reranker %s loaded in %.1f s (%d torch threads)", model, scorer.load_s, torch_threads
         )
         return scorer
 
@@ -168,7 +182,14 @@ class RerankRunner:
     `max_concurrency` bounds all reranks of the process.
     """
 
-    def __init__(self, scorer: PairScorer, *, batch_size: int, max_concurrency: int) -> None:
+    def __init__(
+        self,
+        scorer: PairScorer,
+        *,
+        batch_size: int,
+        max_concurrency: int,
+        per_pair_s: float | None = None,
+    ) -> None:
         if batch_size < 1:
             raise ValueError(f"batch_size must be >= 1, got {batch_size}")
         if max_concurrency < 1:
@@ -176,9 +197,44 @@ class RerankRunner:
         self.scorer = scorer
         self.batch_size = batch_size
         self.max_concurrency = max_concurrency
+        self.per_pair_s = per_pair_s
+        """Moving average of the seconds per pair over all batches (None before the first)."""
+        self.warmup_s = 0.0
+        self._estimate_lock = threading.Lock()
         self._slots = threading.BoundedSemaphore(max_concurrency)
         # As many threads as slots: a request holding a slot never waits for a thread.
         self._pool = ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix="rerank")
+
+    def warm_up(self) -> None:
+        """Score one batch of realistic pairs (unused) in a pool thread: the first call of a
+        model is slower, and its time seeds the per-pair estimate (replacing any earlier)."""
+        pairs = [(WARMUP_QUESTION, WARMUP_PASSAGE)] * self.batch_size
+
+        def run() -> float:
+            began = time.monotonic()
+            _check_scores(self.scorer.predict(pairs), len(pairs))
+            return time.monotonic() - began
+
+        with self._slot():
+            self.warmup_s = self._pool.submit(run).result()
+        with self._estimate_lock:
+            self.per_pair_s = self.warmup_s / len(pairs)
+
+    @contextmanager
+    def _slot(self) -> Iterator[None]:
+        self._slots.acquire()
+        try:
+            yield
+        finally:
+            self._slots.release()
+
+    def _record(self, seconds: float, pairs: int) -> None:
+        measured = seconds / pairs
+        with self._estimate_lock:
+            if self.per_pair_s is None:
+                self.per_pair_s = measured
+            else:
+                self.per_pair_s += ESTIMATE_WEIGHT * (measured - self.per_pair_s)
 
     def rerank(
         self, question: str, texts: Sequence[str], deadline: Deadline | None = None
@@ -232,23 +288,24 @@ class RerankRunner:
         deadline: Deadline | None,
         progress: _Progress,
     ) -> None:
+        clock = deadline.clock if deadline is not None else time.monotonic
         try:
-            per_pair_s = 0.0  # time per pair of the last batch: predicts the next one
             for start in range(0, len(texts), self.batch_size):
                 batch = texts[start : start + self.batch_size]
                 if progress.stop.is_set():
                     return
-                began = 0.0
                 if deadline is not None:
                     remaining = deadline.remaining_s()
-                    if remaining <= 0 or remaining < per_pair_s * len(batch):
+                    estimate = self.per_pair_s
+                    if remaining <= 0 or (
+                        estimate is not None and remaining < estimate * len(batch)
+                    ):
                         return
-                    began = deadline.clock()
+                began = clock()
                 scores = _check_scores(
                     self.scorer.predict([(question, text) for text in batch]), len(batch)
                 )
-                if deadline is not None:
-                    per_pair_s = (deadline.clock() - began) / len(batch)
+                self._record(clock() - began, len(batch))
                 with progress.lock:
                     if progress.stop.is_set():
                         return
@@ -271,19 +328,23 @@ _RUNNERS: dict[tuple[int, int, int], RerankRunner] = {}
 
 def load_cross_encoder(settings: ServiceSettings) -> PairScorer:
     """The process's cross-encoder for these settings, loaded on the first call (service start;
-    about a minute on this machine) and reused after that."""
+    one to two minutes on this machine, mostly imports) and reused after that."""
     kwargs = cross_encoder_kwargs(settings)
-    key = json.dumps([settings.reranker_model, kwargs], sort_keys=True)
+    threads = settings.reranker_torch_threads
+    key = json.dumps([settings.reranker_model, kwargs, threads], sort_keys=True)
     with _LOAD_LOCK:
         scorer = _SCORERS.get(key)
         if scorer is None:
-            scorer = CrossEncoderScorer.load(settings.reranker_model, **kwargs)
+            scorer = CrossEncoderScorer.load(
+                settings.reranker_model, torch_threads=threads, **kwargs
+            )
             _SCORERS[key] = scorer
         return scorer
 
 
 def get_rerank_runner(settings: ServiceSettings) -> RerankRunner:
-    """The process's `RerankRunner` (model loaded once; one semaphore for every chain)."""
+    """The process's `RerankRunner` (model loaded once; one semaphore for every chain),
+    warmed up with one batch when it is created."""
     scorer = load_cross_encoder(settings)
     key = (id(scorer), settings.rerank_batch_size, settings.rerank_max_concurrency)
     with _RUNNER_LOCK:
@@ -293,6 +354,14 @@ def get_rerank_runner(settings: ServiceSettings) -> RerankRunner:
                 scorer,
                 batch_size=settings.rerank_batch_size,
                 max_concurrency=settings.rerank_max_concurrency,
+            )
+            runner.warm_up()
+            logger.info(
+                "rerank runner: %d slots, batch %d, warm-up %.2f s (%.0f ms per pair)",
+                runner.max_concurrency,
+                runner.batch_size,
+                runner.warmup_s,
+                (runner.per_pair_s or 0.0) * 1000.0,
             )
             _RUNNERS[key] = runner
         return runner

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 import statistics
+import threading
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -125,16 +126,12 @@ def test_known_relevant_pair_high_unrelated_low(
     assert unrelated < 0.01
 
 
-def test_real_model_latency(
-    scorer: CrossEncoderScorer, es: Elasticsearch, settings: ServiceSettings
-) -> None:
-    import torch
-
-    alias = _require_alias(es, "")
+def _texts(es: Elasticsearch, alias: str, n: int) -> list[str]:
+    """The first `n` chunks of the index by chunk id, as reranker passages."""
     resp = es.search(
         index=alias,
         query={"match_all": {}},
-        size=30,
+        size=n,
         sort=[{"chunk_id": "asc"}],
         source={"includes": ["title_path", "content"]},
     )
@@ -142,13 +139,22 @@ def test_real_model_latency(
         rerank_text(h["_source"]["title_path"], h["_source"]["content"])
         for h in resp["hits"]["hits"]
     ]
-    if len(texts) < 30:
-        pytest.skip(f"{alias} has fewer than 30 chunks")
+    if len(texts) < n:
+        pytest.skip(f"{alias} has fewer than {n} chunks")
+    return texts
+
+
+def test_real_model_latency(
+    scorer: CrossEncoderScorer, es: Elasticsearch, settings: ServiceSettings
+) -> None:
+    import torch
+
+    texts = _texts(es, _require_alias(es, ""), 30)
     question = _question(KNOWN_QID)
     runner = RerankRunner(scorer, batch_size=settings.rerank_batch_size, max_concurrency=1)
     rows = []
     try:
-        runner.rerank(question, texts[:8])  # warm the runner's thread
+        runner.warm_up()
         for n in (8, 20, 30):
             times = []
             for _ in range(3):
@@ -161,12 +167,53 @@ def test_real_model_latency(
     finally:
         runner.close()
     print(
-        f"\nreranker load {scorer.load_s:.1f} s (warm-up {scorer.warmup_s:.2f} s), "
-        f"torch threads {torch.get_num_threads()}, batch {settings.rerank_batch_size}"
+        f"\nreranker load {scorer.load_s:.1f} s, warm-up batch {runner.warmup_s:.2f} s, "
+        f"torch threads {torch.get_num_threads()} (setting {settings.reranker_torch_threads}), "
+        f"slots {settings.rerank_max_concurrency}, batch {settings.rerank_batch_size}"
     )
     for n, median, per in rows:
         print(f"  {n:2d} candidates: median {median:7.1f} ms, {per:6.1f} ms per candidate")
     assert all(per < 2000 for _, _, per in rows)
+    assert torch.get_num_threads() == settings.reranker_torch_threads
+
+
+def test_two_threads_score_like_a_sequential_run(
+    scorer: CrossEncoderScorer, es: Elasticsearch, settings: ServiceSettings
+) -> None:
+    """Two reranks at once (two slots, each on the configured torch threads) give the same
+    scores as one after the other; prints both wall times."""
+    texts = _texts(es, _require_alias(es, ""), 16)
+    questions = [_question(KNOWN_QID), "How do I train a TensorFlow model on a TPU?"]
+    runner = RerankRunner(scorer, batch_size=settings.rerank_batch_size, max_concurrency=2)
+    try:
+        runner.warm_up()
+        began = time.perf_counter()
+        sequential = [runner.rerank(q, texts).scores for q in questions]
+        sequential_s = time.perf_counter() - began
+
+        results: dict[int, list[float]] = {}
+
+        def work(i: int) -> None:
+            results[i] = runner.rerank(questions[i], texts).scores
+
+        threads = [threading.Thread(target=work, args=(i,)) for i in range(2)]
+        began = time.perf_counter()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=300)
+        concurrent_s = time.perf_counter() - began
+    finally:
+        runner.close()
+    for i in range(2):
+        assert len(results[i]) == len(texts)
+        assert results[i] == pytest.approx(sequential[i], abs=1e-5)
+    pairs = 2 * len(texts)
+    print(
+        f"\n2 x {len(texts)} candidates: sequential {sequential_s:.1f} s "
+        f"({sequential_s * 1000 / pairs:.0f} ms per candidate), two threads {concurrent_s:.1f} s "
+        f"({concurrent_s * 1000 / pairs:.0f} ms per candidate of throughput)"
+    )
 
 
 def test_pipeline_ranks_known_page_first(
