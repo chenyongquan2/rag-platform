@@ -76,7 +76,11 @@ class _ResultMeta(BaseModel):
             (self.rerank_timeout, ErrorCategory.RERANK_TIMEOUT),
             (getattr(self, "answer_parse_failed", False), ErrorCategory.ANSWER_PARSE_FAILED),
         ]
-        return [category for is_set, category in flags if is_set]
+        categories = [category for is_set, category in flags if is_set]
+        generation_error = getattr(self, "generation_error", None)
+        if generation_error is not None:
+            categories.append(ErrorCategory(generation_error))
+        return categories
 
 
 class RouteHit(BaseModel):
@@ -113,14 +117,34 @@ class AnswerSentence(BaseModel):
     citations: list[Citation] = Field(default_factory=list)
 
 
+class CitationCheck(BaseModel):
+    """Level 1 of the citation check (design s11-2), done on every answer by rules."""
+
+    removed_markers: list[int] = Field(default_factory=list)
+    """`[n]` numbers that matched no fragment of this answer's context; removed from the answer."""
+    unsupported_sentences: int = Field(default=0, ge=0)
+    """Sentences left without any valid citation."""
+    parse_attempts: int = Field(default=0, ge=0)
+    """Model calls made for this answer (1, or 2 after a retry; 0 when no fragment was given)."""
+
+
 class Answer(_ResultMeta):
-    """Output of the `ask_docs` tool (design s11-1, s16-1)."""
+    """Output of the `ask_docs` tool (design s11-1, s16-1).
+
+    `chunks` are the numbered fragments the answer was generated from, in order: the citation
+    with marker n points to `chunks[n - 1]`. With `answer_parse_failed` or `generation_error`
+    there are no sentences and `status` is `not_found`: the caller gets the chunks only, and the
+    error category says why (s16-8).
+    """
 
     status: AnswerStatus = AnswerStatus.ANSWERED
     found: bool = False
     sentences: list[AnswerSentence] = Field(default_factory=list)
     chunks: list[Chunk] = Field(default_factory=list)
     answer_parse_failed: bool = False
+    generation_error: ErrorCategory | None = None
+    """Why the model gave no answer: `llm_timeout`, `llm_error` or `budget_exceeded` (s16-8)."""
+    citation_check: CitationCheck = Field(default_factory=CitationCheck)
     resume_token: str | None = None
 
     @property
