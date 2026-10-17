@@ -46,7 +46,10 @@ def test_known_question_real_embedding(es: Elasticsearch) -> None:
         pytest.skip("the embedding gateway is not configured (EMBED_BASE_URL, EMBED_BACKEND)")
     names = KbIndexNames("hf_docs")
     indices = aliased_indices(es, names)
-    if not indices or index_embed_model(es, indices[0]) != f"{settings.embed_model}@1024":
+    if (
+        not indices
+        or index_embed_model(es, indices[0]) != f"{settings.embed_model}@{settings.embed_dim}"
+    ):
         pytest.skip(f"{names.alias} is not built with real {settings.embed_model} vectors")
     questions = {
         q.qid: q for q in load_question_set(repo_path(QUESTION_SET), kb="hf_docs").questions

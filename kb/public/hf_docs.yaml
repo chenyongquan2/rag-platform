@@ -33,6 +33,9 @@ es:
   analyzer: standard
 retrieval:
   top_k_per_route: 20
+  num_candidates: 100  # kNN candidates; tune on the question set (s9-1)
+  title_boost: 2.0     # title_path weight against content in the BM25 multi_match
+  rrf_k: 60
   rerank_n: 30
   final_k: 8
   threshold: 0.3

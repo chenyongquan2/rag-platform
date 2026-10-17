@@ -114,6 +114,24 @@ size; `data/observe/` is git-ignored. Attribute and metric names live in
 `rag/observe/attributes.py`. Tests use `rag.testing.memory_observability()` (`OTEL_MODE=memory`);
 `OTEL_MODE=off` records nothing.
 
+## Retrieval
+
+`rag.retrieve.make_hybrid_search(cfg, settings, acl_groups=[...])` builds the retrieval chain of
+one knowledge base: `EsHybridRetriever` sends a BM25 `multi_match` (content + boosted title_path)
+and a kNN search (filter inside `knn`) in one `_msearch`, both limited to the knowledge base, the
+caller's ACL groups and the whitelisted caller filters (`doc_type`, `language`,
+`source_rel_prefix`); RRF fuses them (k=60, deterministic ties) and `TextDedupe` drops equal
+bodies. One failed route (error, time-out, or no query vector) gives a `degraded` result from the
+other; none gives `RetrievalError` (`retrieval_failed` / `retrieval_timeout`). The total time
+limit is `deadline_ms` per call or `SEARCH_DEADLINE_MS`.
+
+```python
+# index_prefix="fake_" with EMBED_BACKEND=fake queries the fake-vector index
+search = make_hybrid_search(cfg, settings, acl_groups=["public"], redis=redis)
+result = search.retrieve("How do I log in?", kb=cfg.kb, top_k=8, filters={"language": "en"})
+result.chunks, result.routes, result.degraded, result.timings_ms
+```
+
 ## Retrieval evaluation
 
 Any retriever with `retrieve(question, kb, top_k) -> RetrievalResult` can be evaluated
