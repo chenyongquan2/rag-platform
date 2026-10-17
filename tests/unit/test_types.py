@@ -92,9 +92,9 @@ def test_answer_roundtrip_json() -> None:
     ]
 
 
-def test_retrieval_result_routes_kept_out_of_json() -> None:
-    """Each route's own ranked list rides on the result for eval and trace (s9-1, spec P0-10),
-    but is not part of the JSON returned to tool callers."""
+def test_retrieval_result_routes_roundtrip_json() -> None:
+    """Each route's own ranked list rides on the result for eval and trace (s9-1, spec P0-10)
+    and survives serialization; search_docs drops it at its response boundary (P0-09)."""
     bm25 = [RouteHit(chunk_id="c1", doc_id="hf_docs:a.md", rank=1, score=7.5)]
     vector = [
         RouteHit(chunk_id="c2", doc_id="hf_docs:b.md", rank=1),
@@ -111,7 +111,14 @@ def test_retrieval_result_routes_kept_out_of_json() -> None:
     assert RetrievalResult(request_id="r", kb="hf_docs").routes == {}
 
     dumped = json.loads(result.model_dump_json())
-    assert "routes" not in dumped
-    assert "routes" not in result.model_dump()
+    assert dumped["routes"]["bm25"][0] == {
+        "chunk_id": "c1",
+        "doc_id": "hf_docs:a.md",
+        "rank": 1,
+        "score": 7.5,
+    }
+    assert RetrievalResult.model_validate(dumped) == result
+    # The search_docs response leaves it out explicitly.
+    assert "routes" not in json.loads(result.model_dump_json(exclude={"routes"}))
     with pytest.raises(ValidationError):
         RouteHit(chunk_id="c1", doc_id="hf_docs:a.md", rank=0)

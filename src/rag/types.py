@@ -84,9 +84,11 @@ class RetrievalResult(_ResultMeta):
     """Output of the retrieval layer and of the `search_docs` tool."""
 
     chunks: list[Chunk] = Field(default_factory=list)
-    routes: dict[str, list[RouteHit]] = Field(default_factory=dict, exclude=True)
+    routes: dict[str, list[RouteHit]] = Field(default_factory=dict)
     """Each route's own ranked list (`bm25`, `vector`, ...), for per-route eval metrics and
-    traces (s9-1, s14-1). Left out of the JSON sent to callers."""
+    traces (s9-1, s14-1). Serialized like every other field; the search_docs response (P0-09)
+    leaves it out at its boundary (`model_dump(exclude={"routes"})`), so tool callers do not
+    pay for about 40 extra doc ids per call."""
 
 
 class Citation(BaseModel):
