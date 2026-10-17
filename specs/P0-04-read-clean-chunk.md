@@ -1,6 +1,6 @@
 # P0-04 Reading, cleaning, chunking
 
-Status: review (round 1 fixes)
+Status: done
 Phase: P0
 Depends on: P0-01, P0-03
 Design sections: s5-1, s5-2, s5-4, s6-1, s6-2, s6-3, s6-4, s7-1, s7-2, s7-4
@@ -61,8 +61,8 @@ Writing to ES, docstore, IngestionPipeline run with UPSERTS_AND_DELETE, `ingest_
 noise, sensitive data (later); table grouping/summaries (P2); full injection rule set and safety set (P1-03).
 
 ## Handoff (filled at the end)
-- Files: `src/rag/ingest/{__init__,markdown,meta,tokens,language,readers,clean,chunk,build,report}.py`, `tests/unit/test_ingest_{readers,clean,chunk,report}.py` (33 tests; unit suite 124 after the rebase on P0-05), `kb/public/hf_docs.yaml` (rules and steps for .md/.mdx/.ipynb), `pyproject.toml` + `uv.lock` (tokenizers, huggingface-hub declared), `.gitignore` (`data/reports/`), `docs/decisions.md`.
+- Files: `src/rag/ingest/{__init__,markdown,meta,tokens,language,readers,clean,chunk,build,report}.py`, `tests/unit/test_ingest_{readers,clean,chunk,report}.py` (33 tests; unit suite 142 after the rebase on P1-01), `kb/public/hf_docs.yaml` (rules and steps for .md/.mdx/.ipynb), `pyproject.toml` + `uv.lock` (tokenizers, huggingface-hub declared), `.gitignore` (`data/reports/`), `docs/decisions.md`.
 - Report numbers (pipeline `v2-6a063b7f58`, cap 400): 50 docs -> 50 units kept, 438 chunks, tokens min/p50/p90/max 19/256/338/364, 0 over cap, 0 title-only, 0 unclosed fences, md_markup removed 8.9% (WARN, checked). Full corpus 2,647 docs -> 2,617 kept (skipped: 19 duplicate, 3 title_only, 4 toc_only, 4 too_short), 26,372 chunks, tokens 3/232/337/374 (mean 217), 0 over cap, 0 unclosed fences, 367 tiny, 58 title-only, 115 cut tables, 1 suspicious chunk, 5 garbled units, languages en 2,567 / zh 46 / hi 2 / de 1 / ko 1; read+clean+chunk ~2.3 min on this machine.
 - Decisions (docs/decisions.md): `hf_first_char` repairs the dataset's lost first character (2,481 pages; never on one-line pages or lowercase sentences); .mdx and flattened .ipynb use the markdown reader; title_path is a " > " string without link targets; pipeline_version hashes the whole chain config; tokenizer via `tokenizers` (2 s, not 68 s); regex sentence split instead of NLTK; code fences/tables atomic, oversized fences re-fenced; heading-only chunks merge forward; parent_id = heading section `doc_id#s<k>`; md_markup scope (timm model-index comments are dropped); narrow injection patterns; script/stopword language detection; dedupe keeps the smallest doc_id and records copies in stats/report, not metadata; `images: []`; CommonMark closing-fence indentation; INGEST_CODE_VERSION 2.
 - Open issues: tables cut by the token cap do not repeat their header (P2 table step); README_zh/ja/es/pt-br count as `en` (mostly English names); the 5% removal WARN always fires on this corpus (licence comments, image tags); P0-06: hand `KbProcessor.steps_for(ext)` to the IngestionPipeline and run `clean` before it.
-- Review rounds: 1 so far. Round 1 CHANGES: hf_first_char invented `#` on one-line DESCRIPTION pages; `_split_code` dropped the line break after a closing fence (13 chunks); rebase on main; `duplicate_sources` in Document metadata; missing `images`. All fixed; fixing them also found and fixed oversized re-fenced parts, indented fences losing their indent at chunk starts, and unclosed fences at page ends.
+- Review rounds: 2. Round 1 CHANGES: hf_first_char invented `#` on one-line DESCRIPTION pages; `_split_code` dropped the line break after a closing fence (13 chunks); rebase on main; `duplicate_sources` in Document metadata; missing `images`. All fixed; fixing them also found and fixed oversized re-fenced parts, indented fences losing their indent at chunk starts, and unclosed fences at page ends. Round 2 APPROVE.
