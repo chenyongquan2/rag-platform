@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -41,6 +41,39 @@ _RESERVED_LOCK = threading.Lock()
 # Running total per resolved ledger path: (bytes already read, CNY in those bytes).
 _TOTALS: dict[str, tuple[int, float]] = {}
 _TOTALS_LOCK = threading.Lock()
+
+RecordListener = Callable[[dict[str, Any]], None]
+# Called with every row after it is written (spec P0-11: token and cost metrics).
+_RECORD_LISTENERS: list[RecordListener] = []
+_LISTENERS_LOCK = threading.Lock()
+
+
+def add_record_listener(listener: RecordListener) -> Callable[[], None]:
+    """Call `listener(row)` after every ledger line written in this process, by any ledger
+    object; returns a function that removes it.
+
+    A listener that raises is logged and ignored: the line is already written and the model
+    call already made, so metrics must never turn it into a failure.
+    """
+    with _LISTENERS_LOCK:
+        _RECORD_LISTENERS.append(listener)
+
+    def remove() -> None:
+        with _LISTENERS_LOCK:
+            if listener in _RECORD_LISTENERS:
+                _RECORD_LISTENERS.remove(listener)
+
+    return remove
+
+
+def _notify_listeners(row: dict[str, Any]) -> None:
+    with _LISTENERS_LOCK:
+        listeners = list(_RECORD_LISTENERS)
+    for listener in listeners:
+        try:
+            listener(dict(row))
+        except Exception as exc:
+            logger.warning("cost ledger listener %r failed: %s", listener, exc, exc_info=True)
 
 
 def _line_cny(line: bytes, path: Path) -> float:
@@ -150,6 +183,7 @@ class CostLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._thread_lock, self._file_lock(), self.path.open("a", encoding="utf-8") as fh:
             fh.write(line)
+        _notify_listeners(row)
         return row
 
     def entries(self) -> list[dict[str, Any]]:

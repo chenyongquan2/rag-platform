@@ -6,6 +6,7 @@ from rag.cost.ledger import (
     LedgerSummary,
     ModelTotals,
     UnknownModelPriceError,
+    add_record_listener,
     check_budget,
     total_spent,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "LedgerSummary",
     "ModelTotals",
     "UnknownModelPriceError",
+    "add_record_listener",
     "check_budget",
     "total_spent",
 ]

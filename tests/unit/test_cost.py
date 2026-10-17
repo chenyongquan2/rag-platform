@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from datetime import datetime
@@ -16,6 +17,7 @@ from rag.cost import (
     BudgetExceeded,
     CostLedger,
     UnknownModelPriceError,
+    add_record_listener,
     check_budget,
     total_spent,
 )
@@ -62,6 +64,33 @@ def test_record_appends_json_line_with_cny(tmp_path: Path) -> None:
     prices = ServiceSettings(_env_file=None).model_prices
     assert prices["qwen/text-embedding-v4"].input_cny_per_m == 0.5
     assert "deepseek-v4-flash" in prices
+
+
+def test_record_listeners_get_rows_and_never_break_the_ledger(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Spec P0-11: listeners feed the token and cost metrics; a failing one is only logged."""
+    ledger = _ledger(tmp_path)
+    seen: list[dict] = []
+
+    def broken(row: dict) -> None:
+        raise RuntimeError("listener bug")
+
+    remove_broken = add_record_listener(broken)
+    remove_seen = add_record_listener(seen.append)
+    try:
+        with caplog.at_level(logging.WARNING, logger="rag.cost.ledger"):
+            row = ledger.record(kind="chat", model="chat", prompt_tokens=10, completion_tokens=2)
+    finally:
+        remove_broken()
+        remove_seen()
+    assert seen == [row]
+    assert [r["prompt_tokens"] for r in _rows(ledger.path)] == [10]
+    assert "listener bug" in caplog.text
+
+    ledger.record(kind="chat", model="chat", prompt_tokens=5)
+    assert len(seen) == 1  # removed listeners are not called again
+    remove_seen()  # removing twice is harmless
 
 
 def test_unknown_model_price_is_rejected(tmp_path: Path) -> None:
