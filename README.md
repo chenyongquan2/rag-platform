@@ -76,3 +76,26 @@ timeout) and every attempt reserves its estimated cost and writes its usage to t
 `rag.llm.structured_output(model, Schema)` returns Pydantic objects via `function_calling` (the
 gateway rejects `json_schema`). `CHAT_BACKEND=fake` switches every profile to a `FakeChatModel`
 with a fixed reply; it is never switched automatically.
+
+## Retrieval evaluation
+
+Any retriever with `retrieve(question, kb, top_k) -> RetrievalResult` can be evaluated
+(`rag.eval.retrieval.Retriever`); `RetrievalResult.routes` carries each route's own list for
+per-route metrics. Question sets live in `evals/datasets/<kb>/` as JSONL with page labels
+(doc_ids) and optional chunk labels; the 65 HF questions are
+`evals/datasets/hf_docs/huggingface_doc_qa_eval.jsonl`.
+
+```python
+record = run_retrieval_eval(retriever, load_question_set(path, kb=cfg.kb), kb_config=cfg)
+write_run(record, public=True)   # evals/reports/public/<run_id>/ (private/ is git-ignored)
+```
+
+```bash
+uv run python -m rag.eval.retrieval compare <run_a> <run_b>   # McNemar, permutation, changed questions
+uv run python -m rag.eval.retrieval export-hf                 # rewrite the HF question set
+```
+
+A run records Hit@k, MRR, nDCG@k (ideal DCG capped at k) and Recall@k at page and chunk level for
+the final list and each route, latency, git commit, KB config, index version, data generation,
+question-set hash, model ids and the `uv.lock` hash. `rerank_latency_curve` measures a reranker
+for rerank_n 10, 20, 30.
