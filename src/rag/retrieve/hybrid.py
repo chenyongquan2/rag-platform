@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -60,6 +60,7 @@ logger = logging.getLogger(__name__)
 
 BM25 = "bm25"
 VECTOR = "vector"
+ROUTES: tuple[str, ...] = (BM25, VECTOR)
 TIMEOUT = "timeout"
 EMBED_TIMEOUT = "embedding: timeout"
 
@@ -137,9 +138,16 @@ class EsHybridRetriever(BaseRetriever):
         es_margin_ms: int,
         es_reserve_ratio: float = 0.2,
         embed_threads: int = DEFAULT_EMBED_THREADS,
+        routes: Sequence[str] = ROUTES,
         callback_manager: CallbackManager | None = None,
     ) -> None:
         super().__init__(callback_manager=callback_manager)
+        unknown = [r for r in routes if r not in ROUTES]
+        if unknown or not routes:
+            raise ValueError(f"routes must be a non-empty subset of {ROUTES}, got {list(routes)}")
+        self.routes = tuple(r for r in ROUTES if r in routes)
+        """Routes this retriever sends (both by default; one for a single-route eval run, P0-12).
+        A route left out here is not a failed route: the result is not degraded."""
         if es_reserve_ms < 0 or es_margin_ms < 0:
             raise ValueError("es_reserve_ms and es_margin_ms must be >= 0")
         if not 0 <= es_reserve_ratio < 1:
@@ -342,15 +350,27 @@ class EsHybridRetriever(BaseRetriever):
             )
 
         start = time.perf_counter()
-        vector, vector_error = self._embed(query)
+        vector, vector_error = self._embed(query) if VECTOR in self.routes else (None, None)
         embedded = time.perf_counter()
         trace.timings_ms["embed"] = (embedded - start) * 1000.0
         if vector_error is not None:
             trace.failed_routes[VECTOR] = vector_error
 
-        searches = [(BM25, self.bm25_body(query.query_str, es_filter))]
+        searches: list[tuple[str, dict[str, Any]]] = []
+        if BM25 in self.routes:
+            searches.append((BM25, self.bm25_body(query.query_str, es_filter)))
         if vector is not None:
             searches.append((VECTOR, self.knn_body(vector, es_filter)))
+        if not searches:  # vector-only retriever whose query embedding failed
+            raise RetrievalError(
+                f"no retrieval route answered on {self.index}: {dict(trace.failed_routes)}",
+                category=(
+                    ErrorCategory.RETRIEVAL_TIMEOUT
+                    if all(_is_timeout(r) for r in trace.failed_routes.values())
+                    else ErrorCategory.RETRIEVAL_FAILED
+                ),
+                route_errors=dict(trace.failed_routes),
+            )
         responses = self._msearch(query, searches, trace)
         searched = time.perf_counter()
         trace.timings_ms["search"] = (searched - embedded) * 1000.0

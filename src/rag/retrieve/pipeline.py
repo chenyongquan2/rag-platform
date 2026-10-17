@@ -35,7 +35,7 @@ from rag.ingest.tokens import load_tokenizer
 from rag.retrieve.context import ContextExpander, ContextMode, ContextReader, TokenCounter
 from rag.retrieve.deadline import Deadline
 from rag.retrieve.dedupe import TextDedupe
-from rag.retrieve.hybrid import EsHybridRetriever
+from rag.retrieve.hybrid import ROUTES, EsHybridRetriever
 from rag.retrieve.rerank import BatchedTimeoutRerank, RerankRunner, get_rerank_runner
 from rag.retrieve.search import HybridSearch, acl_group_tuple, hybrid_parts
 from rag.retrieve.threshold import RerankThreshold
@@ -148,6 +148,7 @@ def make_search_pipeline(
     redis: Redis | None = None,
     runner: RerankRunner | None = None,
     count_tokens: TokenCounter | None = None,
+    routes: Sequence[str] = ROUTES,
 ) -> SearchPipeline:
     """The chain over alias `<index_prefix>kb_<kb>` (checks as `make_hybrid_search`).
 
@@ -156,7 +157,13 @@ def make_search_pipeline(
     `cfg.retrieval` (`rerank_n`, `threshold`, `expand`, `expand_window`, `expand_max_tokens`).
     """
     retriever, generation, es, embed_id = hybrid_parts(
-        cfg, settings, index_prefix=index_prefix, es=es, embed_model=embed_model, redis=redis
+        cfg,
+        settings,
+        index_prefix=index_prefix,
+        es=es,
+        embed_model=embed_model,
+        redis=redis,
+        routes=routes,
     )
     retrieval = cfg.retrieval
     reader = ContextReader(

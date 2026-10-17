@@ -429,3 +429,56 @@ def test_cache_miss_and_slow_gateway_still_leave_time_for_bm25() -> None:
     # At most half of what is left goes to the margin; ES gets the other half.
     assert per_search_ms >= remaining_ms / 2 - 1
     assert per_search_ms < remaining_ms
+
+
+class _CountingEmbedding(FakeEmbedding):
+    calls: int = 0
+
+    def _get_query_embedding(self, query: str) -> Embedding:
+        self.calls += 1
+        return super()._get_query_embedding(query)
+
+
+@pytest.mark.parametrize("route", [BM25, VECTOR])
+def test_single_route_sends_one_search(route: str) -> None:
+    """Spec P0-12 AC3: a single-route retriever sends only that search, skips the query
+    embedding when the vector route is off, and is not degraded."""
+    es = FakeMsearchClient(bm25=BM25_HITS, vector=VECTOR_HITS)
+    embed = _CountingEmbedding(dim=DIM)
+    retriever = EsHybridRetriever(
+        es,
+        embed,
+        kb=KB,
+        index=ALIAS,
+        config=RetrievalConfig(),
+        es_reserve_ms=100,
+        es_margin_ms=200,
+        routes=(route,),
+    )
+    query = _query()
+    nodes = retriever.retrieve(query)
+
+    (call,) = es.calls
+    bodies = call["searches"][1::2]
+    assert len(bodies) == 1
+    assert ("knn" in bodies[0]) is (route == VECTOR)
+    assert embed.calls == (1 if route == VECTOR else 0)
+    assert set(query.trace.routes) == {route}
+    assert query.trace.degraded is False
+    assert query.trace.failed_routes == {}
+    expected = [h.chunk_id for h in query.trace.routes[route]]
+    assert [n.node.node_id for n in nodes] == expected
+
+
+def test_unknown_route_is_refused() -> None:
+    with pytest.raises(ValueError, match="route"):
+        EsHybridRetriever(
+            FakeMsearchClient(),
+            FakeEmbedding(dim=DIM),
+            kb=KB,
+            index=ALIAS,
+            config=RetrievalConfig(),
+            es_reserve_ms=100,
+            es_margin_ms=200,
+            routes=("sparse",),
+        )

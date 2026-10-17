@@ -33,7 +33,7 @@ from rag.index.names import KbIndexNames
 from rag.ingest.meta import title_parts
 from rag.retrieve.deadline import Deadline
 from rag.retrieve.dedupe import TextDedupe
-from rag.retrieve.hybrid import EsHybridRetriever
+from rag.retrieve.hybrid import ROUTES, EsHybridRetriever
 from rag.retrieve.query import HybridQuery
 from rag.retrieve.rerank import RERANK_SCORE
 from rag.types import Chunk, ContextPiece, RetrievalResult
@@ -239,6 +239,7 @@ def make_hybrid_search(
     es: Elasticsearch | None = None,
     embed_model: BaseEmbedding | None = None,
     redis: Redis | None = None,
+    routes: Sequence[str] = ROUTES,
 ) -> HybridSearch:
     """The chain over alias `<index_prefix>kb_<kb>` with the KB's retrieval config.
 
@@ -254,6 +255,7 @@ def make_hybrid_search(
         es=es,
         embed_model=embed_model,
         redis=redis,
+        routes=routes,
     )
     return HybridSearch(
         retriever,
@@ -271,6 +273,7 @@ def hybrid_parts(
     es: Elasticsearch | None = None,
     embed_model: BaseEmbedding | None = None,
     redis: Redis | None = None,
+    routes: Sequence[str] = ROUTES,
 ) -> tuple[EsHybridRetriever, Callable[[], int] | None, Elasticsearch, str]:
     """The retriever, the data-generation reader, the ES client and the embedding model id of
     `make_hybrid_search` (shared with `make_search_pipeline`)."""
@@ -312,5 +315,6 @@ def hybrid_parts(
         es_reserve_ratio=settings.search_es_reserve_ratio,
         es_margin_ms=settings.search_es_margin_ms,
         embed_threads=settings.embed_max_concurrency,
+        routes=routes,
     )
     return retriever, generation, es, expected
