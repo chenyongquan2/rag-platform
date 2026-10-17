@@ -84,17 +84,17 @@ def _error(category: str, request_id: str) -> JSONResponse:
     )
 
 
-async def _body[M: BaseModel](request: Request, model: type[M], request_id: str) -> M | None:
-    """The JSON body as `model`, or None (logged) when it is not valid JSON or does not fit."""
+async def _body[M: BaseModel](request: Request, model: type[M]) -> tuple[M | None, str]:
+    """The JSON body as `model`, or None and why (for the log) when it is not valid JSON or
+    does not fit."""
     try:
         data = await request.json()
-        return model.model_validate(data)
+        return model.model_validate(data), ""
     except ValidationError as exc:
         fields = sorted({".".join(str(p) for p in err["loc"]) for err in exc.errors()})
-        logger.info("request %s: body rejected, fields %s", request_id, fields)
+        return None, f"body rejected, fields {fields}"
     except (ValueError, UnicodeDecodeError):
-        logger.info("request %s: body is not JSON", request_id)
-    return None
+        return None, "body is not JSON"
 
 
 async def _call(fn: Callable[..., BaseModel], request_id: str, **kwargs: Any) -> JSONResponse:
@@ -121,14 +121,30 @@ def build_http_app(
         return JSONResponse({"status": "ok"})
 
     async def readyz(request: Request) -> JSONResponse:
+        # Counts, not names: a KB name would tell callers about KBs they may not see (s16-4).
         status = service.status()
-        return JSONResponse(status, status_code=200 if service.ready else 503)
+        states = list(status["knowledge_bases"].values())
+        body = {
+            "status": status["status"],
+            "load_s": status["load_s"],
+            "ready_kbs": states.count("ready"),
+            "unavailable_kbs": states.count("unavailable"),
+        }
+        return JSONResponse(body, status_code=200 if service.ready else 503)
+
+    async def reject(tool: str, request_id: str, detail: str) -> JSONResponse:
+        return await _call(
+            functools.partial(
+                service.reject, tool, category=ErrorCategory.INVALID_REQUEST, detail=detail
+            ),
+            request_id,
+        )
 
     async def search_docs(request: Request) -> JSONResponse:
         request_id = _request_id(request)
-        body = await _body(request, SearchRequest, request_id)
+        body, problem = await _body(request, SearchRequest)
         if body is None:
-            return _error(ErrorCategory.INVALID_REQUEST, request_id)
+            return await reject("search_docs", request_id, problem)
         return await _call(
             service.search_docs,
             request_id,
@@ -141,9 +157,9 @@ def build_http_app(
 
     async def get_context(request: Request) -> JSONResponse:
         request_id = _request_id(request)
-        body = await _body(request, ContextRequest, request_id)
+        body, problem = await _body(request, ContextRequest)
         if body is None:
-            return _error(ErrorCategory.INVALID_REQUEST, request_id)
+            return await reject("get_context", request_id, problem)
         return await _call(service.get_context, request_id, chunk_id=body.chunk_id, mode=body.mode)
 
     async def knowledge_bases(request: Request) -> JSONResponse:

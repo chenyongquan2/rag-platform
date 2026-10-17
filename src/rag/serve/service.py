@@ -248,6 +248,7 @@ class SearchService:
         self._lock = threading.Lock()
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
+        self._closed = False
         self.load_s: float | None = None
 
     # ---- lifecycle --------------------------------------------------------------------------
@@ -257,7 +258,8 @@ class SearchService:
         return self._state == "ready"
 
     def status(self) -> dict[str, Any]:
-        """`status`: starting, loading, ready or failed; per KB: loading, ready, unavailable."""
+        """`status`: starting, loading, ready, failed or closed; per KB: loading, ready,
+        unavailable (or failed). For logs and tests: `/readyz` shows only counts."""
         state = self._state
         kbs: dict[str, str] = {}
         for kb in sorted(self.configs):
@@ -266,7 +268,7 @@ class SearchService:
             elif kb in self._pipelines:
                 kbs[kb] = "ready"
             else:
-                kbs[kb] = "failed" if state == "failed" else "loading"
+                kbs[kb] = "loading" if state in ("starting", "loading") else "failed"
         return {"status": state, "load_s": self.load_s, "knowledge_bases": kbs}
 
     def start(self) -> None:
@@ -289,7 +291,9 @@ class SearchService:
         self._load()
 
     def _load(self) -> None:
-        """Load the reranker, then build each knowledge base's chain."""
+        """Load the reranker, then build each knowledge base's chain. When `close` came during
+        the load, stop before the next step and close what was built (this thread owns the
+        clients until it ends)."""
         began = time.perf_counter()
         logger.info(
             "search service loading: knowledge bases %s, settings %s",
@@ -300,24 +304,39 @@ class SearchService:
             self._builder.prepare()
         except Exception:
             logger.exception("search service could not load its models; answering not_ready")
-            self._state = "failed"
-            self._done.set()
+            self._finish("failed")
             return
         for kb, cfg in sorted(self.configs.items()):
+            if self._closed:
+                break
             try:
-                self._pipelines[kb] = self._builder.build(cfg)
+                pipeline = self._builder.build(cfg)
             except Exception:
                 logger.exception("knowledge base %s is unavailable", kb)
                 self._unavailable.add(kb)
+                continue
+            with self._lock:
+                self._pipelines[kb] = pipeline
         self.load_s = time.perf_counter() - began
-        self._state = "ready"
+        if self._finish("ready"):
+            logger.info(
+                "search service ready in %.1f s (reranker and %d knowledge bases; unavailable: %s)",
+                self.load_s,
+                len(self._pipelines),
+                sorted(self._unavailable) or "none",
+            )
+
+    def _finish(self, state: str) -> bool:
+        """End the load in `state`, or in `closed` (closing everything) when `close` came
+        meanwhile; True when the service took `state`."""
+        with self._lock:
+            closed = self._closed
+            self._state = "closed" if closed else state
+        if closed:
+            logger.info("search service closed during its load")
+            self._close_all()
         self._done.set()
-        logger.info(
-            "search service ready in %.1f s (reranker and %d knowledge bases; unavailable: %s)",
-            self.load_s,
-            len(self._pipelines),
-            sorted(self._unavailable) or "none",
-        )
+        return not closed
 
     def wait_ready(self, timeout_s: float | None = None) -> bool:
         self._done.wait(timeout_s)
@@ -327,12 +346,47 @@ class SearchService:
         return self._pipelines.get(kb)
 
     def close(self) -> None:
-        for pipeline in self._pipelines.values():
+        """Close the chains and clients (once). During a load this returns at once and the
+        load thread closes everything when its current step ends."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            loading = self._state == "loading"
+        if not loading:
+            self._state = "closed"
+            self._close_all()
+
+    def _close_all(self) -> None:
+        with self._lock:
+            pipelines = list(self._pipelines.values())
+            self._pipelines.clear()
+        for pipeline in pipelines:
             try:
                 pipeline.close()
             except Exception:
                 logger.warning("closing a search pipeline failed", exc_info=True)
-        self._builder.close()
+        try:
+            self._builder.close()
+        except Exception:
+            logger.warning("closing the pipeline builder failed", exc_info=True)
+
+    def reject(
+        self, tool: str, credentials: Credentials, *, request_id: str, category: str, detail: str
+    ) -> None:
+        """Answer a request the transport rejected before calling a tool (a body that is not
+        JSON or does not fit): same span, metric, log line and record as any failed call;
+        raises `ServiceError`."""
+        caller, _ = self._resolve(credentials, "", request_id)
+        with self._call(
+            tool,
+            request_id=request_id,
+            caller=caller,
+            cfg=None,
+            config_version="",
+            extra={"rejected": _clip(detail, RECORD_FILTERS_CHARS)},
+        ):
+            raise ServiceError(category, request_id, detail=detail)
 
     # ---- tools ------------------------------------------------------------------------------
 

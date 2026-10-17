@@ -114,7 +114,7 @@ def test_http_end_to_end(client: tuple[TestClient, Any], records_path: Path) -> 
         assert time.monotonic() - began < LOAD_TIMEOUT_S, "the service did not get ready"
         time.sleep(1.0)
     ready = http.get("/readyz").json()
-    assert ready["knowledge_bases"]["hf_docs"] == "ready" and ready["load_s"] > 0
+    assert ready["ready_kbs"] >= 1 and ready["load_s"] > 0
 
     t0 = time.perf_counter()
     r = http.post(

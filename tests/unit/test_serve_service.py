@@ -349,3 +349,21 @@ def test_error_and_other_tools_write_records(tmp_path: Path) -> None:
     assert listing["extra"]["knowledge_bases"] == ["hf_docs"]
     assert spans.count("search_docs") == 2
     assert {"get_context", "list_knowledge_bases"} <= set(spans)
+
+
+def test_close_during_load() -> None:
+    # Ctrl-C while the reranker loads: close() returns at once, the load thread stops before
+    # building chains and closes what was built; nothing raises.
+    gate = threading.Event()
+    builder = FakePipelineBuilder({"hf_docs": FakeSearchPipeline("hf_docs")}, prepare_gate=gate)
+    service = _service(builder=builder, load=False)
+    service.start()
+    service.close()
+    assert builder.closed is False  # the load thread owns the clients until it stops
+    gate.set()
+    assert not service.wait_ready(5)
+    assert service.status()["status"] == "closed"
+    assert builder.closed is True and service.pipeline("hf_docs") is None
+    err = _error(service.search_docs, CREDS, kb="hf_docs", query="q", deadline_ms=1000)
+    assert err.category == ErrorCategory.NOT_READY
+    service.close()  # twice is fine

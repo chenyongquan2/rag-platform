@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,7 +16,7 @@ from rag.observe import shutdown_observability
 from rag.serve.http_app import build_http_app
 from rag.serve.schema import ContextResponse, KnowledgeBaseList, SearchResponse
 from rag.serve.service import SearchService
-from rag.testing import observe_settings
+from rag.testing import memory_observability, observe_settings
 from rag.testing.serve import FakePipelineBuilder, FakeSearchPipeline
 
 ERROR_KEYS = {"error", "request_id", "message"}
@@ -137,5 +139,29 @@ def test_health_and_readiness() -> None:
         r = client.get("/readyz")
         assert r.status_code == 200
         assert r.json()["status"] == "ready"
-        assert r.json()["knowledge_bases"] == {"hf_docs": "ready"}
+        # Counts only: per-KB names would show KBs the caller may not see (s16-4).
+        assert r.json()["ready_kbs"] == 1 and r.json()["unavailable_kbs"] == 0
+        assert "knowledge_bases" not in r.json()
         assert client.get("/healthz").status_code == 200
+
+
+def test_rejected_bodies_write_records(tmp_path: Path) -> None:
+    # A body rejected before the service runs still gets a request span and a record line.
+    path = tmp_path / "records.jsonl"
+    with memory_observability(business_record_path=str(path)) as obs:
+        service = _service()
+        with TestClient(build_http_app(service)) as client:
+            assert service.wait_ready(5)
+            r = client.post(
+                "/v1/search_docs", json={"kb": "hf_docs", "x": 1}, headers={"X-Request-Id": "b-1"}
+            )
+            _error(r, 400, "invalid_request")
+            _error(client.post("/v1/get_context", content=b"{"), 400, "invalid_request")
+        spans = [s.name for s in obs.span_exporter.get_finished_spans()]
+    records = [json.loads(line) for line in path.read_text("utf-8").splitlines()]
+    assert [(r["tool"], r["flags"]) for r in records] == [
+        ("search_docs", ["invalid_request"]),
+        ("get_context", ["invalid_request"]),
+    ]
+    assert records[0]["request_id"] == "b-1" and records[0]["trace_id"]
+    assert {"search_docs", "get_context"} <= set(spans)

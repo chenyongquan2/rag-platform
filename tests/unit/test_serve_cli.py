@@ -55,7 +55,9 @@ def test_stdio_and_http_start_the_load_and_run(monkeypatch: pytest.MonkeyPatch) 
         "run_http": run_http,
     }
     assert cli.main(["stdio"], **common) == 0
-    assert created[0].wait_ready(5)  # stdio starts the load itself, in the background
+    # stdio starts the load itself (in the background); main closes the service on exit.
+    created[0].wait_ready(5)
+    assert created[0].status()["status"] == "closed"
     assert cli.main(["http", "--port", "1234"], **common) == 0
 
     assert ran[0] == ("obs", cli.SERVICE_NAME)
