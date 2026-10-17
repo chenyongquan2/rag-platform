@@ -43,3 +43,7 @@ eval:
   dir: evals/datasets/hf_docs
 access:
   callers: ["*"]
+answer:
+  context_tokens: 4000   # estimated tokens of all numbered fragments (s10-3)
+  language: auto         # answer in the question's language; zh or en fixes it (s8-4)
+  parse_retries: 1       # one more model call when the answer cites no fragment (s11-1)

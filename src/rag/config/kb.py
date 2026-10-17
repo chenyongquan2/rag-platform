@@ -7,7 +7,7 @@ Unknown keys are rejected so a typo in YAML fails loudly instead of silently usi
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -151,6 +151,20 @@ class AccessConfig(_Strict):
     callers: list[str] = Field(default_factory=list)
 
 
+class AnswerConfig(_Strict):
+    """Answer generation (design s10-3, s11-1, s8-4; spec P1-02).
+
+    - `context_tokens`: estimated tokens of all numbered fragments together (s10-3).
+    - `language`: `auto` answers in the question's language; `zh` / `en` fix it for this
+      knowledge base (s8-4).
+    - `parse_retries`: extra model calls when an answer cites no fragment at all (s11-1).
+    """
+
+    context_tokens: int = Field(default=4000, gt=0)
+    language: Literal["auto", "zh", "en"] = "auto"
+    parse_retries: int = Field(default=1, ge=0)
+
+
 class KnowledgeBaseConfig(_Strict):
     kb: str = Field(default="default", pattern=r"^[a-z0-9][a-z0-9_-]*$")
     source: SourceConfig = Field(default_factory=SourceConfig)
@@ -161,6 +175,7 @@ class KnowledgeBaseConfig(_Strict):
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
     access: AccessConfig = Field(default_factory=AccessConfig)
+    answer: AnswerConfig = Field(default_factory=AnswerConfig)
 
     @model_validator(mode="after")
     def _default_eval_dir(self) -> Self:
