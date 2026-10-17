@@ -38,8 +38,9 @@ _EN_RULES = (
     "1. Respond only to the question asked. Use only facts stated in the fragments, never "
     "outside knowledge.",
     "2. End every sentence with the numbers of the fragments it is based on, in square "
-    'brackets, for example: "The pipeline runs on the GPU when `device=0` is set [2]." Cite '
-    "several fragments as [1][3].",
+    "brackets with a space before the bracket, for example: "
+    '"The pipeline runs on the GPU when `device=0` is set [2]." Cite several fragments as '
+    "[1][3].",
     "3. If the answer cannot be deduced from the fragments, output exactly this sentence and "
     f"nothing else: {NOT_FOUND['en']}",
     "4. Answer in English. Keep names of functions, classes, parameters, commands and code "
@@ -103,7 +104,8 @@ _VALID_RANGE: dict[AnswerLanguage, tuple[str, str]] = {
 _RETRY_RULE: dict[AnswerLanguage, str] = {
     "en": (
         " Answer the question again following the rules: end every sentence with the numbers of "
-        "the fragments it is based on, in square brackets, like [n], or output exactly: "
+        "the fragments it is based on, in square brackets with a space before the bracket, like "
+        "[n], or output exactly: "
         f"{NOT_FOUND['en']}"
     ),
     "zh": (

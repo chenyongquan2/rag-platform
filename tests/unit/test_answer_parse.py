@@ -159,3 +159,26 @@ def test_parse_not_found_variant_beside_cited_sentences_is_dropped() -> None:
     parsed = parse_answer("A is B [1]. The fragments do not mention C.")
     assert not parsed.not_found
     assert [s.text for s in parsed.sentences] == ["A is B."]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A cited "does not mention" sentence is an answer backed by a fragment, not "not found".
+        (
+            "The documentation does not mention a GPU requirement [1].",
+            [("The documentation does not mention a GPU requirement.", [1])],
+        ),
+        ("文档中没有提到超时参数[2]。", [("文档中没有提到超时参数。", [2])]),
+        (
+            "The fragments do not mention C [1]. I'm sorry.",
+            [("The fragments do not mention C.", [1]), ("I'm sorry.", [])],
+        ),
+    ],
+)
+def test_parse_keeps_cited_not_found_statements(
+    text: str, expected: list[tuple[str, list[int]]]
+) -> None:
+    parsed = parse_answer(text)
+    assert not parsed.not_found
+    assert [(s.text, list(s.markers)) for s in parsed.sentences] == expected

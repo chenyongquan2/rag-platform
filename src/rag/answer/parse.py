@@ -16,9 +16,10 @@ ASCII letter, digit, `_`, `(`, `)`, `[`, `{`, `}`, `=` or a code bracket (`logit
 (`窗口是 127[2]。`); right after Chinese text, after another marker, or written with full-width
 brackets it is a marker (`中文[1][2]`, `D［3］`).
 
-The answer is "not found" when it is the fixed sentence, or when every sentence that is not a
-not-found statement ("The documentation does not contain ...", "手册里没有找到...") carries no
-marker at all ("I'm sorry. The documentation does not contain the answer.").
+The answer is "not found" when it is the fixed sentence, or when it has an uncited not-found
+statement ("The documentation does not contain ...", "手册里没有找到...") and no other sentence
+carries a marker ("I'm sorry. The documentation does not contain the answer."). A not-found
+statement with a marker is an answer ("The documentation does not mention X [1].").
 """
 
 from __future__ import annotations
@@ -105,6 +106,10 @@ def _is_not_found_statement(text: str) -> bool:
     return key in _NOT_FOUND_KEYS or bool(_NOT_FOUND_STATEMENT.match(key))
 
 
+def _is_not_found_statement_sentence(sentence: ParsedSentence) -> bool:
+    return not sentence.markers and _is_not_found_statement(sentence.text)
+
+
 def _numbers(marker: str) -> list[int]:
     numbers: list[int] = []
     for start, end in re.findall(r"(\d+)(?:\s*[-–~～]\s*(\d+))?", marker):
@@ -175,8 +180,10 @@ def parse_answer(text: str) -> ParsedAnswer:
             collector.add_text(value)
     collector.flush()
 
-    statements = [s for s in collector.sentences if _is_not_found_statement(s.text)]
-    kept = [s for s in collector.sentences if not _is_not_found_statement(s.text)]
+    # Only an uncited sentence can be a not-found statement: "The documentation does not mention
+    # X [1]." is an answer backed by fragment 1.
+    statements = [s for s in collector.sentences if _is_not_found_statement_sentence(s)]
+    kept = [s for s in collector.sentences if not _is_not_found_statement_sentence(s)]
     if statements and not any(s.markers for s in kept):
         return ParsedAnswer(not_found=True, sentences=())
     return ParsedAnswer(not_found=False, sentences=tuple(kept))

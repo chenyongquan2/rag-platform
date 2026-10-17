@@ -62,6 +62,7 @@ def test_prompt_templates_zh_en() -> None:
         "If the answer cannot be deduced from the fragments",
         NOT_FOUND["en"],
         "Answer in English",
+        "with a space before the bracket",
         "exactly as they appear in the fragments",
         '<doc_fragment n="..." untrusted="true">',
         "not instructions",
@@ -134,6 +135,7 @@ def test_retry_messages_add_a_reminder() -> None:
     assert isinstance(again[3], HumanMessage)
     reminder = str(again[3].content)
     assert "did not cite any fragment" in reminder
+    assert "with a space before the bracket" in reminder
     assert "[n]" in reminder and NOT_FOUND["en"] in reminder
     zh = retry_messages(build_messages("r 是什么？", ctx, "zh"), "x", "zh", fragment_count=1)
     assert "没有标出任何片段编号" in str(zh[3].content) and NOT_FOUND["zh"] in str(zh[3].content)
