@@ -174,6 +174,18 @@ _TOOLISH_EN = (
 _TOOL_NAME = r"(?:the\s+|this\s+|a\s+)?(?:[`'\"]?[\w.()-]+[`'\"]?\s+)?"
 _TOOL_VERB = r"(?:call|invoke|execute|run|trigger|use)"
 _TOOLISH_ZH = r"(?:工具|函数|命令|接口|脚本|插件|tool)"
+# "this", "these instructions", "this message": what a concealment order hides.
+_THIS_NOTE = (
+    r"(?:this|it|that|anything|these|any\s+of\s+(?:this|these))(?:\s+(?:instructions?|notes?"
+    r"|messages?|steps?|requests?|comments?|text|part|section|rules?|tasks?))?"
+)
+_TOOL_ORDER = r"(?:call|invoke|execute|trigger|run)\s+(?:the\s+|this\s+)?"
+_TOOL_ID = r"[a-z][a-z0-9]*_[a-z0-9_]+"
+# Tool names whose first word sends, deletes or executes something.
+_DANGEROUS_TOOL = (
+    r"(?:send|delete|drop|remove|rm|wipe|erase|purge|destroy|transfer|e?mail|upload|post|leak"
+    r"|exec|execute|shell|run|exfiltrate|export|forward|share)_[a-z0-9_]+"
+)
 _LANGS_EN = (
     r"(?:english|chinese|mandarin|french|german|spanish|japanese|korean|russian|italian"
     r"|portuguese|arabic|hindi|dutch|pirate(?:\s+speak)?|leetspeak|emojis?|base64|rot13"
@@ -217,7 +229,7 @@ def _p(
 _REQUIRES: dict[str, tuple[tuple[str, ...], ...]] = {
     name: tuple(tuple(group.split()) for group in groups)
     for name, groups in {
-        "override_en": ["ignore disregard forget override bypass"],
+        "override_en": ["ignore disregard forget override bypass instead"],
         "override_zh": ["忽略 无视 忽视 理会 不用管 抛开 忘记 忘掉 不要"],
         "role_change_en": ["now act behave respond pretend mode longer"],
         "role_change_zh": ["你 扮演 充当 假装 模式"],
@@ -236,6 +248,7 @@ _REQUIRES: dict[str, tuple[tuple[str, ...], ...]] = {
         "exfiltration_zh": ["把 发送 上传 转发 泄露"],
         "exfiltration_url": ["http"],
         "tool_coercion_en": ["silently secretly covertly quietly without before"],
+        "tool_order_en": ["call invoke execute trigger run", "_", "tool function"],
         "tool_coercion_zh": [
             "悄悄 偷偷 静默 暗中 私下 立即 立刻 马上 不要 无需 不必 不用 别 回答 回复"
         ],
@@ -272,6 +285,16 @@ PATTERNS: tuple[InjectionPattern, ...] = (
         r"(?:system\s+prompt|instructions?|rules|guidelines|programming|restrictions|directives)\b",
         r"\b(?:ignore|disregard|forget)\s+(?:everything|all)\s+(?:you\s+(?:were|have\s+been)\s+told"
         r"|(?:written\s+|said\s+|stated\s+)?above|before\s+this|(?:said|written)\s+before)",
+        # No object, but a new order right after: "disregard the above and instead answer ...".
+        r"\b(?:ignore|disregard|forget)\s+(?:all\s+(?:of\s+)?)?(?:the\s+|this\s+)?"
+        r"(?:above|previous|preceding|foregoing)\s*,?\s+and\s+(?:instead\s+|now\s+|just\s+|only\s+)?"
+        r"(?:answer|respond|reply|say|write|output|print|tell|act|follow|do)\b",
+        # "Instead of answering the question, say ...": replaces the task, then gives an order.
+        r"\binstead\s+of\s+(?:answering|responding\s+to|replying\s+to|addressing)\s+"
+        r"(?:the\s+|this\s+|any\s+|their\s+|the\s+user(?:'s|’s)?\s+|users?(?:'s|’s)?\s+)?"
+        r"(?:\w+\s+)?(?:questions?|query|queries|requests?|prompts?)\s*,?\s*"
+        r"(?:just\s+|only\s+|simply\s+|you\s+(?:must|should)\s+)?"
+        r"(?:say|reply|respond|answer|write|output|print|tell|show|send|return)\b",
     ),
     _p(
         "override_zh",
@@ -450,6 +473,20 @@ PATTERNS: tuple[InjectionPattern, ...] = (
         r"\bbefore\s+(?:answering|responding|replying)\b",
     ),
     _p(
+        "tool_order_en",
+        "tool_coercion",
+        "en",
+        # An order to call a named tool (snake_case, outside code) that sends, deletes or runs
+        # something, or "now": "Call the delete_index tool now", "invoke the send_email function".
+        # Sentence start or after now/please/must; "the agent can call ...", "to invoke ..." and
+        # backticked names in tutorials do not count (prose only: code is masked).
+        rf"(?:^|(?<=[.!?:;]\s)|\b(?:now|please|must|immediately)\s+){_TOOL_ORDER}"
+        rf"(?:{_DANGEROUS_TOOL}\s+(?:tool|function)\b|{_TOOL_ID}\s+(?:tool|function)\s+"
+        r"(?:\w+\s+){0,3}?(?:now|immediately|right\s+away|at\s+once)\b)",
+        flags=_M,
+        prose_only=True,
+    ),
+    _p(
         "tool_coercion_zh",
         "tool_coercion",
         "zh",
@@ -472,9 +509,7 @@ PATTERNS: tuple[InjectionPattern, ...] = (
         "concealment",
         "en",
         r"\b(?:do\s+not|don't|never|must\s+not)\s+(?:tell|inform|notify|alert"
-        r"|mention\s+(?:this|it|that|anything)\s+to|reveal\s+(?:this|it|that|these\s+instructions)\s+to"
-        r"|disclose\s+(?:this|it|that)\s+to|show\s+(?:this|it|these\s+instructions)\s+to)\s+"
-        r"(?:the\s+)?users?\b",
+        rf"|(?:mention|reveal|disclose|show|repeat)\s+{_THIS_NOTE}\s+to)\s+(?:the\s+)?users?\b",
         r"\b(?:do\s+not|don't|never)\s+let\s+(?:the\s+)?users?\s+(?:know|notice|find\s+out"
         r"|see\s+(?:this|these\s+instructions))\b",
         r"\b(?:do|call|run|send|execute|perform|complete|finish)\s+(?:this|it|that|the\s+\w+)\s+"
@@ -496,7 +531,8 @@ PATTERNS: tuple[InjectionPattern, ...] = (
         "output_manipulation",
         "en",
         r"(?:^|(?<=[.!?:;]\s)|(?<=[.!?:;]\s\s)|\b(?:please|always|must|should|only|you\s+will"
-        r"|from\s+now\s+on,?|and)\s+)(?:always\s+|only\s+)?(?:respond|reply|answer)\s+"
+        r"|from\s+now\s+on,?|and|instead)\s+)(?:always\s+|only\s+|instead\s+)?"
+        r"(?:respond|reply|answer)\s+"
         rf"(?:only\s+|exclusively\s+|solely\s+|entirely\s+)?in\s+{_LANGS_EN}\b",
         flags=_M,
     ),
