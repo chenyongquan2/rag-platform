@@ -83,11 +83,14 @@ Any retriever with `retrieve(question, kb, top_k) -> RetrievalResult` can be eva
 (`rag.eval.retrieval.Retriever`); `RetrievalResult.routes` carries each route's own list for
 per-route metrics. Question sets live in `evals/datasets/<kb>/` as JSONL with page labels
 (doc_ids) and optional chunk labels; the 65 HF questions are
-`evals/datasets/hf_docs/huggingface_doc_qa_eval.jsonl`.
+`evals/datasets/hf_docs/huggingface_doc_qa_eval.jsonl` (source, license and changes in
+the `NOTICE.md` next to it).
 
 ```python
+cfg = load_kb_config(cfg_path, kb_root=settings.kb_dir)
 record = run_retrieval_eval(retriever, load_question_set(path, kb=cfg.kb), kb_config=cfg)
-write_run(record, public=True)   # evals/reports/public/<run_id>/ (private/ is git-ignored)
+# evals/reports/public/<run_id>/ for kb/public/ configs, else the git-ignored private/
+write_run(record, public=is_public_kb_file(cfg_path, settings.kb_dir))
 ```
 
 ```bash
@@ -97,5 +100,6 @@ uv run python -m rag.eval.retrieval export-hf                 # rewrite the HF q
 
 A run records Hit@k, MRR, nDCG@k (ideal DCG capped at k) and Recall@k at page and chunk level for
 the final list and each route, latency, git commit, KB config, index version, data generation,
-question-set hash, model ids and the `uv.lock` hash. `rerank_latency_curve` measures a reranker
+question-set hash, model ids and the `uv.lock` hash. A k larger than the final list is capped
+at its length (with a warning). `rerank_latency_curve` measures a reranker
 for rerank_n 10, 20, 30.
