@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterator, Mapping
 from typing import Any, Literal, Self
@@ -185,6 +186,19 @@ class ServiceSettings(BaseSettings):
     embed_model: str = "qwen/text-embedding-v4"
     embed_dim: int = Field(default=1024, gt=0)
     reranker_model: str = "BAAI/bge-reranker-base"
+
+    # Reranker (spec P0-08, design s10-1). One local cross-encoder per process, loaded from the
+    # local HF cache only (`local_files_only`; also set HF_HUB_OFFLINE=1). `reranker_max_length`
+    # is the model's 512 positions for question + title path + chunk. Candidates go in batches
+    # of `rerank_batch_size`; the remaining deadline is checked after each batch. At most
+    # `rerank_max_concurrency` requests rerank at the same time (default: half the logical
+    # CPUs); the others wait, and the wait counts against their deadline.
+    reranker_device: str = "cpu"
+    reranker_max_length: int = Field(default=512, gt=0, le=512)
+    rerank_batch_size: int = Field(default=8, gt=0)
+    rerank_max_concurrency: int = Field(
+        default_factory=lambda: max(1, (os.cpu_count() or 2) // 2), ge=1
+    )
 
     # Embedding client (spec P0-05, design s7-4, s16-2, s17-1). Ingest and query share model,
     # dims, prefix and batch size; only timeout, retries and backoff differ by profile.

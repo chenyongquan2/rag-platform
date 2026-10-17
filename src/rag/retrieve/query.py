@@ -13,10 +13,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from llama_index.core.schema import QueryBundle
+from llama_index.core.schema import NodeWithScore, QueryBundle
 
 from rag.retrieve.deadline import Deadline
-from rag.types import RouteHit
+from rag.types import RouteHit, ThresholdDecision
 
 
 @dataclass
@@ -35,6 +35,20 @@ class RetrievalTrace:
     candidates_after_dedupe: int | None = None
     duplicates: dict[str, str] = field(default_factory=dict)
     """Removed chunk id -> the kept chunk id with the same body (TextDedupe)."""
+    rerank_candidates: int | None = None
+    """Candidates sent to the reranker (the first `rerank_n` after dedupe)."""
+    rerank: list[RouteHit] = field(default_factory=list)
+    """The scored candidates, best first, score = rerank score (BatchedTimeoutRerank)."""
+    rerank_timeout: bool = False
+    """The deadline stopped the reranker before every candidate was scored (s10-1)."""
+    threshold: ThresholdDecision | None = None
+    not_found: bool = False
+    below_threshold: list[NodeWithScore] = field(default_factory=list)
+    """With `not_found`: the best nodes by rerank score (RerankThreshold, s10-2)."""
+    expanded: int = 0
+    """Context pieces added by the ContextExpander."""
+    expand_error: str | None = None
+    """Why expansion was skipped (`deadline` or the ES error's class name)."""
     timings_ms: dict[str, float] = field(default_factory=dict)
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 class ErrorCategory(StrEnum):
@@ -36,6 +36,15 @@ class AnswerStatus(StrEnum):
     NOT_FOUND = "not_found"
 
 
+class ContextPiece(BaseModel):
+    """Text of another chunk of the same page, added around a retrieved chunk (design s10-3,
+    s7-2): a neighbour (same doc_id, chunk_index nearby) or a chunk of its heading section."""
+
+    chunk_id: str
+    chunk_index: int
+    text: str
+
+
 class Chunk(BaseModel):
     """One retrieved segment. `text` is source content and is always untrusted (design s16-1)."""
 
@@ -53,7 +62,32 @@ class Chunk(BaseModel):
     """The score of the list the chunk came from: from the hybrid retriever, the RRF fusion
     score (sum of 1 / (k + rank) over the routes, s9-3), not a BM25 score or a similarity;
     each route's own rank and score are in `metadata["route_ranks"]` / `["route_scores"]`."""
+    rerank_score: float | None = None
+    """The cross-encoder's score in [0, 1] (sigmoid, s10-2), comparable across knowledge bases;
+    None when the chunk was not reranked (rerank off, or `rerank_timeout` before its batch).
+    `score` keeps the fusion score."""
+    context: list[ContextPiece] = Field(default_factory=list)
+    """Neighbour or section chunks added by context expansion, in page order (s10-3)."""
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ThresholdDecision(BaseModel):
+    """What the rerank-score threshold did to one request's list (design s9-1, s10-2, s16-8).
+
+    Only chunks with a rerank score are judged; chunks left unscored by a rerank timeout are
+    kept. `applied` is False when no chunk had a rerank score (nothing was judged); `passed`
+    says whether the best rerank score reached the threshold (None without scores); `kept` and
+    `dropped` count chunks before the top_k cut.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    threshold: float
+    top_score: float | None = None
+    applied: bool = True
+    passed: bool | None = None
+    kept: int = 0
+    dropped: int = 0
 
 
 class _ResultMeta(BaseModel):
@@ -101,6 +135,39 @@ class RetrievalResult(_ResultMeta):
     traces (s9-1, s14-1). Serialized like every other field; the search_docs response (P0-09)
     leaves it out at its boundary (`model_dump(exclude={"routes"})`), so tool callers do not
     pay for about 40 extra doc ids per call."""
+    rerank: list[RouteHit] = Field(default_factory=list)
+    """The reranker's own list: every candidate it scored, best first, `score` = rerank score
+    (before the threshold and the top_k cut; for business records and eval). Left out of the
+    search_docs response like `routes`."""
+    threshold: ThresholdDecision | None = None
+    """What the rerank threshold did; None when the chain has no threshold step."""
+    not_found: bool = False
+    """No chunk reached the rerank threshold (s10-2): `chunks` is empty, the best ones are in
+    `below_threshold`. Not an error category."""
+    below_threshold: list[Chunk] = Field(default_factory=list)
+    """With `not_found`: the best chunks by rerank score (3 by default), kept apart from
+    `chunks` so callers can show "nearest matches" without treating them as found."""
+    config_version: str = ""
+    """Stamp of the retrieval config that produced the result (KB config, embedding and
+    reranker model); with `index_version` and `data_generation` it says what was searched."""
+
+
+class ContextResult(BaseModel):
+    """Answer of `get_context` (design s7-6): a chunk and the chunks around it, in page order.
+
+    When the chunk id no longer exists (the page was re-chunked or deleted after the caller got
+    the id), `chunks` is the page's current content (by the doc_id in the chunk id) and
+    `updated` is set; `found` is False when the page is gone too. `truncated`: the token budget
+    cut the list.
+    """
+
+    chunk_id: str
+    doc_id: str
+    mode: str
+    found: bool = True
+    updated: bool = False
+    truncated: bool = False
+    chunks: list[Chunk] = Field(default_factory=list)
 
 
 class Citation(BaseModel):

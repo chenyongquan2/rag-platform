@@ -25,7 +25,7 @@ from rag.config import ServiceSettings
 from rag.config.paths import repo_path
 from rag.observe.context import current_trace_id
 from rag.observe.rotating import LOCK_TIMEOUT_S, RotatingJsonlWriter
-from rag.types import RetrievalResult
+from rag.types import RetrievalResult, ThresholdDecision
 
 logger = logging.getLogger(__name__)
 
@@ -38,19 +38,6 @@ class RankedId(BaseModel):
 
     chunk_id: str
     score: float | None = None
-
-
-class ThresholdDecision(BaseModel):
-    """What the rerank-score threshold did to this request's list (design s10-1, s16-8)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    threshold: float
-    top_score: float | None = None
-    applied: bool = True  # False after a rerank timeout: nothing is cut by the threshold
-    passed: bool | None = None  # the best chunk reached the threshold
-    kept: int = 0
-    dropped: int = 0
 
 
 class BusinessRecord(BaseModel):

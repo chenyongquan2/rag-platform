@@ -35,9 +35,13 @@ from rag.retrieve.deadline import Deadline
 from rag.retrieve.dedupe import TextDedupe
 from rag.retrieve.hybrid import EsHybridRetriever
 from rag.retrieve.query import HybridQuery
-from rag.types import Chunk, RetrievalResult
+from rag.retrieve.rerank import RERANK_SCORE
+from rag.types import Chunk, ContextPiece, RetrievalResult
 
 logger = logging.getLogger(__name__)
+
+CONTEXT_KEY = "context"
+"""Node metadata key of the pieces the ContextExpander adds (moved to `Chunk.context`)."""
 
 GENERATION_THREADS = 2
 """Threads reading the data generation; a Redis call stuck past the deadline holds one until
@@ -50,12 +54,16 @@ class IndexEmbedModelError(RuntimeError):
 
 
 def node_to_chunk(item: NodeWithScore, kb: str) -> Chunk:
-    """Our `Chunk` from a fused node; leftover metadata (doc_type, language, chunk_index,
-    parent_id, images, route_ranks, route_scores) stays in `Chunk.metadata`."""
+    """Our `Chunk` from a node of the chain; the rerank score (`rerank_score`) and expansion
+    pieces (`context`) get their own fields, leftover metadata (doc_type, language,
+    chunk_index, parent_id, images, route_ranks, route_scores) stays in `Chunk.metadata`."""
     node = item.node
     meta: dict[str, Any] = dict(node.metadata)
     meta.pop("chunk_id", None)
+    meta.pop("acl_groups", None)  # never returned to callers (s16-4)
     title = meta.pop("title_path", "") or ""
+    rerank = meta.pop(RERANK_SCORE, None)
+    context = meta.pop(CONTEXT_KEY, None) or []
     return Chunk(
         chunk_id=node.node_id,
         doc_id=str(meta.pop("doc_id")),
@@ -67,6 +75,8 @@ def node_to_chunk(item: NodeWithScore, kb: str) -> Chunk:
         source_url=meta.pop("source_url", None),
         source_version=meta.pop("source_version", None),
         score=item.score,
+        rerank_score=float(rerank) if rerank is not None else None,
+        context=[ContextPiece.model_validate(piece) for piece in context],
         metadata=meta,
     )
 
@@ -75,8 +85,10 @@ class HybridSearch:
     """The retrieval chain for one knowledge base and one caller identity (its ACL groups).
 
     Implements `rag.eval.retrieval.Retriever`: `retrieve(question, kb=..., top_k=...)`. The
-    final list is the fused order after the postprocessors, cut to `top_k` (dedupe runs before
-    the cut, so duplicates do not take places in it).
+    final list is the order after the postprocessors, cut to `top_k` (dedupe, rerank and the
+    threshold run before the cut, so dropped chunks do not take places in it); the `expander`,
+    if any, runs after the cut on the returned chunks only. `SearchPipeline` (P0-08) is this
+    chain with rerank, threshold and expansion (`rag.retrieve.pipeline`).
     """
 
     def __init__(
@@ -86,7 +98,9 @@ class HybridSearch:
         acl_groups: Sequence[str],
         deadline_ms: int,
         postprocessors: Sequence[BaseNodePostprocessor] | None = None,
+        expander: BaseNodePostprocessor | None = None,
         generation: Callable[[], int] | None = None,
+        config_version: str = "",
     ) -> None:
         if deadline_ms <= 0:
             raise ValueError(f"deadline_ms must be > 0, got {deadline_ms}")
@@ -96,6 +110,8 @@ class HybridSearch:
         self.acl_groups = tuple(acl_groups)
         self.deadline_ms = deadline_ms
         self.postprocessors = list(postprocessors) if postprocessors is not None else [TextDedupe()]
+        self.expander = expander
+        self.config_version = config_version
         self._generation = generation
         # The data generation is read in parallel with the search and waited for only until
         # the deadline, so a slow Redis never delays the result (it then reports 0).
@@ -139,12 +155,10 @@ class HybridSearch:
             else None
         )
         nodes = self.retriever.retrieve(query)
-        for post in self.postprocessors:
-            began = time.perf_counter()
-            nodes = post.postprocess_nodes(nodes, query_bundle=query)
-            name = getattr(post, "timing_name", None) or post.class_name()
-            query.trace.timings_ms[name] = (time.perf_counter() - began) * 1000.0
-        chunks = [node_to_chunk(n, self.kb) for n in nodes[:top_k]]
+        nodes = self._run(self.postprocessors, nodes, query)[:top_k]
+        if self.expander is not None:
+            nodes = self._run([self.expander], nodes, query)
+        chunks = [node_to_chunk(n, self.kb) for n in nodes]
         trace = query.trace
         trace.timings_ms["total"] = (time.perf_counter() - start) * 1000.0
         return RetrievalResult(
@@ -153,10 +167,28 @@ class HybridSearch:
             index_version=trace.index_version,
             data_generation=self._read_generation(generation, deadline),
             degraded=trace.degraded,
+            rerank_timeout=trace.rerank_timeout,
             timings_ms=dict(trace.timings_ms),
             chunks=chunks,
             routes={name: list(hits) for name, hits in trace.routes.items()},
+            rerank=list(trace.rerank),
+            threshold=trace.threshold,
+            not_found=trace.not_found,
+            below_threshold=[node_to_chunk(n, self.kb) for n in trace.below_threshold],
+            config_version=self.config_version,
         )
+
+    @staticmethod
+    def _run(
+        steps: Sequence[BaseNodePostprocessor], nodes: list[NodeWithScore], query: HybridQuery
+    ) -> list[NodeWithScore]:
+        """Run postprocessors in order; each one's time goes into the trace by `timing_name`."""
+        for post in steps:
+            began = time.perf_counter()
+            nodes = post.postprocess_nodes(nodes, query_bundle=query)
+            name = getattr(post, "timing_name", None) or post.class_name()
+            query.trace.timings_ms[name] = (time.perf_counter() - began) * 1000.0
+        return nodes
 
     @staticmethod
     def _read_generation(future: Future[int] | None, deadline: Deadline) -> int:
@@ -200,6 +232,33 @@ def make_hybrid_search(
     embedding model (`_meta.embed_model`), else `IndexEmbedModelError`. With `redis`, results
     carry the data generation (key prefix as the ingest job's for this index prefix).
     """
+    retriever, generation, _, _ = hybrid_parts(
+        cfg,
+        settings,
+        index_prefix=index_prefix,
+        es=es,
+        embed_model=embed_model,
+        redis=redis,
+    )
+    return HybridSearch(
+        retriever,
+        acl_groups=acl_groups,
+        deadline_ms=settings.search_deadline_ms,
+        generation=generation,
+    )
+
+
+def hybrid_parts(
+    cfg: KnowledgeBaseConfig,
+    settings: ServiceSettings,
+    *,
+    index_prefix: str = "",
+    es: Elasticsearch | None = None,
+    embed_model: BaseEmbedding | None = None,
+    redis: Redis | None = None,
+) -> tuple[EsHybridRetriever, Callable[[], int] | None, Elasticsearch, str]:
+    """The retriever, the data-generation reader, the ES client and the embedding model id of
+    `make_hybrid_search` (shared with `make_search_pipeline`)."""
     from rag.embed import make_embedding
 
     names = KbIndexNames(cfg.kb, prefix=index_prefix)
@@ -239,9 +298,4 @@ def make_hybrid_search(
         es_margin_ms=settings.search_es_margin_ms,
         embed_threads=settings.embed_max_concurrency,
     )
-    return HybridSearch(
-        retriever,
-        acl_groups=acl_groups,
-        deadline_ms=settings.search_deadline_ms,
-        generation=generation,
-    )
+    return retriever, generation, es, expected
