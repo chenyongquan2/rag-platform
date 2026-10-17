@@ -1,27 +1,37 @@
-"""httpx transports that put every chat model call on the cost ledger (spec P1-01).
+"""httpx transports that retry chat model calls and put every attempt on the cost ledger
+(spec P1-01).
 
-`make_chat_model` gives `ChatOpenAI` httpx clients whose transport is one of these. They sit below
-the openai SDK, so they see every HTTP attempt, including the SDK's own retries, and they work
-the same for `invoke`, `stream`, structured output, sync and async calls.
+`make_chat_model` gives `ChatOpenAI` httpx clients whose transport is one of these, and turns
+the openai SDK's own retries off: one SDK request is one call to `handle_request`, and the
+transport owns the retries, so it can keep one deadline per call. The transports work the same
+for `invoke`, `stream`, structured output, sync and async calls.
 
+- Retries (design s16-2, s16-8): failures before the gateway got the request (connect errors
+  and timeouts, write errors) and 408, 429 and 5xx answers are retried up to `max_retries`
+  times, waiting `backoff_s` * 2**n up to `backoff_max_s`. A longer `Retry-After` ends the call.
+  A read timeout or dropped connection after the request was sent is not retried: the gateway
+  may still be generating, and billing, the first answer. With `deadline_s`, every attempt's
+  timeouts are cut to the time left and no wait may reach the deadline.
 - Before an attempt is sent, its estimated cost is reserved in the ledger (`CostLedger.reserve`,
   spec P0-05); over the budget stop `BudgetExceeded` is raised and nothing is sent. The estimate
-  is an upper bound: one token per character of the request body, plus the request's
-  `max_completion_tokens` (reasoning and answer together).
+  is an upper bound: one token per character of the request body as input, and the request's
+  `max_completion_tokens` (reasoning and answer together) times `n` answers as output.
 - Every 2xx answer appends one `chat` line with the tokens from `usage` (for a stream, the usage
   event at its end). Output tokens include reasoning tokens. Without usage (no field, a stream
-  closed before its end) the line is estimated; so is a read timeout or a dropped connection
-  after the request was sent, since the gateway may have done and billed the work. Connect
-  failures and 4xx/5xx answers write no line (the gateway did not process the request).
-- A retryable error answer whose `Retry-After` is longer than the profile's `retry_after_max_s`
-  gets `x-should-retry: false`, so the SDK raises at once instead of waiting (design s16-2).
+  closed before its end) the line is estimated. So is an attempt that failed or was cancelled
+  (`asyncio.CancelledError`, `KeyboardInterrupt`) after it was handed to the network, since
+  the gateway may have done and billed the work. Connect failures and 4xx/5xx answers write no
+  line (the gateway did not process the request).
 - The API key echoed in an error body is masked before the SDK puts the body into its exception.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import AsyncIterator, Iterator
+import logging
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import ExitStack
 from typing import Any
 
@@ -29,14 +39,25 @@ import httpx
 
 from rag.cost import CostLedger
 
+logger = logging.getLogger(__name__)
+
+# Raised before the gateway had the whole request: safe to send again, nothing billed.
+_FAILED_BEFORE_SEND = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.WriteError,
+    httpx.WriteTimeout,
+)
 # Raised after the request went out: the gateway may have done (and billed) the work.
 _FAILED_AFTER_SEND = (httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError)
-_RETRYABLE_STATUS = frozenset({408, 409, 429})  # and every 5xx, like the openai SDK
+_RETRYABLE_STATUS = frozenset({408, 429})  # and every 5xx
 # Output estimate for a request without max_completion_tokens (the factory always sets it).
 _UNCAPPED_OUTPUT_TOKENS = 32_768
 # The body is passed on decoded, so these no longer describe it.
 _DROP_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
 _CLOSED_EARLY = "closed before usage"
+_SHORTEST_TIMEOUT_S = 0.001
 
 
 def parse_usage(usage: object) -> tuple[int, int, int] | None:
@@ -63,14 +84,14 @@ def parse_usage(usage: object) -> tuple[int, int, int] | None:
 
 
 def _retry_after_s(headers: httpx.Headers) -> float | None:
-    """The wait the gateway asks for, read like the openai SDK reads it (seconds only)."""
+    """The wait the gateway asks for, in seconds (`retry-after-ms` or `retry-after`)."""
     for name, scale in (("retry-after-ms", 1000.0), ("retry-after", 1.0)):
         value = headers.get(name)
         if value is None:
             continue
         try:
             return max(0.0, float(value) / scale)
-        except ValueError:  # an HTTP date: the SDK then uses its own backoff
+        except ValueError:  # an HTTP date: use the computed backoff instead
             return None
     return None
 
@@ -96,8 +117,13 @@ class _Meter:
         self.model = str(body.get("model") or "")
         self.stream = bool(body.get("stream"))
         cap = body.get("max_completion_tokens") or body.get("max_tokens")
+        if not isinstance(cap, int) or cap <= 0:
+            cap = _UNCAPPED_OUTPUT_TOKENS
+        answers = body.get("n")
+        if not isinstance(answers, int) or answers < 1:
+            answers = 1
         self.estimated_prompt = len(text)
-        self.estimated_output = cap if isinstance(cap, int) and cap > 0 else _UNCAPPED_OUTPUT_TOKENS
+        self.estimated_output = cap * answers
         self._reservation = ExitStack()
         self._price_estimated = False
         self._pending = bytearray()  # stream: an unfinished SSE line; otherwise the whole body
@@ -184,45 +210,106 @@ class _Meter:
         )
 
 
-class _Shared:
-    """What the sync and async transports have in common."""
+class _Policy:
+    """Retries, deadline and accounting shared by the sync and async transports."""
 
-    def __init__(self, ledger: CostLedger, *, profile: str, retry_after_max_s: float) -> None:
+    def __init__(
+        self,
+        ledger: CostLedger,
+        *,
+        profile: str,
+        max_retries: int,
+        backoff_s: float,
+        backoff_max_s: float,
+        deadline_s: float | None,
+        clock: Callable[[], float],
+    ) -> None:
         self.ledger = ledger
         self.profile = profile
-        self.retry_after_max_s = retry_after_max_s
+        self.max_retries = max_retries
+        self.backoff_s = backoff_s
+        self.backoff_max_s = backoff_max_s
+        self.deadline_s = deadline_s
+        self.clock = clock
 
-    def meter(self, request: httpx.Request) -> _Meter:
+    def start(self, request: httpx.Request) -> tuple[float, dict[str, Any]]:
+        """Start time and the timeouts the SDK set on the request."""
+        return self.clock(), dict(request.extensions.get("timeout") or {})
+
+    def prepare(self, request: httpx.Request, start: float, timeouts: dict[str, Any]) -> _Meter:
+        """Cut the attempt's timeouts to the time left before the deadline, then reserve."""
+        if self.deadline_s is not None:
+            left = max(self.deadline_s - (self.clock() - start), _SHORTEST_TIMEOUT_S)
+            cut = {k: left if v is None else min(v, left) for k, v in timeouts.items()}
+            request.extensions = {**request.extensions, "timeout": cut}
         meter = _Meter(self.ledger, request, profile=self.profile)
         meter.reserve()
         return meter
 
-    @staticmethod
-    def passed_headers(response: httpx.Response) -> list[tuple[str, str]]:
-        return [(k, v) for k, v in response.headers.multi_items() if k.lower() not in _DROP_HEADERS]
+    def wait_before_retry(
+        self, attempt: int, start: float, cause: object, retry_after: float | None = None
+    ) -> float | None:
+        """Seconds to wait before attempt `attempt + 1`, or None to give up."""
+        if attempt >= self.max_retries:
+            return None
+        if retry_after is not None and retry_after > self.backoff_max_s:
+            return None
+        wait = retry_after
+        if wait is None:
+            wait = min(self.backoff_s * 2**attempt, self.backoff_max_s)
+        if self.deadline_s is not None and self.clock() - start + wait >= self.deadline_s:
+            return None
+        logger.warning(
+            "chat model (%s): %s; retry %d of %d in %.1f s",
+            self.profile,
+            cause,
+            attempt + 1,
+            self.max_retries,
+            wait,
+        )
+        return wait
 
-    def error_response(
-        self, request: httpx.Request, response: httpx.Response, content: bytes
+    @staticmethod
+    def retryable(response: httpx.Response) -> bool:
+        return response.status_code in _RETRYABLE_STATUS or response.status_code >= 500
+
+    @staticmethod
+    def metered(
+        request: httpx.Request,
+        response: httpx.Response,
+        stream: httpx.SyncByteStream | httpx.AsyncByteStream,
     ) -> httpx.Response:
-        headers = self.passed_headers(response)
-        status = response.status_code
-        retry_after = _retry_after_s(response.headers)
-        if (
-            (status in _RETRYABLE_STATUS or status >= 500)
-            and retry_after is not None
-            and retry_after > self.retry_after_max_s
-        ):
-            headers.append(("x-should-retry", "false"))
+        return httpx.Response(
+            response.status_code,
+            headers=_passed_headers(response),
+            stream=stream,
+            extensions=response.extensions,
+            request=request,
+        )
+
+    @staticmethod
+    def error_response(
+        request: httpx.Request, response: httpx.Response, content: bytes
+    ) -> httpx.Response:
         token = _bearer_token(request)
         if token and token.encode() in content:
             content = content.replace(token.encode(), b"***")
         return httpx.Response(
-            status,
-            headers=headers,
+            response.status_code,
+            headers=_passed_headers(response),
             content=content,
             extensions=response.extensions,
             request=request,
         )
+
+
+def _passed_headers(response: httpx.Response) -> list[tuple[str, str]]:
+    return [(k, v) for k, v in response.headers.multi_items() if k.lower() not in _DROP_HEADERS]
+
+
+def _interrupted(exc: BaseException) -> bool:
+    """Cancelled or interrupted (not an error, not the consumer closing a generator)."""
+    return not isinstance(exc, Exception | GeneratorExit)
 
 
 class _MeteredStream(httpx.SyncByteStream):
@@ -235,8 +322,9 @@ class _MeteredStream(httpx.SyncByteStream):
             for chunk in self._response.iter_bytes():
                 self._meter.feed(chunk)
                 yield chunk
-        except _FAILED_AFTER_SEND as exc:
-            self._meter.finish(type(exc).__name__)
+        except BaseException as exc:
+            if isinstance(exc, _FAILED_AFTER_SEND) or _interrupted(exc):
+                self._meter.finish(type(exc).__name__)
             raise
         self._meter.finish()
 
@@ -257,8 +345,9 @@ class _AsyncMeteredStream(httpx.AsyncByteStream):
             async for chunk in self._response.aiter_bytes():
                 self._meter.feed(chunk)
                 yield chunk
-        except _FAILED_AFTER_SEND as exc:
-            self._meter.finish(type(exc).__name__)
+        except BaseException as exc:
+            if isinstance(exc, _FAILED_AFTER_SEND) or _interrupted(exc):
+                self._meter.finish(type(exc).__name__)
             raise
         self._meter.finish()
 
@@ -270,11 +359,12 @@ class _AsyncMeteredStream(httpx.AsyncByteStream):
 
 
 class LedgerTransport(httpx.BaseTransport):
-    """Sync transport: reserve, send through an inner client, record (see the module doc).
+    """Sync transport: retry, reserve, send through an inner client, record (module doc).
 
     The inner `httpx.Client` reads proxies from the environment (`HTTPS_PROXY`, `NO_PROXY`) like
     any default client; the outer client, which has this transport, would ignore them. Each
-    request keeps the timeout the openai SDK set on it. `transport` replaces the network in tests.
+    attempt keeps the timeouts the openai SDK set on the request, cut to the deadline.
+    `transport`, `clock` and `sleep` replace the network and the time in tests.
     """
 
     def __init__(
@@ -282,36 +372,65 @@ class LedgerTransport(httpx.BaseTransport):
         ledger: CostLedger,
         *,
         profile: str,
-        retry_after_max_s: float,
+        max_retries: int,
+        backoff_s: float,
+        backoff_max_s: float,
+        deadline_s: float | None,
         transport: httpx.BaseTransport | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        self._shared = _Shared(ledger, profile=profile, retry_after_max_s=retry_after_max_s)
+        self._policy = _Policy(
+            ledger,
+            profile=profile,
+            max_retries=max_retries,
+            backoff_s=backoff_s,
+            backoff_max_s=backoff_max_s,
+            deadline_s=deadline_s,
+            clock=clock,
+        )
+        self._sleep = sleep
         self._client = httpx.Client(transport=transport)
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        meter = self._shared.meter(request)
-        try:
-            response = self._client.send(request, stream=True)
-        except _FAILED_AFTER_SEND as exc:
-            meter.finish(type(exc).__name__)
-            raise
-        except BaseException:
-            meter.release()
-            raise
-        if not response.is_success:
+        policy = self._policy
+        start, timeouts = policy.start(request)
+        attempt = 0
+        while True:
+            meter = policy.prepare(request, start, timeouts)
             try:
-                content = response.read()
-            finally:
-                response.close()
+                response = self._client.send(request, stream=True)
+            except _FAILED_BEFORE_SEND as exc:
                 meter.release()
-            return self._shared.error_response(request, response, content)
-        return httpx.Response(
-            response.status_code,
-            headers=self._shared.passed_headers(response),
-            stream=_MeteredStream(response, meter),
-            extensions=response.extensions,
-            request=request,
-        )
+                wait = policy.wait_before_retry(attempt, start, repr(exc))
+                if wait is None:
+                    raise
+            except BaseException as exc:
+                if isinstance(exc, _FAILED_AFTER_SEND) or _interrupted(exc):
+                    meter.finish(type(exc).__name__)
+                else:
+                    meter.release()
+                raise
+            else:
+                if response.is_success:
+                    return policy.metered(request, response, _MeteredStream(response, meter))
+                try:
+                    content = response.read()
+                finally:
+                    response.close()
+                    meter.release()
+                wait = None
+                if policy.retryable(response):
+                    wait = policy.wait_before_retry(
+                        attempt,
+                        start,
+                        f"HTTP {response.status_code}",
+                        _retry_after_s(response.headers),
+                    )
+                if wait is None:
+                    return policy.error_response(request, response, content)
+            self._sleep(wait)
+            attempt += 1
 
     def close(self) -> None:
         self._client.close()
@@ -325,36 +444,65 @@ class AsyncLedgerTransport(httpx.AsyncBaseTransport):
         ledger: CostLedger,
         *,
         profile: str,
-        retry_after_max_s: float,
+        max_retries: int,
+        backoff_s: float,
+        backoff_max_s: float,
+        deadline_s: float | None,
         transport: httpx.AsyncBaseTransport | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
-        self._shared = _Shared(ledger, profile=profile, retry_after_max_s=retry_after_max_s)
+        self._policy = _Policy(
+            ledger,
+            profile=profile,
+            max_retries=max_retries,
+            backoff_s=backoff_s,
+            backoff_max_s=backoff_max_s,
+            deadline_s=deadline_s,
+            clock=clock,
+        )
+        self._sleep = sleep
         self._client = httpx.AsyncClient(transport=transport)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        meter = self._shared.meter(request)
-        try:
-            response = await self._client.send(request, stream=True)
-        except _FAILED_AFTER_SEND as exc:
-            meter.finish(type(exc).__name__)
-            raise
-        except BaseException:
-            meter.release()
-            raise
-        if not response.is_success:
+        policy = self._policy
+        start, timeouts = policy.start(request)
+        attempt = 0
+        while True:
+            meter = policy.prepare(request, start, timeouts)
             try:
-                content = await response.aread()
-            finally:
-                await response.aclose()
+                response = await self._client.send(request, stream=True)
+            except _FAILED_BEFORE_SEND as exc:
                 meter.release()
-            return self._shared.error_response(request, response, content)
-        return httpx.Response(
-            response.status_code,
-            headers=self._shared.passed_headers(response),
-            stream=_AsyncMeteredStream(response, meter),
-            extensions=response.extensions,
-            request=request,
-        )
+                wait = policy.wait_before_retry(attempt, start, repr(exc))
+                if wait is None:
+                    raise
+            except BaseException as exc:
+                if isinstance(exc, _FAILED_AFTER_SEND) or _interrupted(exc):
+                    meter.finish(type(exc).__name__)
+                else:
+                    meter.release()
+                raise
+            else:
+                if response.is_success:
+                    return policy.metered(request, response, _AsyncMeteredStream(response, meter))
+                try:
+                    content = await response.aread()
+                finally:
+                    await response.aclose()
+                    meter.release()
+                wait = None
+                if policy.retryable(response):
+                    wait = policy.wait_before_retry(
+                        attempt,
+                        start,
+                        f"HTTP {response.status_code}",
+                        _retry_after_s(response.headers),
+                    )
+                if wait is None:
+                    return policy.error_response(request, response, content)
+            await self._sleep(wait)
+            attempt += 1
 
     async def aclose(self) -> None:
         await self._client.aclose()

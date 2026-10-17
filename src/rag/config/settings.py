@@ -84,34 +84,64 @@ class ChatProfile(BaseModel):
     """One use of the chat model (design s11-1, s16-2): which model, how long to wait, how often
     to retry and how many output tokens to allow (spec P1-01).
 
-    `max_tokens` caps reasoning and answer tokens together (the default model is a reasoning
-    model), so it must leave room for the reasoning. `retry_after_max_s` is the longest
-    `Retry-After` the profile waits for; a longer one ends the call without a retry.
+    - `read_timeout_s`: the longest wait for the next bytes of the answer. Without streaming the
+      gateway sends nothing until the answer is complete, so this caps the whole generation;
+      with streaming it caps the gap between chunks (reasoning is streamed too).
+    - `deadline_s`: all attempts and waits of one call until its answer starts must fit into this
+      time; each attempt's timeouts are cut to what is left. None: no limit.
+    - Only failures before the gateway got the request (connect errors and timeouts) and
+      408/429/5xx answers are retried, with waits `backoff_s` * 2**n up to `backoff_max_s`; a
+      longer `Retry-After` ends the call. A read timeout is not retried: the gateway may still
+      be generating, and billing, the first answer.
+    - `max_tokens` caps reasoning and answer tokens together (the default model is a reasoning
+      model), so it must leave room for the reasoning.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     model: str = ""  # empty: `chat_model`
-    timeout_s: float = Field(gt=0)
+    connect_timeout_s: float = Field(gt=0)
+    read_timeout_s: float = Field(gt=0)
+    deadline_s: float | None = Field(default=None, gt=0)
     max_retries: int = Field(ge=0)
+    backoff_s: float = Field(ge=0)
+    backoff_max_s: float = Field(ge=0)
     max_tokens: int = Field(gt=0)
     temperature: float | None = Field(default=0.0, ge=0, le=2)
-    retry_after_max_s: float = Field(ge=0)
 
 
 ChatProfileName = Literal["online", "offline", "cheap"]
 
-# online: answering a user (short timeout, 1 retry); offline: question generation and judging
-# (long timeout, more retries); cheap: rewrite, route, sufficiency checks (short timeout).
+# online: answering a user; cheap: rewrite, route, sufficiency checks. Both must never keep the
+# user waiting long (design s11-1, s16-8). offline: question generation and judging, may wait.
 CHAT_PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
-    "online": {"timeout_s": 30.0, "max_retries": 1, "max_tokens": 4096, "retry_after_max_s": 2.0},
-    "offline": {
-        "timeout_s": 180.0,
-        "max_retries": 4,
-        "max_tokens": 8192,
-        "retry_after_max_s": 60.0,
+    "online": {
+        "connect_timeout_s": 3.0,
+        "read_timeout_s": 10.0,
+        "deadline_s": 12.0,
+        "max_retries": 1,
+        "backoff_s": 0.5,
+        "backoff_max_s": 1.0,
+        "max_tokens": 4096,
     },
-    "cheap": {"timeout_s": 20.0, "max_retries": 1, "max_tokens": 2048, "retry_after_max_s": 2.0},
+    "cheap": {
+        "connect_timeout_s": 3.0,
+        "read_timeout_s": 8.0,
+        "deadline_s": 10.0,
+        "max_retries": 1,
+        "backoff_s": 0.5,
+        "backoff_max_s": 1.0,
+        "max_tokens": 1024,
+    },
+    "offline": {
+        "connect_timeout_s": 10.0,
+        "read_timeout_s": 180.0,
+        "deadline_s": None,
+        "max_retries": 4,
+        "backoff_s": 2.0,
+        "backoff_max_s": 60.0,
+        "max_tokens": 8192,
+    },
 }
 
 
@@ -184,7 +214,7 @@ class ServiceSettings(BaseSettings):
     embed_cache_redis_timeout_s: float = Field(default=0.5, gt=0)
 
     # Chat models (spec P1-01, design s11-1). One profile per use; each is a JSON object in the
-    # env (`CHAT_ONLINE='{"timeout_s": 10}'`), keys left out keep that profile's defaults.
+    # env (`CHAT_ONLINE='{"read_timeout_s": 8}'`), keys left out keep that profile's defaults.
     # `fake` switches every profile to FakeChatModel answering `chat_fake_reply` (gateway down or
     # budget used up); it is never switched automatically.
     chat_backend: Literal["gateway", "fake"] = "gateway"

@@ -2,13 +2,16 @@
 
 `make_chat_model(profile)` returns a LangChain chat model from `init_chat_model` talking to the
 OpenAI-compatible gateway. The three profiles share the gateway and, by default, the model
-(`chat_model`); they differ in timeout, retries, output token cap and the longest
-`Retry-After` they wait for. Every HTTP attempt goes through `LedgerTransport`, which reserves
-its estimated cost before sending and writes its real usage to the cost ledger afterwards.
+(`chat_model`); they differ in connect and read timeouts, deadline, retries, waits and output
+token cap. Every call goes through `LedgerTransport`, which does the retries (the openai SDK's
+are off) within the profile's deadline, reserves each attempt's estimated cost before sending
+and writes its real usage to the cost ledger afterwards.
 """
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from typing import get_args
 
 import httpx
@@ -38,15 +41,18 @@ def make_chat_model(
     ledger: CostLedger | None = None,
     transport: httpx.BaseTransport | None = None,
     async_transport: httpx.AsyncBaseTransport | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> BaseChatModel:
     """Chat model for `profile` (`online`, `offline` or `cheap`).
 
     `chat_backend=gateway`: a `ChatOpenAI` built by `init_chat_model` with every parameter set
-    from the profile (model, timeout, retries, `max_tokens`, temperature) and `stream_usage` on,
-    so streams end with a usage event. `chat_backend=fake`: a `FakeChatModel` that answers
+    from the profile (model, connect and read timeouts, `max_tokens`, temperature),
+    `stream_usage` on so streams end with a usage event, and `max_retries=0`: the ledger
+    transport retries instead. `chat_backend=fake`: a `FakeChatModel` that answers
     `chat_fake_reply` to every call; it sends nothing and writes no ledger line.
     Fails before any request when the gateway URL or key is missing or the model has no price.
-    `ledger`, `transport` and `async_transport` are for tests.
+    `ledger`, `transport`, `async_transport`, `clock` and `sleep` (sync retries) are for tests.
     """
     settings = settings or ServiceSettings()
     config = resolve_chat_profile(profile, settings)
@@ -60,26 +66,34 @@ def make_chat_model(
     ledger = ledger or CostLedger.from_settings(settings)
     ledger.price(config.model)  # no price -> fail now, before any money is spent
 
-    accounting = {
+    policy = {
         "ledger": ledger,
         "profile": profile,
-        "retry_after_max_s": config.retry_after_max_s,
+        "max_retries": config.max_retries,
+        "backoff_s": config.backoff_s,
+        "backoff_max_s": config.backoff_max_s,
+        "deadline_s": config.deadline_s,
+        "clock": clock,
     }
-    http_client = httpx.Client(transport=LedgerTransport(transport=transport, **accounting))
+    http_client = httpx.Client(
+        transport=LedgerTransport(transport=transport, sleep=sleep, **policy)
+    )
     http_async_client = httpx.AsyncClient(
-        transport=AsyncLedgerTransport(transport=async_transport, **accounting)
+        transport=AsyncLedgerTransport(transport=async_transport, **policy)
     )
     return init_chat_model(
         config.model,
         model_provider="openai",
         base_url=settings.llm_base_url,
         api_key=api_key,
-        timeout=config.timeout_s,
-        max_retries=config.max_retries,
+        timeout=httpx.Timeout(config.read_timeout_s, connect=config.connect_timeout_s),
+        max_retries=0,
         max_tokens=config.max_tokens,
         temperature=config.temperature,
         stream_usage=True,
         use_responses_api=False,
         http_client=http_client,
         http_async_client=http_async_client,
+        # We pass both clients, so nothing is injected; () also stops the warning that says so.
+        http_socket_options=(),
     )

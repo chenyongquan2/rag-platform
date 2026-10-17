@@ -57,18 +57,9 @@ _CHAT_ENV = [
 
 
 @pytest.fixture(autouse=True)
-def _clean_env_and_no_retry_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in _CHAT_ENV:
         monkeypatch.delenv(key, raising=False)
-
-    # The openai SDK waits 0.5 s and more between retries; unit tests do not wait.
-    async def _no_async_sleep(self: object, **kwargs: object) -> None:
-        return None
-
-    monkeypatch.setattr(
-        openai._base_client.SyncAPIClient, "_sleep_for_retry", lambda self, **kwargs: None
-    )
-    monkeypatch.setattr(openai._base_client.AsyncAPIClient, "_sleep_for_retry", _no_async_sleep)
 
 
 def make_settings(tmp_path: Path, **overrides: Any) -> ServiceSettings:
@@ -138,6 +129,28 @@ class FakeChatGateway:
     def reply(self) -> dict[str, Any]:
         return {"role": "assistant", "content": self.content, "reasoning_content": "thinking"}
 
+    def reply_then_raise(self, error: BaseException) -> httpx.Response:
+        """A stream that sends its first events and then fails while reading."""
+        response = self._stream(self.reply(), include_usage=True)
+        assert isinstance(response.stream, _Events)
+        response.stream.payloads[2:] = [error]
+        return response
+
+    @staticmethod
+    def stalling_stream() -> httpx.Response:
+        """A stream that sends one event and then nothing for a long time (async clients)."""
+        first: dict[str, Any] = {
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": SERVED,
+            "choices": [{"index": 0, "delta": {"content": "po"}, "finish_reason": None}],
+        }
+        payloads: list[bytes | BaseException] = [f"data: {json.dumps(first)}\n\n".encode()]
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, stream=_Events(payloads, stall=5)
+        )
+
     def _stream(self, message: dict[str, Any], *, include_usage: bool) -> httpx.Response:
         def chunk(delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
             return {
@@ -154,7 +167,10 @@ class FakeChatGateway:
         events.append(chunk({}, "stop"))
         if include_usage:
             events.append({**chunk({}), "choices": [], "usage": self.usage})
-        payloads = [f"data: {json.dumps(e)}\n\n".encode() for e in events] + [b"data: [DONE]\n\n"]
+        payloads: list[bytes | BaseException] = [
+            f"data: {json.dumps(e)}\n\n".encode() for e in events
+        ]
+        payloads.append(b"data: [DONE]\n\n")
 
         return httpx.Response(
             200, headers={"content-type": "text/event-stream"}, stream=_Events(payloads)
@@ -162,30 +178,62 @@ class FakeChatGateway:
 
 
 class _Events(httpx.SyncByteStream, httpx.AsyncByteStream):
-    """A response body sent in several chunks, one SSE event each, to sync and async clients."""
+    """A response body sent in several chunks, one SSE event each, to sync and async clients.
+    An exception in `payloads` is raised when reached; `stall` waits that long at the end."""
 
-    def __init__(self, payloads: list[bytes]) -> None:
-        self._payloads = payloads
+    def __init__(self, payloads: list[bytes | BaseException], stall: float = 0.0) -> None:
+        self.payloads = payloads
+        self.stall = stall
 
     def __iter__(self) -> Iterator[bytes]:
-        yield from self._payloads
+        for payload in self.payloads:
+            if isinstance(payload, BaseException):
+                raise payload
+            yield payload
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
-        for payload in self._payloads:
+        for payload in self.payloads:
+            if isinstance(payload, BaseException):
+                raise payload
             yield payload
+        await asyncio.sleep(self.stall)
+
+
+class FakeClock:
+    """`time.monotonic` and `time.sleep` stand-ins: sleeping only moves the clock forward."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.waits: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.waits.append(seconds)
+        self.now += seconds
 
 
 def gateway_model(
     tmp_path: Path,
-    gateway: FakeChatGateway,
+    gateway: Any,
     profile: Literal["online", "offline", "cheap"] = "online",
+    *,
+    clock: FakeClock | None = None,
     **overrides: Any,
 ) -> tuple[ChatOpenAI, CostLedger]:
     settings = make_settings(tmp_path, **overrides)
     ledger = CostLedger.from_settings(settings)
     transport = httpx.MockTransport(gateway)
+    clock = clock or FakeClock()
     model = make_chat_model(
-        profile, settings, ledger=ledger, transport=transport, async_transport=transport
+        profile,
+        settings,
+        ledger=ledger,
+        transport=transport,
+        async_transport=transport,
+        clock=clock,
+        sleep=clock.sleep,
     )
     assert isinstance(model, ChatOpenAI)
     return model, ledger
@@ -204,36 +252,41 @@ def test_chat_profile_settings_defaults_and_overrides(monkeypatch: pytest.Monkey
     assert online.model == offline.model == cheap.model == s.chat_model == MODEL
     assert online.max_retries == cheap.max_retries == 1
     assert offline.max_retries > online.max_retries
-    assert online.timeout_s <= 30 and cheap.timeout_s <= online.timeout_s
-    assert offline.timeout_s > online.timeout_s
-    assert offline.retry_after_max_s > online.retry_after_max_s
+    # Online and cheap calls never hang (design s11-1, s16-8): short connect and read timeouts and
+    # a deadline for all attempts and waits; a long read timeout only for offline jobs.
+    assert (online.connect_timeout_s, online.read_timeout_s, online.deadline_s) == (3, 10, 12)
+    assert (cheap.connect_timeout_s, cheap.read_timeout_s) == (3, 8)
+    assert cheap.deadline_s is not None and cheap.deadline_s <= online.deadline_s
+    assert offline.read_timeout_s > 60 and offline.deadline_s is None
+    assert online.backoff_max_s < offline.backoff_max_s
     # The model is a reasoning model: max_tokens covers reasoning and answer, so it must be large.
-    assert min(online.max_tokens, offline.max_tokens, cheap.max_tokens) >= 2048
+    assert (online.max_tokens, cheap.max_tokens, offline.max_tokens) == (4096, 1024, 8192)
     assert s.model_prices[MODEL].estimated is True
     with pytest.raises(ValueError, match="online, offline, cheap"):
         resolve_chat_profile("fast", s)  # type: ignore[arg-type]
 
     # A partial override keeps the other values of that profile, not the class defaults.
-    monkeypatch.setenv("CHAT_ONLINE", '{"timeout_s": 7}')
+    monkeypatch.setenv("CHAT_ONLINE", '{"read_timeout_s": 7}')
     monkeypatch.setenv("CHAT_CHEAP", '{"model": "other-model", "temperature": null}')
     monkeypatch.setenv("CHAT_BACKEND", "fake")
     monkeypatch.setenv("CHAT_STRUCTURED_OUTPUT_METHOD", "json_schema")
     s = ServiceSettings(_env_file=None)
-    assert s.chat_online.timeout_s == 7
+    assert s.chat_online.read_timeout_s == 7
+    assert s.chat_online.connect_timeout_s == online.connect_timeout_s
     assert s.chat_online.max_retries == online.max_retries
     assert s.chat_online.max_tokens == online.max_tokens
     assert resolve_chat_profile("cheap", s).model == "other-model"
     assert s.chat_cheap.temperature is None
-    assert s.chat_cheap.timeout_s == cheap.timeout_s
+    assert s.chat_cheap.read_timeout_s == cheap.read_timeout_s
     assert s.chat_backend == "fake"
     assert s.chat_structured_output_method == "json_schema"
 
     with pytest.raises(ValidationError, match="chat_backend"):
         ServiceSettings(_env_file=None, chat_backend="openai")
-    with pytest.raises(ValidationError, match="timeout_s"):
-        ServiceSettings(_env_file=None, chat_online={"timeout_s": 0})
+    with pytest.raises(ValidationError, match="read_timeout_s"):
+        ServiceSettings(_env_file=None, chat_online={"read_timeout_s": 0})
     with pytest.raises(ValidationError, match="extra"):
-        ServiceSettings(_env_file=None, chat_online={"timeout": 5})
+        ServiceSettings(_env_file=None, chat_online={"timeout_s": 5})
 
 
 # ---- factory --------------------------------------------------------------------------------
@@ -246,8 +299,7 @@ def test_factory_builds_profile_models(tmp_path: Path) -> None:
         p = resolve_chat_profile(profile, make_settings(tmp_path))
         assert model.model_name == MODEL
         assert model.max_tokens == p.max_tokens
-        assert model.max_retries == p.max_retries
-        assert model.request_timeout == p.timeout_s
+        assert model.max_retries == 0  # the ledger transport retries, the SDK does not
         assert model.openai_api_base == "http://gateway.test/v1"
 
         assert model.invoke("ping").content == "pong pong"
@@ -262,7 +314,8 @@ def test_factory_builds_profile_models(tmp_path: Path) -> None:
         request = gateway.requests[0]
         assert str(request.url) == "http://gateway.test/v1/chat/completions"
         assert request.headers["authorization"] == f"Bearer {KEY}"
-        assert request.extensions["timeout"]["read"] == p.timeout_s
+        timeout = request.extensions["timeout"]
+        assert (timeout["connect"], timeout["read"]) == (p.connect_timeout_s, p.read_timeout_s)
 
 
 def test_factory_requires_gateway_and_price(tmp_path: Path) -> None:
@@ -395,67 +448,106 @@ def test_budget_reserved_before_send_and_refused_over_stop(tmp_path: Path) -> No
     held: list[float] = []
     gateway = FakeChatGateway(on_request=lambda request: held.append(ledger.reserved()))
     # online max_tokens 4096 at 8 CNY per million output tokens: about 0.033 CNY per attempt.
-    model, ledger = gateway_model(tmp_path, gateway, budget_cny=1.0, budget_stop_cny=0.05)
+    model, ledger = gateway_model(tmp_path, gateway, budget_cny=1.0, budget_stop_cny=0.1)
 
     model.invoke("ping")
+    model.invoke("ping", n=2)  # two answers: twice the output tokens
 
-    body_chars = len(gateway.requests[0].content.decode())
-    assert held == [pytest.approx(ledger.estimate(MODEL, body_chars, model.max_tokens))]
+    first, second = (len(r.content.decode()) for r in gateway.requests)
+    assert held == [
+        pytest.approx(ledger.estimate(MODEL, first, model.max_tokens)),
+        pytest.approx(ledger.estimate(MODEL, second, 2 * model.max_tokens)),
+    ]
     assert ledger.reserved() == 0
 
     small, small_ledger = gateway_model(tmp_path, gateway, budget_cny=1.0, budget_stop_cny=0.03)
     with pytest.raises(BudgetExceeded, match="CHAT_BACKEND=fake") as caught:
         small.invoke("ping")
     assert chat_error_category(caught.value) is ErrorCategory.BUDGET_EXCEEDED
-    assert len(gateway.requests) == 1  # nothing was sent
+    assert len(gateway.requests) == 2  # nothing was sent
     assert small_ledger.reserved() == 0
-    assert len(small_ledger.entries()) == 1
+    assert len(small_ledger.entries()) == 2
 
 
 # ---- errors ---------------------------------------------------------------------------------
 
 
-def test_timeout_is_retried_recorded_and_classified(tmp_path: Path) -> None:
-    gateway = FakeChatGateway([httpx.ReadTimeout("slow"), httpx.ReadTimeout("slow")])
-    model, ledger = gateway_model(tmp_path, gateway)  # online: 1 retry
+def test_read_timeout_is_not_retried_and_connect_failures_are(tmp_path: Path) -> None:
+    clock = FakeClock()
+    gateway = FakeChatGateway([httpx.ReadTimeout("slow")])
+    model, ledger = gateway_model(tmp_path, gateway, clock=clock)  # online: 1 retry
 
+    # The gateway may still be generating (and billing) the first answer: no second one.
     with pytest.raises(openai.APITimeoutError) as caught:
         model.invoke("ping")
-
     assert chat_error_category(caught.value) is ErrorCategory.LLM_TIMEOUT
-    assert len(gateway.requests) == 2
-    rows = ledger.entries()
-    assert [(r["usage_estimated"], r["error"]) for r in rows] == [(True, "ReadTimeout")] * 2
-    assert ledger.reserved() == 0
+    assert len(gateway.requests) == 1
+    assert [(r["usage_estimated"], r["error"]) for r in ledger.entries()] == [(True, "ReadTimeout")]
 
-    # A connect timeout never reached the gateway: classified the same, but not billed.
+    # A stream that stops in the middle of the answer is not retried either.
+    gateway.script = [gateway.reply_then_raise(httpx.ReadTimeout("gap too long"))]
+    with pytest.raises(openai.APITimeoutError) as stalled:
+        list(model.stream("ping"))
+    assert chat_error_category(stalled.value) is ErrorCategory.LLM_TIMEOUT
+    assert len(gateway.requests) == 2
+    assert ledger.entries()[-1]["error"] == "ReadTimeout"
+
+    # A connect timeout never reached the gateway: retried once, classified the same, not billed.
     gateway.script = [httpx.ConnectTimeout("no route"), httpx.ConnectTimeout("no route")]
     with pytest.raises(openai.APITimeoutError) as caught:
         model.invoke("ping")
     assert chat_error_category(caught.value) is ErrorCategory.LLM_TIMEOUT
+    assert len(gateway.requests) == 4
     assert len(ledger.entries()) == 2
+    assert clock.waits == [0.5]
+    assert ledger.reserved() == 0
+
+
+def test_deadline_limits_retries_and_attempt_timeouts(tmp_path: Path) -> None:
+    clock = FakeClock()
+    seen: list[tuple[float, float, float]] = []
+
+    def connect_times_out(request: httpx.Request) -> httpx.Response:
+        timeout = request.extensions["timeout"]
+        seen.append((clock.now, timeout["connect"], timeout["read"]))
+        clock.now += timeout["connect"]
+        raise httpx.ConnectTimeout("no route")
+
+    retries = {"max_retries": 5, "backoff_s": 1.0, "backoff_max_s": 1.0}
+    model, ledger = gateway_model(tmp_path, connect_times_out, clock=clock, chat_online=retries)
+
+    with pytest.raises(openai.APITimeoutError):
+        model.invoke("ping")
+
+    # online: connect 3 s, read 10 s, deadline 12 s. Each attempt gets at most what is left;
+    # after the third one a wait would reach the deadline, so the call ends at 11 s.
+    assert seen == [(0.0, 3.0, 10.0), (4.0, 3.0, 8.0), (8.0, 3.0, 4.0)]
+    assert clock.waits == [1.0, 1.0]
+    assert ledger.entries() == []
 
 
 def test_gateway_errors_classified_and_retry_after_capped(tmp_path: Path) -> None:
+    clock = FakeClock()
     gateway = FakeChatGateway([httpx.Response(503), httpx.Response(503)])
-    model, ledger = gateway_model(tmp_path, gateway)
+    model, ledger = gateway_model(tmp_path, gateway, clock=clock)
 
     with pytest.raises(openai.InternalServerError) as caught:
         model.invoke("ping")
     assert chat_error_category(caught.value) is ErrorCategory.LLM_ERROR
     assert len(gateway.requests) == 2
 
-    # Retry-After longer than the online profile waits: no retry.
+    # Retry-After longer than the online profile waits (1 s): no retry.
     gateway.script = [httpx.Response(429, headers={"Retry-After": "30"})]
     with pytest.raises(openai.RateLimitError) as caught:
         model.invoke("ping")
     assert chat_error_category(caught.value) is ErrorCategory.LLM_ERROR
     assert len(gateway.requests) == 3
 
-    # A short Retry-After is honoured by the SDK's retry.
+    # A short Retry-After is waited for.
     gateway.script = [httpx.Response(429, headers={"Retry-After": "1"})]
     assert model.invoke("ping").content == "pong pong"
     assert len(gateway.requests) == 5
+    assert clock.waits == [0.5, 1.0]
 
     gateway.script = [httpx.ConnectError("refused"), httpx.ConnectError("refused")]
     with pytest.raises(openai.APIConnectionError) as caught:
@@ -466,6 +558,54 @@ def test_gateway_errors_classified_and_retry_after_capped(tmp_path: Path) -> Non
     assert len(ledger.entries()) == 1
     assert ledger.reserved() == 0
     assert chat_error_category(KeyError("unrelated bug")) is None
+
+
+def test_cancelled_call_records_estimate(tmp_path: Path) -> None:
+    """A call cancelled after it was handed to the network may already be billed."""
+
+    async def never_answers(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        raise AssertionError("cancelled before this")
+
+    model, ledger = gateway_model(tmp_path, never_answers)
+
+    async def cancel_invoke() -> None:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(model.ainvoke("ping"), 0.05)
+
+    asyncio.run(cancel_invoke())
+    (row,) = ledger.entries()
+    assert (row["usage_estimated"], row["error"]) == (True, "CancelledError")
+    assert row["completion_tokens"] == model.max_tokens
+    assert ledger.reserved() == 0
+
+    # Cancelled while the answer streams in.
+    stalls = FakeChatGateway([FakeChatGateway.stalling_stream()])
+    streaming, stream_ledger = gateway_model(tmp_path / "stream", stalls)
+
+    async def cancel_stream() -> None:
+        async def consume() -> None:
+            async for _ in streaming.astream("ping"):
+                pass
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(consume(), 0.05)
+
+    asyncio.run(cancel_stream())
+    (row,) = stream_ledger.entries()
+    assert (row["usage_estimated"], row["stream"]) == (True, True)
+    assert stream_ledger.reserved() == 0
+
+    # Sync: interrupted while waiting for the answer.
+    def interrupted(request: httpx.Request) -> httpx.Response:
+        raise KeyboardInterrupt
+
+    blocking, sync_ledger = gateway_model(tmp_path / "sync", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        blocking.invoke("ping")
+    (row,) = sync_ledger.entries()
+    assert (row["usage_estimated"], row["error"]) == (True, "KeyboardInterrupt")
+    assert sync_ledger.reserved() == 0
 
 
 def test_error_body_masks_api_key(tmp_path: Path) -> None:
