@@ -491,14 +491,20 @@ def test_read_timeout_is_not_retried_and_connect_failures_are(tmp_path: Path) ->
     assert chat_error_category(stalled.value) is ErrorCategory.LLM_TIMEOUT
     assert len(gateway.requests) == 2
     assert ledger.entries()[-1]["error"] == "ReadTimeout"
+    # A connection cut in the middle of the answer is billed too (and not retried).
+    gateway.script = [gateway.reply_then_raise(httpx.RemoteProtocolError("peer closed"))]
+    with pytest.raises((openai.APIError, httpx.TransportError)):
+        list(model.stream("ping"))
+    assert len(gateway.requests) == 3
+    assert ledger.entries()[-1]["error"] == "RemoteProtocolError"
 
     # A connect timeout never reached the gateway: retried once, classified the same, not billed.
     gateway.script = [httpx.ConnectTimeout("no route"), httpx.ConnectTimeout("no route")]
     with pytest.raises(openai.APITimeoutError) as caught:
         model.invoke("ping")
     assert chat_error_category(caught.value) is ErrorCategory.LLM_TIMEOUT
-    assert len(gateway.requests) == 4
-    assert len(ledger.entries()) == 2
+    assert len(gateway.requests) == 5
+    assert len(ledger.entries()) == 3
     assert clock.waits == [0.5]
     assert ledger.reserved() == 0
 
@@ -554,8 +560,14 @@ def test_gateway_errors_classified_and_retry_after_capped(tmp_path: Path) -> Non
         model.invoke("ping")
     assert chat_error_category(caught.value) is ErrorCategory.LLM_ERROR
 
-    # Only the one answered request is in the ledger; errors are not billed.
-    assert len(ledger.entries()) == 1
+    # A pooled connection the server had already closed: no answer at all, so sent again.
+    gateway.script = [httpx.RemoteProtocolError("Server disconnected without sending a response.")]
+    assert model.invoke("ping").content == "pong pong"
+    assert len(gateway.requests) == 9
+    assert clock.waits == [0.5, 1.0, 0.5, 0.5]
+
+    # Only the two answered requests are in the ledger; errors are not billed.
+    assert [r["usage_estimated"] for r in ledger.entries()] == [False, False]
     assert ledger.reserved() == 0
     assert chat_error_category(KeyError("unrelated bug")) is None
 

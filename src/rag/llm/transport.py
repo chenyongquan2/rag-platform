@@ -9,9 +9,10 @@ for `invoke`, `stream`, structured output, sync and async calls.
 - Retries (design s16-2, s16-8): failures before the gateway got the request (connect errors
   and timeouts, write errors) and 408, 429 and 5xx answers are retried up to `max_retries`
   times, waiting `backoff_s` * 2**n up to `backoff_max_s`. A longer `Retry-After` ends the call.
-  A read timeout or dropped connection after the request was sent is not retried: the gateway
-  may still be generating, and billing, the first answer. With `deadline_s`, every attempt's
-  timeouts are cut to the time left and no wait may reach the deadline.
+  A read timeout or reset connection after the request was sent is not retried: the gateway
+  may still be generating, and billing, the first answer. A server that closes the connection
+  without any answer (a stale pooled connection) is retried and not billed. With `deadline_s`,
+  every attempt's timeouts are cut to the time left and no wait may reach the deadline.
 - Before an attempt is sent, its estimated cost is reserved in the ledger (`CostLedger.reserve`,
   spec P0-05); over the budget stop `BudgetExceeded` is raised and nothing is sent. The estimate
   is an upper bound: one token per character of the request body as input, and the request's
@@ -41,16 +42,21 @@ from rag.cost import CostLedger
 
 logger = logging.getLogger(__name__)
 
-# Raised before the gateway had the whole request: safe to send again, nothing billed.
+# Raised before the gateway had the whole request, or (RemoteProtocolError while waiting for the
+# answer) when the server closed the connection without a single byte of answer, as happens to a
+# pooled connection the server had already dropped: safe to send again, nothing billed.
 _FAILED_BEFORE_SEND = (
     httpx.ConnectError,
     httpx.ConnectTimeout,
     httpx.PoolTimeout,
     httpx.WriteError,
     httpx.WriteTimeout,
+    httpx.RemoteProtocolError,
 )
-# Raised after the request went out: the gateway may have done (and billed) the work.
-_FAILED_AFTER_SEND = (httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError)
+# Raised after the request went out: the gateway may have done (and billed) the work. While the
+# body streams in, a RemoteProtocolError (connection cut mid-answer) counts here too.
+_FAILED_AFTER_SEND = (httpx.ReadTimeout, httpx.ReadError)
+_FAILED_WHILE_READING = (*_FAILED_AFTER_SEND, httpx.RemoteProtocolError)
 _RETRYABLE_STATUS = frozenset({408, 429})  # and every 5xx
 # Output estimate for a request without max_completion_tokens (the factory always sets it).
 _UNCAPPED_OUTPUT_TOKENS = 32_768
@@ -323,7 +329,7 @@ class _MeteredStream(httpx.SyncByteStream):
                 self._meter.feed(chunk)
                 yield chunk
         except BaseException as exc:
-            if isinstance(exc, _FAILED_AFTER_SEND) or _interrupted(exc):
+            if isinstance(exc, _FAILED_WHILE_READING) or _interrupted(exc):
                 self._meter.finish(type(exc).__name__)
             raise
         self._meter.finish()
@@ -346,7 +352,7 @@ class _AsyncMeteredStream(httpx.AsyncByteStream):
                 self._meter.feed(chunk)
                 yield chunk
         except BaseException as exc:
-            if isinstance(exc, _FAILED_AFTER_SEND) or _interrupted(exc):
+            if isinstance(exc, _FAILED_WHILE_READING) or _interrupted(exc):
                 self._meter.finish(type(exc).__name__)
             raise
         self._meter.finish()
