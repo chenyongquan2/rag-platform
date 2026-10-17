@@ -8,9 +8,10 @@
 | 2026-10-17 04:40 | P0-03 | 完成 | 1 轮 | 54 个单元测试通过 | 0 | 从 hf-mirror 下载并核对了 2,647 篇文档和 65 道评测题，65 题的来源文档都在文档集里；原始数据放在 C:/workspace/rag-platform/data/raw/hf（不进仓库）。留给 P0-04：知识库配置只给 .md 配了处理流程，另有 468 篇 .mdx 和 264 篇 .ipynb；50 篇 gradio 中文文档在标成英文的知识库里，前 50 篇里就有一篇 |
 | 2026-10-17 05:29 | P0-02 | 完成 | 2 轮 | 60 个单元测试、10 个集成测试通过 | 0 | 本机端口都是标准端口加 20000（ES 29200、Redis 26379、OTLP 24317 和 24318、Jaeger 页面 36686），只绑 127.0.0.1；ES 是 9.5.5，本机关闭了安全功能；本机 ES 里留了一个空索引 kb_hf_docs_v1，别名 kb_hf_docs 指向它，P0-06 往里写；同一个知识库同时切别名要靠 P0-06 的摄取锁防止；C 盘只剩约 22 GB |
 | 2026-10-17 06:49 | P0-05 | 完成 | 2 轮 | 91 个单元测试通过（另有 1 个 llm 测试、1 个集成测试各跑过一次，通过） | 0.00004 | 网关一次最多收 10 条文本，向量 1024 维；摄取和查询共用一个向量客户端工厂，只有超时和重试不同；花费账本在 C:/workspace/rag-platform-data/cost/ledger.jsonl，所有 checkout 和 worktree 共用这一个文件，不进 git；网关不可用或预算用完时设 EMBED_BACKEND=fake 改用假向量 |
+| 2026-10-17 08:56 | P1-01 | 完成 | 2 轮 | 109 个单元测试通过（另有 4 个 llm 测试跑过一次，评审后回答和流式两个又跑了一次，都通过） | 0.0027 | 网关只支持 function_calling 结构化输出，json_schema 返回 400；流式可用，第一段正文约 1 秒到；deepseek-v4-flash 是推理模型，推理 token 算在输出里，max_tokens 要给推理留够：回答至少 2048（online 用 4096），只输出小 JSON 的 cheap 用 1024；在线回答连接超时 3 秒、读超时 10 秒、一次调用最多 12 秒；对话模型的价格仍是估计值（每百万 token 输入 2 元、输出 8 元） |
 
 ## 已知问题
 
 ## 花费累计
 
-0.00004 元（账本 C:/workspace/rag-platform-data/cost/ledger.jsonl，`uv run python -m rag.cost summary` 查看）
+0.0028 元（0.002792 元：对话模型 0.002752 元，向量模型 0.00004 元；账本 C:/workspace/rag-platform-data/cost/ledger.jsonl，`uv run python -m rag.cost summary` 查看）
