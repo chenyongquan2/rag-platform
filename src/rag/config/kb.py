@@ -98,8 +98,23 @@ class EsConfig(_Strict):
     analyzer: str = "standard"
 
 
+# Elasticsearch rejects a kNN search with num_candidates above this.
+MAX_NUM_CANDIDATES = 10_000
+
+
 class RetrievalConfig(_Strict):
+    """Retrieval parameters of one knowledge base (design s9-1, s9-3, s10).
+
+    - `top_k_per_route`: hits each route (BM25, vector) returns before fusion.
+    - `num_candidates`: HNSW candidates per shard of the kNN route (tuned on the question set).
+    - `title_boost`: weight of `title_path` against `content` in the BM25 `multi_match`.
+    - `rrf_k`: the constant of reciprocal rank fusion, score = sum over routes 1 / (k + rank).
+    """
+
     top_k_per_route: int = Field(default=20, gt=0)
+    num_candidates: int = Field(default=100, gt=0, le=MAX_NUM_CANDIDATES)
+    title_boost: float = Field(default=2.0, gt=0)
+    rrf_k: int = Field(default=60, ge=0)
     rerank_n: int = Field(default=30, gt=0)
     final_k: int = Field(default=8, gt=0)
     threshold: float = 0.3
@@ -108,6 +123,15 @@ class RetrievalConfig(_Strict):
     def _final_k_within_rerank_n(self) -> Self:
         if self.final_k > self.rerank_n:
             raise ValueError(f"final_k ({self.final_k}) must not exceed rerank_n ({self.rerank_n})")
+        return self
+
+    @model_validator(mode="after")
+    def _num_candidates_cover_k(self) -> Self:
+        if self.num_candidates < self.top_k_per_route:
+            raise ValueError(
+                f"num_candidates ({self.num_candidates}) must be at least top_k_per_route "
+                f"({self.top_k_per_route}): Elasticsearch requires num_candidates >= k"
+            )
         return self
 
 
