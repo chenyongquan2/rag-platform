@@ -28,6 +28,13 @@ class ErrorCategory(StrEnum):
     RETRIEVAL_FAILED = "retrieval_failed"
     RETRIEVAL_TIMEOUT = "retrieval_timeout"
     INVALID_FILTER = "invalid_filter"
+    # Search service (spec P0-09): arguments outside their range or shape; a knowledge base
+    # that does not exist or that the caller may not use (one category for both, s16-4); the
+    # reranker still loading; anything unexpected (details only in the logs).
+    INVALID_REQUEST = "invalid_request"
+    KB_NOT_FOUND = "kb_not_found"
+    NOT_READY = "not_ready"
+    INTERNAL_ERROR = "internal_error"
 
 
 class AnswerStatus(StrEnum):

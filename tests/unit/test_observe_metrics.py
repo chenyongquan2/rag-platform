@@ -167,3 +167,31 @@ def test_model_calls_counted_per_caller(tmp_path: Path) -> None:
     }
     assert {a.get(attr.CALLER) for a, _ in tokens} == {"claude-code", None}
     assert {a.get(attr.CALLER) for a, _ in cost} == {"claude-code", None}
+
+
+def test_retrieval_quality_metrics() -> None:
+    # Spec P0-09 AC10: the s15-1 quality signals deferred by P0-11 - share of "not found"
+    # answers and the distribution of the top-1 rerank score, per knowledge base.
+    from rag.observe.metrics import TOP_RERANK_SCORE_BUCKETS
+
+    with memory_observability() as obs:
+        obs.metrics.record_retrieval(
+            kb="hf_docs", tool="search_docs", not_found=False, top_rerank_score=0.92
+        )
+        obs.metrics.record_retrieval(
+            kb="hf_docs", tool="search_docs", not_found=True, top_rerank_score=0.12
+        )
+        # Rerank timed out before any batch: no top score, still counted as a request.
+        obs.metrics.record_retrieval(
+            kb="hf_docs", tool="search_docs", not_found=False, top_rerank_score=None
+        )
+        not_found = _sums(metric_points(obs, attr.METRIC_NOT_FOUND), attr.KB, attr.TOOL)
+        (top,) = metric_points(obs, attr.METRIC_TOP_RERANK_SCORE)
+
+    assert not_found == {("hf_docs", "search_docs"): 1}
+    attributes, point = top
+    assert attributes == {attr.KB: "hf_docs", attr.TOOL: "search_docs"}
+    assert point.count == 2
+    assert point.sum == pytest.approx(1.04)
+    assert tuple(point.explicit_bounds) == TOP_RERANK_SCORE_BUCKETS
+    assert TOP_RERANK_SCORE_BUCKETS[0] > 0 and TOP_RERANK_SCORE_BUCKETS[-1] < 1

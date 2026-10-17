@@ -177,6 +177,9 @@ class AnswerConfig(_Strict):
 
 class KnowledgeBaseConfig(_Strict):
     kb: str = Field(default="default", pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    description: str = ""
+    """What the knowledge base contains, for callers choosing one: shown in the MCP tool
+    descriptions and by `list_knowledge_bases` (spec P0-09). Not part of the config version."""
     source: SourceConfig = Field(default_factory=SourceConfig)
     language: str = "auto"
     pipelines: dict[str, PipelineConfig] = Field(default_factory=_default_pipelines)

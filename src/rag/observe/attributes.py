@@ -79,6 +79,10 @@ METRIC_ERRORS = "rag.errors"
 METRIC_DEGRADED = "rag.requests.degraded"
 METRIC_RERANK_TIMEOUTS = "rag.requests.rerank_timeout"
 METRIC_STEP_DURATION = "rag.step.duration"
+# Retrieval quality signals (design s15-1, spec P0-09): searches where no chunk reached the
+# rerank threshold, and the distribution of the best rerank score per search.
+METRIC_NOT_FOUND = "rag.requests.not_found"
+METRIC_TOP_RERANK_SCORE = "rag.rerank.top_score"
 METRIC_MODEL_CALLS = "rag.model.calls"
 METRIC_MODEL_TOKENS = "rag.model.tokens"
 METRIC_MODEL_COST = "rag.model.cost"

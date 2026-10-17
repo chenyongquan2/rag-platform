@@ -81,6 +81,13 @@ def node_to_chunk(item: NodeWithScore, kb: str) -> Chunk:
     )
 
 
+def acl_group_tuple(acl_groups: Sequence[str]) -> tuple[str, ...]:
+    """The caller's ACL groups as a tuple; one string is refused (it would split into letters)."""
+    if isinstance(acl_groups, (str, bytes)):
+        raise TypeError("acl_groups must be a list of group names, not one string")
+    return tuple(acl_groups)
+
+
 class HybridSearch:
     """The retrieval chain for one knowledge base and one caller identity (its ACL groups).
 
@@ -105,10 +112,8 @@ class HybridSearch:
     ) -> None:
         if deadline_ms <= 0:
             raise ValueError(f"deadline_ms must be > 0, got {deadline_ms}")
-        if isinstance(acl_groups, (str, bytes)):
-            raise TypeError("acl_groups must be a list of group names, not one string")
         self.retriever = retriever
-        self.acl_groups = tuple(acl_groups)
+        self.acl_groups = acl_group_tuple(acl_groups)
         self.deadline_ms = deadline_ms
         self.postprocessors = list(postprocessors) if postprocessors is not None else [TextDedupe()]
         self.expander = expander
@@ -137,9 +142,14 @@ class HybridSearch:
         filters: Mapping[str, Any] | None = None,
         deadline_ms: int | None = None,
         request_id: str | None = None,
+        acl_groups: Sequence[str] | None = None,
     ) -> RetrievalResult:
         """Search `kb` (must be this chain's knowledge base); raises `RetrievalError` when no
-        route answered and `FilterError` for a filter outside the whitelist."""
+        route answered and `FilterError` for a filter outside the whitelist.
+
+        `acl_groups`: the groups of the caller of this request (the search service resolves
+        them per request, spec P0-09); None uses the groups the chain was built with."""
+        groups = self.acl_groups if acl_groups is None else acl_group_tuple(acl_groups)
         if kb != self.kb:
             raise ValueError(f"this search is bound to knowledge base {self.kb!r}, not {kb!r}")
         if top_k <= 0:
@@ -150,7 +160,7 @@ class HybridSearch:
         )
         query = HybridQuery(
             question,
-            acl_groups=self.acl_groups,
+            acl_groups=groups,
             filters=dict(filters or {}),
             deadline=deadline,
         )

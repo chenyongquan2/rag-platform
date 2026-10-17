@@ -37,7 +37,7 @@ from rag.retrieve.deadline import Deadline
 from rag.retrieve.dedupe import TextDedupe
 from rag.retrieve.hybrid import EsHybridRetriever
 from rag.retrieve.rerank import BatchedTimeoutRerank, RerankRunner, get_rerank_runner
-from rag.retrieve.search import HybridSearch, hybrid_parts
+from rag.retrieve.search import HybridSearch, acl_group_tuple, hybrid_parts
 from rag.retrieve.threshold import RerankThreshold
 from rag.types import ContextResult
 
@@ -50,7 +50,8 @@ def search_config_version(
     """First 16 hex digits of the sha256 of what decides a search result besides the data: the
     whole KB config, the embedding model and the reranker (model and input length)."""
     payload = {
-        "kb_config": cfg.model_dump(mode="json"),
+        # The description only tells callers what the KB holds (spec P0-09); it changes no result.
+        "kb_config": cfg.model_dump(mode="json", exclude={"description"}),
         "embed_model": embed_model_id,
         "reranker": {
             "model": settings.reranker_model,
@@ -120,14 +121,16 @@ class SearchPipeline(HybridSearch):
         mode: ContextMode | None = None,
         *,
         deadline_ms: int | None = None,
+        acl_groups: Sequence[str] | None = None,
     ) -> ContextResult:
-        """`ContextReader.get_context` with this chain's caller identity and KB settings."""
+        """`ContextReader.get_context` with this chain's KB settings, read with `acl_groups`
+        (the request's caller, spec P0-09) or else the groups the chain was built with."""
         if self.reader is None:
             raise RuntimeError("this pipeline has no ContextReader")
         return self.reader.get_context(
             chunk_id,
             mode or self.context_mode,
-            acl_groups=self.acl_groups,
+            acl_groups=self.acl_groups if acl_groups is None else acl_group_tuple(acl_groups),
             window=self.context_window,
             max_tokens=self.context_max_tokens,
             deadline=Deadline.after_ms(deadline_ms or self.deadline_ms, clock=self.clock),

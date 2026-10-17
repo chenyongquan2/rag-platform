@@ -44,6 +44,25 @@ STEP_DURATION_BUCKETS_S: tuple[float, ...] = (
 )
 
 
+# Rerank scores are sigmoid outputs in [0, 1] (spec P0-08): tenths, plus finer steps at both
+# ends where relevant (> 0.9) and unrelated (< 0.1) pairs pile up.
+TOP_RERANK_SCORE_BUCKETS: tuple[float, ...] = (
+    0.01,
+    0.05,
+    0.1,
+    0.2,
+    0.3,
+    0.4,
+    0.5,
+    0.6,
+    0.7,
+    0.8,
+    0.9,
+    0.95,
+    0.99,
+)
+
+
 def _drop_none(attributes: Mapping[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in attributes.items() if v is not None}
 
@@ -75,6 +94,17 @@ class Metrics:
             unit="s",
             description="Duration of each request and layer step",
             explicit_bucket_boundaries_advisory=list(STEP_DURATION_BUCKETS_S),
+        )
+        self.not_found = meter.create_counter(
+            attr.METRIC_NOT_FOUND,
+            unit="{request}",
+            description="Searches where no chunk reached the rerank threshold",
+        )
+        self.top_rerank_score = meter.create_histogram(
+            attr.METRIC_TOP_RERANK_SCORE,
+            unit="1",
+            description="Best rerank score of each search (sigmoid, 0 to 1)",
+            explicit_bucket_boundaries_advisory=list(TOP_RERANK_SCORE_BUCKETS),
         )
         self.model_calls = meter.create_counter(
             attr.METRIC_MODEL_CALLS,
@@ -123,6 +153,25 @@ class Metrics:
             )
         except Exception:
             logger.warning("recording step duration failed", exc_info=True)
+
+    def record_retrieval(
+        self,
+        *,
+        kb: str | None,
+        tool: str,
+        not_found: bool,
+        top_rerank_score: float | None,
+    ) -> None:
+        """Quality signals of one search (design s15-1): a not-found answer, and the best rerank
+        score (None when the rerank scored nothing, e.g. after a timeout before the first batch)."""
+        base = _drop_none({attr.KB: kb, attr.TOOL: tool})
+        try:
+            if not_found:
+                self.not_found.add(1, base)
+            if top_rerank_score is not None:
+                self.top_rerank_score.record(float(top_rerank_score), base)
+        except Exception:
+            logger.warning("recording retrieval metrics failed", exc_info=True)
 
     def record_ledger_row(self, row: Mapping[str, Any]) -> None:
         """One call, its tokens and CNY from one cost ledger line (`rag.cost.add_record_listener`).

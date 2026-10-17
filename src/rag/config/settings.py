@@ -309,6 +309,22 @@ class ServiceSettings(BaseSettings):
     search_es_reserve_ms: int = Field(default=200, ge=0)
     search_es_reserve_ratio: float = Field(default=0.2, ge=0, lt=1)
     search_es_margin_ms: int = Field(default=200, ge=0)
+    # Search service (spec P0-09, design s16-1). A caller's deadline_ms must lie in
+    # 1..`search_max_deadline_ms` and its query be at most `search_max_query_chars` long.
+    # `search_index_prefix` selects other indices (`fake_` = the fake-vector index, used with
+    # EMBED_BACKEND=fake so no query embedding costs money).
+    search_max_deadline_ms: int = Field(default=60_000, gt=0)
+    search_max_query_chars: int = Field(default=2000, gt=0)
+    search_index_prefix: str = ""
+
+    # Search service process (spec P0-09, design s16-1, s16-4). Until P8 (OAuth) every request
+    # runs as one caller from config: `service_caller` is matched against `access.callers` of
+    # each KB config and `service_acl_groups` are the document ACL groups it may read. The
+    # HTTP API and the MCP streamable-http endpoint listen on `service_host:service_port`.
+    service_caller: str = Field(default="local", min_length=1)
+    service_acl_groups: list[str] = Field(default_factory=lambda: ["public"], min_length=1)
+    service_host: str = "127.0.0.1"
+    service_port: int = Field(default=28080, gt=0, lt=65536)
 
     # Money: stop real model jobs when spent + estimate would exceed budget_stop_cny.
     budget_cny: float = Field(default=30.0, ge=0)
@@ -327,6 +343,17 @@ class ServiceSettings(BaseSettings):
             name = (info.field_name or "").removeprefix("chat_")
             return {**CHAT_PROFILE_DEFAULTS[name], **value}
         return value
+
+    @model_validator(mode="after")
+    def _default_deadline_within_max(self) -> Self:
+        if self.search_deadline_ms > self.search_max_deadline_ms:
+            raise ValueError(
+                f"search_deadline_ms ({self.search_deadline_ms}) must not exceed "
+                f"search_max_deadline_ms ({self.search_max_deadline_ms})"
+            )
+        if not all(isinstance(g, str) and g for g in self.service_acl_groups):
+            raise ValueError("service_acl_groups must be non-empty group names")
+        return self
 
     @model_validator(mode="after")
     def _stop_within_budget(self) -> Self:

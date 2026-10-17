@@ -319,3 +319,35 @@ def test_retrieval_config_rerank_and_expand_defaults() -> None:
     hf = load_kb_config(repo_path("kb/public/hf_docs.yaml"), kb_root=repo_path("kb"))
     assert hf.retrieval.expand == "none"
     assert hf.retrieval.expand_max_tokens == 4000
+
+
+def _acl_terms(search: dict[str, Any]) -> list[str]:
+    clauses = search["knn"]["filter"] if "knn" in search else search["query"]["bool"]["filter"]
+    return next(c["terms"]["acl_groups"] for c in clauses if "terms" in c)
+
+
+def test_per_request_acl_groups_override_the_pipeline() -> None:
+    # Spec P0-09 AC5: the service passes each caller's groups per request (design s16-4).
+    msearch = _msearch()
+    pipeline = _pipeline(msearch, FakeCrossEncoder(SCORES))
+    pipeline.retrieve("q", kb=KB, top_k=2, acl_groups=["team-a", "team-b"])
+    bodies = msearch.calls[-1]["searches"][1::2]
+    assert [_acl_terms(body) for body in bodies] == [["team-a", "team-b"]] * 2
+    pipeline.retrieve("q", kb=KB, top_k=2)  # without: the pipeline's own groups
+    assert [_acl_terms(body) for body in msearch.calls[-1]["searches"][1::2]] == [["public"]] * 2
+    with pytest.raises(TypeError, match="list"):
+        pipeline.retrieve("q", kb=KB, top_k=2, acl_groups="team-a")
+
+    # get_context reads with the caller's groups: the pages are only open to "public".
+    assert pipeline.get_context(f"{_page(3)}#0", "chunk").found is True
+    hidden = pipeline.get_context(f"{_page(3)}#0", "chunk", acl_groups=["team-a"])
+    assert hidden.found is False and hidden.chunks == []
+
+
+def test_config_version_ignores_description() -> None:
+    settings = ServiceSettings(_env_file=None)  # type: ignore[call-arg]
+    plain = KnowledgeBaseConfig(kb=KB)
+    described = KnowledgeBaseConfig(kb=KB, description="Hugging Face documentation")
+    assert search_config_version(plain, settings, "e@1") == search_config_version(
+        described, settings, "e@1"
+    )
