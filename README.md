@@ -151,6 +151,24 @@ result = search.retrieve("How do I log in?", kb=cfg.kb, top_k=8, filters={"langu
 result.chunks, result.routes, result.degraded, result.timings_ms
 ```
 
+`rag.retrieve.make_search_pipeline(...)` (same arguments) adds the rest of the chain:
+`BatchedTimeoutRerank` scores the first `rerank_n` candidates with the local
+`BAAI/bge-reranker-base` cross-encoder (question + title path + body, batches of
+`RERANK_BATCH_SIZE`, at most `RERANK_MAX_CONCURRENCY` reranks at once; the model is loaded once
+per process from the local HF cache, so set `HF_HUB_OFFLINE=1` and build pipelines at service
+start), stopping by the deadline (`rerank_timeout`: scored first, the rest in fusion order);
+`RerankThreshold` drops chunks below `threshold` (`not_found` with the best 3 in
+`below_threshold`); the list is cut to `top_k`; `expand: neighbors | parent` in the KB config
+adds context pieces within `expand_max_tokens`. `Chunk.score` stays the fusion score,
+`Chunk.rerank_score` is in [0, 1].
+
+```python
+pipeline = make_search_pipeline(cfg, settings, acl_groups=["public"], redis=redis)
+result = pipeline.retrieve("How do I log in?", kb=cfg.kb, top_k=8)
+result.chunks, result.rerank, result.threshold, result.not_found, result.below_threshold
+pipeline.get_context(result.chunks[0].chunk_id, "neighbors")  # page content + updated if gone
+```
+
 ## Retrieval evaluation
 
 Any retriever with `retrieve(question, kb, top_k) -> RetrievalResult` can be evaluated
