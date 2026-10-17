@@ -12,6 +12,7 @@
 | 2026-10-17 09:44 | P0-04 | 完成 | 2 轮 | 142 个单元测试通过（本 spec 新增 33 个；评审时在 P0-05 之上是 124 个） | 0 | 全量 2,647 篇切成 26,372 块，token 中位数 232、最长 374；HF 导出丢了首字符的 2,481 篇已按证据补回 |
 | 2026-10-17 10:54 | P0-10 | 完成 | 1 轮 | 167 个单元测试通过（本 spec 新增 25 个） | 0 | 65 题最少能分辨 6 题的差，即 9.2 个百分点；65 道 HF 公开题已导出到 evals/datasets/hf_docs/huggingface_doc_qa_eval.jsonl；运行评测的入口由 P0-12 写；P0-07 要填 RetrievalResult.routes 并用固定规则排同分的段，P0-09 返回 search_docs 时去掉 routes |
 | 2026-10-17 12:17 | P0-06 | 完成 | 3 轮 | 198 个单元测试、21 个集成测试通过 | 0.047 | 50 篇真实向量写入 kb_hf_docs_v1（438 块，94,040 token，31 秒）；docstore 绑定索引 uuid，索引重建后不再用旧的 docstore；假向量写进 fake_kb_hf_docs_v1，不进真索引；共享 .git/config 的 core.bare 曾被改成 true，已改回 |
+| 2026-10-17 13:29 | P0-11 | 完成 | 2 轮 | 228 个单元测试、2 个新集成测试通过 | 0 | 程序用 OTLP gRPC 发给 Collector（设 OTLP_PROTOCOL=http/protobuf 可改用 HTTP，两种都测过）；Collector 写的 trace 文件最多占 80 MB，指标转成 Prometheus 格式，在 127.0.0.1:28889 读取；同一个服务名的几个进程写同一个日志文件，每行拿文件锁再写；正在运行的 Collector 要在主目录执行 docker compose up -d 才会用上新配置（会重建 Collector 和 Jaeger 两个容器） |
 
 ## 已知问题
 
