@@ -19,8 +19,9 @@ after the whole run succeeded.
   `add(nodes) -> ids`, `delete(ref_doc_id)` (records only), `pending_deletes`, `written_docs`, `refresh()`,
   `finalize() -> FinalizeResult(updated_docs, removed_docs, deleted_chunks)`, `query(VectorStoreQuery)` (kNN only,
   hybrid search is P0-07); errors `BulkWriteError`, `FinalizeError`, `StoreFieldError`.
-- `rag.index.mapping`: field `images` (keyword); `ensure_index_fields(es, index, body)` adds missing fields to an
-  existing index; `index_embed_model(es, index)`, `set_index_embed_model(es, index, model_id)` (`_meta.embed_model`).
+- `rag.index.mapping`: field `images` (keyword). `rag.index.manage`: `ensure_index_fields(es, index, body)` adds
+  missing fields to an existing index; `index_embed_model(es, index)`, `set_index_embed_model(es, index, model_id)`
+  (`_meta.embed_model`).
 - `rag.factories.JsonFileDocumentStore.persist` writes a temporary file and renames it.
 - `ServiceSettings`: `ingest_max_read_failure_ratio` (0.05), `ingest_min_input_ratio` (0.5),
   `ingest_bulk_batch_size` (500), `ingest_lock_timeout_s` (5), `ingest_report_dir` (`data/reports`).

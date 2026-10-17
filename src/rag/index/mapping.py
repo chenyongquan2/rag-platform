@@ -34,6 +34,7 @@ KEYWORD_FIELDS = (
     "content_hash",
     "pipeline_version",
     "ingest_run_id",
+    "images",  # s5-4: image paths of the unit, returned with the chunk
 )
 INTEGER_FIELDS = ("chunk_index",)
 BOOLEAN_FIELDS = ("has_generated_text", "suspicious_instruction")
