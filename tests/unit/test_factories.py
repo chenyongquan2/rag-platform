@@ -48,6 +48,32 @@ def test_file_docstore_persists_and_reloads(tmp_path: Path) -> None:
         make_docstore(url, "../escape")
 
 
+def test_file_docstore_persist_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A crash while saving must leave the last saved docstore readable (spec P0-06)."""
+    from llama_index.core.storage.kvstore import simple_kvstore
+
+    url = _file_url(tmp_path / "docstore")
+    store = make_docstore(url, "hf_docs")
+    store.add_documents([Document(text="first", id_="hf_docs:a.md")])
+    store.persist()
+
+    class _BrokenJson:
+        @staticmethod
+        def dumps(_: object) -> str:
+            raise OSError("disk full")
+
+    store.add_documents([Document(text="second", id_="hf_docs:b.md")])
+    monkeypatch.setattr(simple_kvstore, "json", _BrokenJson)
+    with pytest.raises(OSError, match="disk full"):
+        store.persist()
+    monkeypatch.undo()
+
+    reloaded = make_docstore(url, "hf_docs")
+    assert reloaded.get_document("hf_docs:a.md").text == "first"
+    assert not reloaded.document_exists("hf_docs:b.md")
+    assert sorted(p.name for p in (tmp_path / "docstore").iterdir()) == ["hf_docs.json"]
+
+
 class _State(TypedDict):
     count: int
 

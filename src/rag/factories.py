@@ -8,6 +8,7 @@ the working directory unless absolute (`file://data/docstore/hf_docs.json`, `fil
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import threading
 from collections.abc import Iterator
@@ -99,7 +100,11 @@ def make_redis_client(url: str, *, socket_timeout: float = 5.0) -> Redis:
 
 
 class JsonFileDocumentStore(SimpleDocumentStore):
-    """LlamaIndex SimpleDocumentStore bound to one JSON file; `persist()` writes back to it."""
+    """LlamaIndex SimpleDocumentStore bound to one JSON file; `persist()` writes back to it.
+
+    The file is written to `<name>.tmp` and then renamed over the old one, so a crash while
+    saving leaves the last saved docstore intact (it decides what ingestion deletes, s7-4).
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -107,7 +112,15 @@ class JsonFileDocumentStore(SimpleDocumentStore):
         super().__init__(kvstore)
 
     def persist(self, persist_path: str | None = None, fs=None) -> None:  # type: ignore[no-untyped-def, override]
-        super().persist(persist_path or str(self.path), fs=fs)
+        if fs is not None:
+            raise NotImplementedError("JsonFileDocumentStore writes local files only")
+        target = Path(persist_path) if persist_path else self.path
+        tmp = target.with_name(target.name + ".tmp")
+        try:
+            super().persist(str(tmp))
+            os.replace(tmp, target)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def make_docstore(url: str, namespace: str) -> SimpleDocumentStore:
