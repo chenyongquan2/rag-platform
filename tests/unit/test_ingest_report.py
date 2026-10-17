@@ -92,6 +92,8 @@ def test_quality_report_numbers() -> None:
         "demo:copy-b.md": "duplicate",
     }
     assert report.duplicate_units == 1
+    dupes = {s.doc_id: s.duplicate_of for s in report.skipped_units if s.duplicate_of}
+    assert dupes == {"demo:copy-b.md": "demo:copy-a.md"}
     assert report.garbled_units == 1
     assert report.languages == {"en": 6, "zh": 1}
 
@@ -113,6 +115,7 @@ def test_quality_report_numbers() -> None:
     assert report.title_only_chunks == 1  # "# Alpha title here" cannot merge into "# B"
     assert report.cut_tables == 1  # the 30-row table spans two chunks
     assert report.suspicious_chunks == 1
+    assert report.unclosed_fences == 0
     assert len(report.samples) == 3
     assert all(s.diff.startswith("---") for s in report.samples if s.diff)
 

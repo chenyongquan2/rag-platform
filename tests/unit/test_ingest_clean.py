@@ -53,6 +53,10 @@ def test_hf_first_char_restores_lost_first_character() -> None:
     assert one(rule, "``python\nimport os\n```\n").startswith("```python\n")
     assert one(rule, 'p align="center">\n  <img src="x.png">\n</p>').startswith("<p align")
     assert one(rule, "FrameworkSwitchCourse {fw} />\n\n# Title").startswith("<Framework")
+    # Package names are lowercase titles (gradio's js/*/README.md).
+    assert one(rule, " create-svelte\n\nEverything you need to build a Svelte project.").startswith(
+        "# create-svelte\n"
+    )
     # Negative: intact pages and pages whose lost letter cannot be known stay as they are.
     for text in [
         "# Title\n\nbody",
@@ -61,10 +65,18 @@ def test_hf_first_char_restores_lost_first_character() -> None:
         "  indented code\n",
         " " + "x" * 200 + "\n",
         "```python\nprint(1)\n```",
+        # gradio demo/*/DESCRIPTION.md lost the "A" of "A demo ..." / "A simple ...":
+        # a one-line page is a description, not a title.
+        " demo for predicting the depth of an image and generating a 3D model of it.",
+        " simple dashboard ranking spaces by number of likes.",
+        " simple dashboard showing pypi stats for python libraries. Updates on load.\n",
+        " Gradio demo of a leaderboard with the top models\n",
+        # Lowercase prose sentence followed by more text: also a lost "A", not a title.
+        " simple demo showcasing the upload button.\n\nIt uses the `upload` event.",
     ]:
-        assert one(rule, text) == text
-    assert rule.stats.units_hit == 6
-    assert rule.stats.chars_added == 6
+        assert one(rule, text) == text, text
+    assert rule.stats.units_hit == 7
+    assert rule.stats.chars_added == 7
 
 
 def test_front_matter_moves_yaml_to_metadata() -> None:
@@ -178,6 +190,12 @@ def test_whitespace_normalizes_outside_code() -> None:
     out = one(rule, text)
     assert out == "Title\n\nSome text here.\n\n```python\ndef f():\n    return 1   \n\n\n\n```"
     assert one(Whitespace(), "Clean text.\n\nTwo paragraphs.") == "Clean text.\n\nTwo paragraphs."
+    # A code block left open at the end of the page (the source forgot the closing fence).
+    assert one(Whitespace(), "Run:\n\n```bash\nls -la\n\n") == "Run:\n\n```bash\nls -la\n```"
+    assert (
+        one(Whitespace(), "- item\n\n    ```py\n    x = 1\n")
+        == "- item\n\n    ```py\n    x = 1\n    ```"
+    )
 
 
 def test_skip_empty_units() -> None:
@@ -218,10 +236,14 @@ def test_dedupe_keeps_one_copy_and_records_sources() -> None:
     kept = rule(docs)
     # The copy with the smallest doc_id is kept, whatever the input order.
     assert [d.id_ for d in kept] == ["hf_docs:course/other.md", "hf_docs:course/02a-pt.md"]
-    assert kept[1].metadata["duplicate_sources"] == ["hf_docs:course/02a-tf.md"]
-    assert "duplicate_sources" in kept[1].excluded_embed_metadata_keys
     assert rule.stats.skipped == {"hf_docs:course/02a-tf.md": "duplicate"}
-    assert "duplicate_sources" not in kept[0].metadata
+    # Where the dropped copy went is recorded in the stats (and the quality report), never in
+    # the kept Document: its hash must not depend on other pages (s5-4).
+    assert rule.stats.duplicate_of == {"hf_docs:course/02a-tf.md": "hf_docs:course/02a-pt.md"}
+    assert "duplicate_sources" not in kept[1].metadata
+    hashes = [d.hash for d in kept]
+    alone = Dedupe()([doc(same, "course/02a-pt.md")])
+    assert alone[0].hash == hashes[1]
 
 
 def test_detect_language_per_unit() -> None:

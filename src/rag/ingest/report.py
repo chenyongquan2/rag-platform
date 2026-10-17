@@ -31,7 +31,7 @@ from rag.data import SourceDocument
 from rag.ingest.build import KbProcessor
 from rag.ingest.chunk import doc_id_of, metadata_tokens
 from rag.ingest.clean import RuleStats
-from rag.ingest.markdown import is_table_row, is_title_only
+from rag.ingest.markdown import has_unclosed_fence, is_table_row, is_title_only
 from rag.registry import connectors
 
 WARN_RATIO = 0.05
@@ -42,6 +42,7 @@ class SkippedUnit(BaseModel):
     doc_id: str
     reason: str
     rule: str
+    duplicate_of: str | None = None
 
 
 class RuleReport(BaseModel):
@@ -93,6 +94,8 @@ class QualityReport(BaseModel):
     title_only_chunks: int = 0
     cut_tables: int = 0
     suspicious_chunks: int = 0
+    unclosed_fences: int = 0
+    """Chunks that open a code fence they do not close (not valid Markdown); should be 0."""
     timings_s: dict[str, float] = Field(default_factory=dict)
     samples: list[Sample] = Field(default_factory=list)
     chunk_tokens: list[int] = Field(default_factory=list)
@@ -126,7 +129,7 @@ class QualityReport(BaseModel):
             f"{t.min}/{t.p50}/{t.p90}/{t.max}/{t.mean:.0f}  cap: {self.max_tokens}  "
             f"over cap: {self.over_cap}  tiny: {self.tiny_chunks}",
             f"title-only chunks: {self.title_only_chunks}  cut tables: {self.cut_tables}  "
-            f"suspicious chunks: {self.suspicious_chunks}",
+            f"suspicious chunks: {self.suspicious_chunks}  unclosed fences: {self.unclosed_fences}",
             "timings (s): " + ", ".join(f"{k}={v:.1f}" for k, v in self.timings_s.items()),
         ]
         return lines
@@ -231,7 +234,8 @@ def quality_report(
     skipped_units = [SkippedUnit(doc_id=d, reason=r, rule="read") for d, r in read.skipped.items()]
     for name, stats in proc.rule_stats():
         skipped_units += [
-            SkippedUnit(doc_id=d, reason=r, rule=name) for d, r in stats.skipped.items()
+            SkippedUnit(doc_id=d, reason=r, rule=name, duplicate_of=stats.duplicate_of.get(d))
+            for d, r in stats.skipped.items()
         ]
 
     tokenizer = proc.tokenizer
@@ -296,6 +300,7 @@ def quality_report(
         title_only_chunks=sum(is_title_only(c.get_content(MetadataMode.NONE)) for c in chunks),
         cut_tables=_cut_tables(chunks),
         suspicious_chunks=sum(bool(c.metadata.get("suspicious_instruction")) for c in chunks),
+        unclosed_fences=sum(has_unclosed_fence(c.get_content(MetadataMode.NONE)) for c in chunks),
         timings_s={k: round(v, 2) for k, v in timings.items()},
         samples=samples,
         chunk_tokens=chunk_tokens,

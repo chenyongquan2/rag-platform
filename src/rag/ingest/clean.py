@@ -22,7 +22,7 @@ from llama_index.core.bridge.pydantic import BaseModel, Field, PrivateAttr
 from llama_index.core.schema import BaseNode, MetadataMode, TransformComponent
 
 from rag.ingest.language import UNDETERMINED, detect_language
-from rag.ingest.markdown import heading_title, mask_code
+from rag.ingest.markdown import close_open_fence, heading_title, mask_code
 from rag.ingest.meta import add_metadata
 from rag.registry import steps
 
@@ -51,6 +51,8 @@ class RuleStats(BaseModel):
     chars_added: int = 0
     skipped: dict[str, str] = Field(default_factory=dict)
     """doc_id -> reason, for units this rule dropped."""
+    duplicate_of: dict[str, str] = Field(default_factory=dict)
+    """doc_id of a dropped copy -> doc_id of the copy that was kept (`dedupe`)."""
 
 
 class CleanRule(TransformComponent):
@@ -108,6 +110,7 @@ class TextRule(CleanRule):
 _LOST_LT = re.compile(r"[A-Za-z][\w-]*(?:\s[^<>\n]*)?/?>\s*")
 _LOST_STAR = re.compile(r"\*[^*\s][^*\n]*\*\*\s*")
 _SHORT_TITLE = re.compile(r" \S.{0,118}")
+_LOWERCASE_SENTENCE = re.compile(r" [a-z].*[.!?]")
 _FRONT_MATTER_END = re.compile(r"^---[ \t]*$", re.M)
 
 
@@ -119,6 +122,12 @@ class HfFirstChar(TextRule):
     start with " Title" (was "# Title"), 801 with "!--" (was "<!--", the licence comment),
     398 with "--" (was "---", front matter), 18 with "``python". Only these unambiguous shapes are
     repaired; a lost letter ("hat is ...") cannot be known and is left alone.
+
+    A leading space is ambiguous: it is also what a lost one-letter word leaves (" demo for ..."
+    was "A demo for ..." in gradio's demo/*/DESCRIPTION.md). In the corpus every such page is a
+    single line, or a lowercase sentence; titles are followed by more text and are capitalised,
+    non-Latin, or lowercase package names without a full stop. So "#" is put back only when
+    more text follows and the line is not a lowercase sentence ending in . ! or ?.
     """
 
     name: ClassVar[str] = "hf_first_char"
@@ -131,7 +140,12 @@ class HfFirstChar(TextRule):
             return "-" + text
         if text.startswith("``") and not text.startswith("```"):
             return "`" + text
-        if _SHORT_TITLE.fullmatch(first.rstrip()):
+        title = first.rstrip()
+        if (
+            _SHORT_TITLE.fullmatch(title)
+            and rest.strip()
+            and not _LOWERCASE_SENTENCE.fullmatch(title)
+        ):
             return "#" + text
         if _LOST_LT.fullmatch(first):
             return "<" + text
@@ -397,7 +411,8 @@ _BLANK_RUN = re.compile(r"\n{3,}")
 @steps.register("whitespace")
 class Whitespace(TextRule):
     """Line breaks to `\\n`; outside code: drop zero-width characters and trailing spaces,
-    non-breaking space to space, at most one blank line in a row; trim the unit."""
+    non-breaking space to space, at most one blank line in a row; trim the unit. A code block
+    left open at the end of the unit gets its closing fence (renders the same, CommonMark)."""
 
     name: ClassVar[str] = "whitespace"
 
@@ -409,7 +424,7 @@ class Whitespace(TextRule):
         out = masked.text.translate(_INVISIBLE)
         out = _TRAILING.sub("", out)
         out = _BLANK_RUN.sub("\n\n", out)
-        return masked.restore(out.strip())
+        return close_open_fence(masked.restore(out.strip()))
 
 
 # --- skip_empty -----------------------------------------------------------------------------
@@ -467,8 +482,9 @@ class SkipEmpty(CleanRule):
 class Dedupe(CleanRule):
     """Keep one copy of units with exactly the same cleaned text (design s6-2 重复内容).
 
-    The copy with the smallest doc_id is kept, so the choice does not depend on input order; it
-    lists the dropped copies in metadata `duplicate_sources`.
+    The copy with the smallest doc_id is kept, so the choice does not depend on input order.
+    Where each dropped copy went is recorded in `stats.duplicate_of` (and the quality report),
+    not in the kept Document: its hash must not change when another page appears (s5-4).
     """
 
     name: ClassVar[str] = "dedupe"
@@ -478,18 +494,18 @@ class Dedupe(CleanRule):
         for node in nodes:
             text = node.get_content(MetadataMode.NONE)
             groups[hashlib.sha256(text.encode("utf-8")).hexdigest()].append(node)
-        keep: dict[str, list[str]] = {}
+        kept_id: dict[str, str] = {}
         for group in groups.values():
-            ids = sorted(n.node_id for n in group)
-            keep[ids[0]] = ids[1:]
+            first = min(n.node_id for n in group)
+            for n in group:
+                kept_id[n.node_id] = first
         kept = []
         for node in nodes:
-            if node.node_id in keep:
-                if keep[node.node_id]:
-                    add_metadata(node, "duplicate_sources", keep[node.node_id])
+            if kept_id[node.node_id] == node.node_id:
                 kept.append(node)
             else:
                 self._skip(node, "duplicate")
+                self._stats.duplicate_of[node.node_id] = kept_id[node.node_id]
         return kept
 
 
