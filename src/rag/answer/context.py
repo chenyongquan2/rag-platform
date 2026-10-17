@@ -1,0 +1,234 @@
+"""Context builder: retrieved chunks to numbered, delimited fragments (design s10-3, s11-3).
+
+    ctx = build_context([result.chunks], budget_tokens=cfg.answer.context_tokens,
+                        metadata_keys=cfg.metadata.llm)
+
+Input is one ranked chunk list per sub-question (most relevant first; one list for a plain
+question, several when P3 splits a question). The builder
+
+1. removes repeated chunk ids, keeping the occurrence with the best rank;
+2. gives every sub-question an equal share of the token budget, filled in rank order, then hands
+   what is left to the remaining chunks of all sub-questions by score (rank when there is no
+   score), so the first sub-question cannot take the whole budget (s10-3);
+3. numbers the chosen chunks [1]..[n], most relevant first (rank 1 of every sub-question, then
+   rank 2, ...), and renders each as a fragment: the number, then the text and the whitelisted
+   metadata inside fixed delimiters that mark it as untrusted data, with chunks flagged by the
+   injection detector labelled `suspicious_instruction="true"` (s11-3). Delimiter look-alikes in
+   chunk text and metadata are escaped, so a chunk cannot close its fragment early.
+
+Token counts are estimates of the rendered fragment (`estimate_tokens`, or a counter passed in).
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+
+from pydantic import BaseModel, Field
+
+from rag.types import Chunk
+
+TokenCounter = Callable[[str], int]
+
+FRAGMENT_TAG = "doc_fragment"
+FRAGMENT_CLOSE = f"</{FRAGMENT_TAG}>"
+DEFAULT_METADATA_KEYS: tuple[str, ...] = ("title_path", "source_rel")
+TITLE_SEPARATOR = " > "
+
+# `<doc_fragment` or `</doc_fragment`, any case, spaces allowed: what a chunk must not contain.
+_DELIMITER = re.compile(rf"<(\s*/?\s*{FRAGMENT_TAG})", re.IGNORECASE)
+# Characters counted as one token each: CJK ideographs, kana, Hangul, full-width forms.
+_WIDE = re.compile(r"[　-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]")
+_CHARS_PER_TOKEN = 3.0  # other text; English is nearer 4, code nearer 3: err on the high side
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token count for a budget: one per CJK character, one per three other characters.
+
+    The generation model's tokenizer is not available locally; this errs on the high side for
+    English prose, so a budget is not overrun (spec P1-02, docs/decisions.md).
+    """
+    wide = len(_WIDE.findall(text))
+    return wide + math.ceil((len(text) - wide) / _CHARS_PER_TOKEN)
+
+
+def escape_delimiters(text: str) -> str:
+    """Neutralize anything that reads as a fragment delimiter (`<doc_fragment`, `</doc_fragment`
+    in any case and spacing) by writing its `<` as `&lt;` (s11-3)."""
+    return _DELIMITER.sub(r"&lt;\1", text)
+
+
+class Fragment(BaseModel):
+    """One numbered fragment of the context."""
+
+    number: int = Field(ge=1)
+    chunk: Chunk
+    sub_question: int = Field(ge=0)
+    rank: int = Field(ge=0)
+    """0-based position in its sub-question's list."""
+    tokens: int = Field(ge=0)
+    text: str
+    """Rendered: `[n]`, the opening delimiter, metadata lines, the chunk text, the closing one."""
+
+
+class AnswerContext(BaseModel):
+    """The fragments given to the model; serializable (LangGraph state, P3)."""
+
+    fragments: list[Fragment] = Field(default_factory=list)
+    budget_tokens: int = Field(ge=0)
+    tokens: int = Field(default=0, ge=0)
+    duplicates: list[str] = Field(default_factory=list)
+    """Chunk ids seen again after their first occurrence (one entry per extra occurrence)."""
+    dropped: list[str] = Field(default_factory=list)
+    """Chunk ids left out because they did not fit into the budget."""
+
+    @property
+    def text(self) -> str:
+        return "\n\n".join(f.text for f in self.fragments)
+
+    @property
+    def chunks(self) -> list[Chunk]:
+        """The fragments' chunks in number order: fragment n is `chunks[n - 1]`."""
+        return [f.chunk for f in self.fragments]
+
+    @property
+    def suspicious(self) -> list[int]:
+        """Numbers of the fragments flagged `suspicious_instruction`."""
+        return [f.number for f in self.fragments if f.chunk.suspicious_instruction]
+
+    def chunk_id(self, number: int) -> str | None:
+        """Chunk id of fragment `number`, or None when there is no such fragment."""
+        if 1 <= number <= len(self.fragments):
+            return self.fragments[number - 1].chunk.chunk_id
+        return None
+
+
+def _metadata_value(chunk: Chunk, key: str) -> str:
+    if key == "title_path":
+        value: object = TITLE_SEPARATOR.join(chunk.title_path)
+    elif key in Chunk.model_fields:
+        value = getattr(chunk, key)
+    else:
+        value = chunk.metadata.get(key)
+    if value is None:
+        return ""
+    if isinstance(value, list | tuple):
+        value = TITLE_SEPARATOR.join(str(v) for v in value)
+    # One line per key: a newline in a value cannot start a line of its own.
+    return " ".join(str(value).split())
+
+
+def render_fragment(number: int, chunk: Chunk, metadata_keys: Sequence[str]) -> str:
+    """`[n]`, then metadata and text inside `<doc_fragment n="n" untrusted="true">` and
+    `</doc_fragment>`; `suspicious_instruction="true"` is added for flagged chunks."""
+    label = ' suspicious_instruction="true"' if chunk.suspicious_instruction else ""
+    lines = [f"[{number}]", f'<{FRAGMENT_TAG} n="{number}" untrusted="true"{label}>']
+    for key in metadata_keys:
+        value = _metadata_value(chunk, key)
+        if value:
+            lines.append(f"{key}: {escape_delimiters(value)}")
+    lines.append("")
+    lines.append(escape_delimiters(chunk.text.strip("\n")))
+    lines.append(FRAGMENT_CLOSE)
+    return "\n".join(lines)
+
+
+@dataclass
+class _Candidate:
+    chunk: Chunk
+    sub_question: int
+    rank: int
+    tokens: int = 0
+
+    def order(self) -> tuple[int, int]:
+        """Context order: rank 1 of every sub-question first, then rank 2, ..."""
+        return self.rank, self.sub_question
+
+    def by_score(self) -> tuple[bool, float, int, int]:
+        """Order for the leftover budget: scored chunks by score, then the rest by rank."""
+        score = self.chunk.score
+        return score is None, -(score or 0.0), self.rank, self.sub_question
+
+
+def _candidates(
+    chunk_lists: Sequence[Sequence[Chunk]],
+) -> tuple[list[_Candidate], list[str]]:
+    best: dict[str, _Candidate] = {}
+    duplicates: list[str] = []
+    for sub_question, chunks in enumerate(chunk_lists):
+        for rank, chunk in enumerate(chunks):
+            candidate = _Candidate(chunk, sub_question, rank)
+            previous = best.get(chunk.chunk_id)
+            if previous is None:
+                best[chunk.chunk_id] = candidate
+                continue
+            duplicates.append(chunk.chunk_id)
+            if candidate.order() < previous.order():
+                best[chunk.chunk_id] = candidate
+    return list(best.values()), duplicates
+
+
+def build_context(
+    chunk_lists: Sequence[Sequence[Chunk]],
+    budget_tokens: int,
+    *,
+    metadata_keys: Sequence[str] = DEFAULT_METADATA_KEYS,
+    count_tokens: TokenCounter = estimate_tokens,
+) -> AnswerContext:
+    """Numbered fragments from one ranked chunk list per sub-question (see the module doc).
+
+    `metadata_keys` is the knowledge base's prompt whitelist (`metadata.llm`, s5-4): only these
+    keys are shown, `title_path` joined with " > ".
+    """
+    candidates, duplicates = _candidates(chunk_lists)
+    # Count with the widest number any fragment can get, so the final text never needs more.
+    widest = max(len(candidates), 1)
+    for candidate in candidates:
+        rendered = render_fragment(widest, candidate.chunk, metadata_keys)
+        candidate.tokens = count_tokens(rendered)
+
+    chosen: list[_Candidate] = []
+    used = 0
+    sub_questions = max(len(chunk_lists), 1)
+    share = budget_tokens // sub_questions
+    for sub_question in range(sub_questions):
+        own = sorted(
+            (c for c in candidates if c.sub_question == sub_question), key=_Candidate.order
+        )
+        spent = 0
+        for candidate in own:
+            if spent + candidate.tokens > share:
+                break
+            chosen.append(candidate)
+            spent += candidate.tokens
+        used += spent
+
+    picked = {id(c) for c in chosen}
+    for candidate in sorted(
+        (c for c in candidates if id(c) not in picked), key=_Candidate.by_score
+    ):
+        if used + candidate.tokens <= budget_tokens:
+            chosen.append(candidate)
+            picked.add(id(candidate))
+            used += candidate.tokens
+
+    fragments = [
+        Fragment(
+            number=number,
+            chunk=c.chunk,
+            sub_question=c.sub_question,
+            rank=c.rank,
+            tokens=c.tokens,
+            text=render_fragment(number, c.chunk, metadata_keys),
+        )
+        for number, c in enumerate(sorted(chosen, key=_Candidate.order), start=1)
+    ]
+    return AnswerContext(
+        fragments=fragments,
+        budget_tokens=budget_tokens,
+        tokens=used,
+        duplicates=duplicates,
+        dropped=[c.chunk.chunk_id for c in candidates if id(c) not in picked],
+    )
