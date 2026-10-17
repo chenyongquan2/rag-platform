@@ -271,12 +271,14 @@ class ServiceSettings(BaseSettings):
     ingest_report_dir: str = "data/reports"
 
     # Query path (spec P0-07, design s16-1, s16-2). `search_deadline_ms`: total time of one
-    # search when the caller passes no deadline_ms. While waiting for the question vector the
-    # retriever keeps `search_es_reserve_ms` for the Elasticsearch request; each search inside
-    # the `_msearch` gets an ES time-out `search_es_margin_ms` before the HTTP request's, so a
-    # slow route comes back as timed out while the other route still counts.
+    # search when the caller passes no deadline_ms. While waiting for the question vector from
+    # the gateway the retriever keeps min(`search_es_reserve_ms`, `search_es_reserve_ratio` x
+    # the request's time limit) for the Elasticsearch request (an `_msearch` takes ~20 ms); each
+    # search inside the `_msearch` gets an ES time-out `search_es_margin_ms` before the HTTP
+    # request's, so a slow route comes back as timed out while the other route still counts.
     search_deadline_ms: int = Field(default=10_000, gt=0)
-    search_es_reserve_ms: int = Field(default=1_000, ge=0)
+    search_es_reserve_ms: int = Field(default=200, ge=0)
+    search_es_reserve_ratio: float = Field(default=0.2, ge=0, lt=1)
     search_es_margin_ms: int = Field(default=200, ge=0)
 
     # Money: stop real model jobs when spent + estimate would exceed budget_stop_cny.

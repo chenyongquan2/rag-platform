@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from rag.config import KnowledgeBaseConfig, RetrievalConfig, ServiceSettings
 from rag.eval.questions import LabeledQuestion, load_question_set, save_question_set
@@ -179,8 +181,11 @@ def test_retrieval_config_defaults() -> None:
         RetrievalConfig(rrf_k=-1)
     settings = ServiceSettings(_env_file=None)  # type: ignore[call-arg]
     assert settings.search_deadline_ms == 10_000
-    assert settings.search_es_reserve_ms == 1_000
+    assert settings.search_es_reserve_ms == 200
+    assert settings.search_es_reserve_ratio == 0.2
     assert settings.search_es_margin_ms == 200
+    with pytest.raises(ValidationError):
+        ServiceSettings(_env_file=None, search_es_reserve_ratio=1.0)  # type: ignore[call-arg]
     assert Deadline.after_ms(1000).remaining_ms() <= 1000
 
 
@@ -204,6 +209,8 @@ def test_factory_refuses_other_embed_model() -> None:
     )
     assert search.retriever.index == "kb_hf_docs"
     assert search.deadline_ms == settings.search_deadline_ms
+    assert search.retriever.es_reserve_ms == settings.search_es_reserve_ms
+    assert search.retriever.es_reserve_ratio == settings.search_es_reserve_ratio
     # With an index prefix the fake-vector alias is used.
     es.indices.create(
         index="fake_kb_hf_docs_v1", mappings={"_meta": {"embed_model": "fake-embedding@4"}}
@@ -220,3 +227,31 @@ def test_factory_refuses_other_embed_model() -> None:
         index_prefix="fake_",
     )
     assert fake.retriever.index == "fake_kb_hf_docs"
+
+
+def test_data_generation_read_is_bounded_by_the_deadline() -> None:
+    def slow_generation() -> int:
+        time.sleep(1.5)  # a Redis that does not answer
+        return 7
+
+    search = _search(_es(), generation=slow_generation)
+    start = time.monotonic()
+    result = search.retrieve("q", kb=KB, top_k=2, deadline_ms=300)
+    assert time.monotonic() - start < 1.0
+    assert result.data_generation == 0  # unknown, the search result is still returned
+    assert [c.chunk_id for c in result.chunks] == [f"{A}#0", f"{B}#1"]
+
+    def failing_generation() -> int:
+        raise RedisConnectionError("redis down")
+
+    assert (
+        _search(_es(), generation=failing_generation).retrieve("q", kb=KB, top_k=2).data_generation
+        == 0
+    )
+    assert _search(_es(), generation=lambda: 9).retrieve("q", kb=KB, top_k=2).data_generation == 9
+
+
+def test_acl_groups_must_be_a_list() -> None:
+    retriever = _search(_es()).retriever
+    with pytest.raises(TypeError, match="acl_groups"):
+        HybridSearch(retriever, acl_groups="grp", deadline_ms=1000)

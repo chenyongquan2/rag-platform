@@ -50,6 +50,9 @@ class Chunk(BaseModel):
     source_url: str | None = None
     source_version: str | None = None
     score: float | None = None
+    """The score of the list the chunk came from: from the hybrid retriever, the RRF fusion
+    score (sum of 1 / (k + rank) over the routes, s9-3), not a BM25 score or a similarity;
+    each route's own rank and score are in `metadata["route_ranks"]` / `["route_scores"]`."""
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

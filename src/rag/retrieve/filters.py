@@ -50,6 +50,8 @@ def build_es_filter(
     """
     if not kb:
         raise ValueError("kb must not be empty")
+    if isinstance(acl_groups, (str, bytes)):
+        raise TypeError("acl_groups must be a list of group names, not one string")
     groups = list(acl_groups)
     if not groups or not all(isinstance(g, str) and g for g in groups):
         raise ValueError("acl_groups must name at least one non-empty group of the caller")
@@ -58,6 +60,8 @@ def build_es_filter(
         {"terms": {"acl_groups": groups}},
     ]
     filters = dict(filters or {})
+    if not all(isinstance(key, str) for key in filters):
+        raise FilterError(f"filter keys must be strings; allowed: {list(CALLER_FILTER_KEYS)}")
     unknown = sorted(set(filters) - set(CALLER_FILTER_KEYS))
     if unknown:
         raise FilterError(f"unknown filter keys {unknown}; allowed: {list(CALLER_FILTER_KEYS)}")

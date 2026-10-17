@@ -15,6 +15,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from elasticsearch import Elasticsearch
@@ -37,6 +38,10 @@ from rag.retrieve.query import HybridQuery
 from rag.types import Chunk, RetrievalResult
 
 logger = logging.getLogger(__name__)
+
+GENERATION_THREADS = 2
+"""Threads reading the data generation; a Redis call stuck past the deadline holds one until
+its socket time-out."""
 
 
 class IndexEmbedModelError(RuntimeError):
@@ -85,11 +90,20 @@ class HybridSearch:
     ) -> None:
         if deadline_ms <= 0:
             raise ValueError(f"deadline_ms must be > 0, got {deadline_ms}")
+        if isinstance(acl_groups, (str, bytes)):
+            raise TypeError("acl_groups must be a list of group names, not one string")
         self.retriever = retriever
         self.acl_groups = tuple(acl_groups)
         self.deadline_ms = deadline_ms
         self.postprocessors = list(postprocessors) if postprocessors is not None else [TextDedupe()]
         self._generation = generation
+        # The data generation is read in parallel with the search and waited for only until
+        # the deadline, so a slow Redis never delays the result (it then reports 0).
+        self._generation_pool = (
+            ThreadPoolExecutor(max_workers=GENERATION_THREADS, thread_name_prefix="data-gen")
+            if generation is not None
+            else None
+        )
 
     @property
     def kb(self) -> str:
@@ -112,13 +126,17 @@ class HybridSearch:
         if top_k <= 0:
             raise ValueError(f"top_k must be > 0, got {top_k}")
         start = time.perf_counter()
+        deadline = Deadline.after_ms(deadline_ms if deadline_ms is not None else self.deadline_ms)
         query = HybridQuery(
             question,
             acl_groups=self.acl_groups,
             filters=dict(filters or {}),
-            deadline=Deadline.after_ms(
-                deadline_ms if deadline_ms is not None else self.deadline_ms
-            ),
+            deadline=deadline,
+        )
+        generation = (
+            self._generation_pool.submit(self._generation)
+            if self._generation_pool is not None and self._generation is not None
+            else None
         )
         nodes = self.retriever.retrieve(query)
         for post in self.postprocessors:
@@ -133,24 +151,30 @@ class HybridSearch:
             request_id=request_id or uuid.uuid4().hex,
             kb=self.kb,
             index_version=trace.index_version,
-            data_generation=self._read_generation(),
+            data_generation=self._read_generation(generation, deadline),
             degraded=trace.degraded,
             timings_ms=dict(trace.timings_ms),
             chunks=chunks,
             routes={name: list(hits) for name, hits in trace.routes.items()},
         )
 
-    def _read_generation(self) -> int:
-        if self._generation is None:
+    @staticmethod
+    def _read_generation(future: Future[int] | None, deadline: Deadline) -> int:
+        """The data generation read in parallel, or 0 when there is no reader, it failed or it
+        did not answer before the deadline (the generation is informational here)."""
+        if future is None:
             return 0
         try:
-            return int(self._generation())
-        except (RedisError, OSError) as exc:  # the generation is informational here
-            logger.warning("data generation not readable: %s", exc)
+            return int(future.result(timeout=deadline.remaining_s()))
+        except (RedisError, OSError, TimeoutError) as exc:
+            future.cancel()
+            logger.warning("data generation not read: %s", type(exc).__name__)
             return 0
 
     def close(self) -> None:
         self.retriever.close()
+        if self._generation_pool is not None:
+            self._generation_pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _embed_id(embed: BaseEmbedding) -> str:
@@ -211,6 +235,7 @@ def make_hybrid_search(
         index=names.alias,
         config=cfg.retrieval,
         es_reserve_ms=settings.search_es_reserve_ms,
+        es_reserve_ratio=settings.search_es_reserve_ratio,
         es_margin_ms=settings.search_es_margin_ms,
         embed_threads=settings.embed_max_concurrency,
     )

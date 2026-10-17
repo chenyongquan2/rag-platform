@@ -48,6 +48,8 @@ def test_filter_always_has_kb_and_acl() -> None:
         {"language": []},  # empty list
         {"doc_type": {"wildcard": "*"}},  # no query DSL through a value
         {"source_rel_prefix": ["a", "b"]},  # prefix takes one string
+        {1: "x"},  # keys are strings
+        {"doc_type": "mdx", 2: "x"},  # mixed key types must not crash the check
     ],
 )
 def test_filter_rejects_unknown_keys_and_cannot_drop_acl(filters: dict[str, object]) -> None:
@@ -64,3 +66,8 @@ def test_filter_requires_acl_groups_and_kb() -> None:
         build_es_filter(kb="hf_docs", acl_groups=[""])
     with pytest.raises(ValueError, match="kb"):
         build_es_filter(kb="", acl_groups=["public"])
+    # A plain string is not a list of groups ("grp" must not become "g", "r", "p").
+    with pytest.raises(TypeError, match="acl_groups"):
+        build_es_filter(kb="hf_docs", acl_groups="grp")
+    with pytest.raises(TypeError, match="acl_groups"):
+        build_es_filter(kb="hf_docs", acl_groups=b"grp")  # type: ignore[arg-type]
