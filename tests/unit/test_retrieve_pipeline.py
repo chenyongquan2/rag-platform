@@ -21,7 +21,7 @@ from rag.retrieve.pipeline import SearchPipeline, make_search_pipeline, search_c
 from rag.retrieve.rerank import BatchedTimeoutRerank, RerankRunner
 from rag.retrieve.threshold import RerankThreshold
 from rag.testing import FakeEmbedding
-from rag.testing.rerank import FakeCrossEncoder
+from rag.testing.rerank import FakeCrossEncoder, ManualClock
 from rag.testing.retrieval import FakeMsearchClient, es_hit, search_response
 from rag.testing.services import FakeElasticsearch
 from rag.types import (
@@ -104,6 +104,7 @@ def _pipeline(
     expand: str = "none",
     threshold: float = 0.3,
     rerank_n: int = 30,
+    clock: ManualClock | None = None,
 ) -> SearchPipeline:
     retriever = EsHybridRetriever(
         msearch,
@@ -127,6 +128,7 @@ def _pipeline(
         acl_groups=["public"],
         deadline_ms=5000,
         config_version="cfg1",
+        **({"clock": clock} if clock is not None else {}),
     )
 
 
@@ -219,21 +221,30 @@ def test_pipeline_not_found_result() -> None:
 
 
 def test_pipeline_rerank_timeout_result() -> None:
-    # 12 candidates, batches of ~0.3 s, 0.5 s in total: one batch fits, 4 candidates unscored.
+    # A manual clock drives the whole request: 12 candidates, 0.05 s per pair, 0.5 s in total.
+    # Batch 1 (8 pairs) ends with 0.1 s left, batch 2 (4 pairs) would need 0.2 s: not started.
+    clock = ManualClock()
     pages = list(range(1, 13))
-    scorer = FakeCrossEncoder({_text(n): 0.5 + n / 100 for n in pages}, sleep_s=0.3)
-    pipeline = _pipeline(_msearch(bm25=pages), scorer)
+    scores = {_text(n): 0.5 + n / 100 for n in pages} | {_text(1): 0.1}
+    scorer = FakeCrossEncoder(scores, clock=clock, per_pair_s=0.05)
+    pipeline = _pipeline(_msearch(bm25=pages), scorer, clock=clock)
     result = pipeline.retrieve("q", kb=KB, top_k=10, deadline_ms=500)
 
     assert result.rerank_timeout is True
     assert result.error_categories == [ErrorCategory.RERANK_TIMEOUT]
     assert [len(b) for b in scorer.batches] == [8]
+    # Scored above the threshold, then unscored in fusion order; p1 (0.1, below) moves to the
+    # end and falls out of the top 10, nothing is dropped by the threshold.
     ids = [c.chunk_id for c in result.chunks]
-    assert ids == [f"{_page(n)}#0" for n in (8, 7, 6, 5, 4, 3, 2, 1, 9, 10)]
-    assert [c.rerank_score for c in result.chunks[8:]] == [None, None]
+    assert ids == [f"{_page(n)}#0" for n in (8, 7, 6, 5, 4, 3, 2, 9, 10, 11)]
+    assert [c.rerank_score for c in result.chunks[7:]] == [None, None, None]
     assert result.not_found is False
     assert result.threshold is not None
-    assert (result.threshold.kept, result.threshold.dropped) == (12, 0)
+    assert (result.threshold.applied, result.threshold.kept, result.threshold.dropped) == (
+        False,
+        12,
+        0,
+    )
 
 
 def test_make_search_pipeline_from_config(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Callable, Sequence
 from typing import Literal
 
@@ -92,6 +93,7 @@ class SearchPipeline(HybridSearch):
         config_version: str = "",
         context_window: int = 1,
         context_max_tokens: int = 4000,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         super().__init__(
             retriever,
@@ -101,6 +103,7 @@ class SearchPipeline(HybridSearch):
             expander=expander,
             generation=generation,
             config_version=config_version,
+            clock=clock,
         )
         self.reader = reader if reader is not None else (expander.reader if expander else None)
         self.context_mode: ContextMode = (
@@ -127,7 +130,7 @@ class SearchPipeline(HybridSearch):
             acl_groups=self.acl_groups,
             window=self.context_window,
             max_tokens=self.context_max_tokens,
-            deadline=Deadline.after_ms(deadline_ms or self.deadline_ms),
+            deadline=Deadline.after_ms(deadline_ms or self.deadline_ms, clock=self.clock),
         )
 
 

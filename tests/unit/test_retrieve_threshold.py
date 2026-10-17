@@ -43,32 +43,40 @@ def test_threshold_drops_scored_below() -> None:
 
 
 def test_threshold_after_timeout_keeps_unscored() -> None:
-    # Scored first (by rerank score), then unscored in fusion order: only scored ones are judged.
-    nodes = [_node("a", 0.8), _node("b", 0.1), _node("c", None), _node("d", None)]
+    # After a rerank timeout nothing is dropped (s9-1, s16-8): scored chunks at or above the
+    # threshold first, then the unscored ones in fusion order, then the scored ones below.
+    nodes = [_node("a", 0.8), _node("e", 0.3), _node("b", 0.1), _node("c", None), _node("d", None)]
     query = _query(timed_out=True)
     out = RerankThreshold(threshold=0.3).postprocess_nodes(nodes, query_bundle=query)
-    assert _ids(out) == ["a", "c", "d"]
+    assert _ids(out) == ["a", "e", "c", "d", "b"]
+    assert query.trace.not_found is False
     assert query.trace.threshold == ThresholdDecision(
-        threshold=0.3, top_score=0.8, applied=True, passed=True, kept=3, dropped=1
+        threshold=0.3, top_score=0.8, applied=False, passed=True, kept=5, dropped=0
     )
 
-    # Every scored chunk below the threshold, unscored ones left: not "not found".
+    # Every scored chunk below the threshold: still nothing dropped, never "not found".
     nodes = [_node("a", 0.2), _node("b", None)]
     query = _query(timed_out=True)
     out = RerankThreshold(threshold=0.3).postprocess_nodes(nodes, query_bundle=query)
-    assert _ids(out) == ["b"]
+    assert _ids(out) == ["b", "a"]
     assert query.trace.not_found is False
     assert query.trace.threshold is not None and query.trace.threshold.passed is False
 
-    # Nothing scored at all (no slot before the deadline): everything kept, threshold not applied.
+    # Nothing scored at all (no slot before the deadline): everything kept in fusion order.
     nodes = [_node("a", None), _node("b", None)]
     query = _query(timed_out=True)
     out = RerankThreshold(threshold=0.3).postprocess_nodes(nodes, query_bundle=query)
     assert _ids(out) == ["a", "b"]
-    assert query.trace.not_found is False
     assert query.trace.threshold == ThresholdDecision(
         threshold=0.3, top_score=None, applied=False, passed=None, kept=2, dropped=0
     )
+
+    # Without a HybridQuery (no trace), unscored chunks alone mark a partial rerank.
+    from llama_index.core.schema import QueryBundle
+
+    nodes = [_node("a", 0.9), _node("b", 0.1), _node("c", None)]
+    out = RerankThreshold(threshold=0.3).postprocess_nodes(nodes, query_bundle=QueryBundle("q"))
+    assert _ids(out) == ["a", "c", "b"]
 
 
 def test_threshold_all_below_returns_not_found_with_top3() -> None:

@@ -101,6 +101,7 @@ class HybridSearch:
         expander: BaseNodePostprocessor | None = None,
         generation: Callable[[], int] | None = None,
         config_version: str = "",
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if deadline_ms <= 0:
             raise ValueError(f"deadline_ms must be > 0, got {deadline_ms}")
@@ -112,6 +113,8 @@ class HybridSearch:
         self.postprocessors = list(postprocessors) if postprocessors is not None else [TextDedupe()]
         self.expander = expander
         self.config_version = config_version
+        self.clock = clock
+        """Monotonic clock of the request deadlines (a manual clock in tests)."""
         self._generation = generation
         # The data generation is read in parallel with the search and waited for only until
         # the deadline, so a slow Redis never delays the result (it then reports 0).
@@ -142,7 +145,9 @@ class HybridSearch:
         if top_k <= 0:
             raise ValueError(f"top_k must be > 0, got {top_k}")
         start = time.perf_counter()
-        deadline = Deadline.after_ms(deadline_ms if deadline_ms is not None else self.deadline_ms)
+        deadline = Deadline.after_ms(
+            deadline_ms if deadline_ms is not None else self.deadline_ms, clock=self.clock
+        )
         query = HybridQuery(
             question,
             acl_groups=self.acl_groups,

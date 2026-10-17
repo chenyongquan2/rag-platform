@@ -74,9 +74,9 @@ class Chunk(BaseModel):
 class ThresholdDecision(BaseModel):
     """What the rerank-score threshold did to one request's list (design s9-1, s10-2, s16-8).
 
-    Only chunks with a rerank score are judged; chunks left unscored by a rerank timeout are
-    kept. `applied` is False when no chunk had a rerank score (nothing was judged); `passed`
-    says whether the best rerank score reached the threshold (None without scores); `kept` and
+    `applied` is False after a rerank timeout (nothing is cut by the threshold; chunks below it
+    only move behind the unscored ones) and when no chunk had a rerank score; `passed` says
+    whether the best rerank score reached the threshold (None without scores); `kept` and
     `dropped` count chunks before the top_k cut.
     """
 
