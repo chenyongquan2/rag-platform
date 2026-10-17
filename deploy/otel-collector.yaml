@@ -1,6 +1,9 @@
 # OpenTelemetry Collector (contrib) for local development. Design s15-1.
-# The app sends traces over OTLP; this file decides where they go. To add or change a backend
-# (Langfuse, a company platform), edit only this file.
+# The app sends traces and metrics over OTLP; this file decides where they go. To add or change a
+# backend (Langfuse, a company platform), edit only this file.
+#   traces  -> Jaeger and a local JSON file (rotated, at most 4 x 20 MB on disk)
+#   metrics -> Prometheus format on :8889 (host 127.0.0.1:28889); nothing on disk. From P5 a
+#              Prometheus server scrapes it.
 extensions:
   health_check:
     endpoint: 0.0.0.0:13133
@@ -30,10 +33,17 @@ exporters:
   file/traces:
     path: /data/otel/traces.jsonl
     format: json
+    # The disk is small: current file plus 3 backups of 20 MB, none older than 3 days.
     rotation:
-      max_megabytes: 50
-      max_days: 7
-      max_backups: 5
+      max_megabytes: 20
+      max_days: 3
+      max_backups: 3
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # A series not updated for this long is dropped (a stopped process).
+    metric_expiration: 10m
+    resource_to_telemetry_conversion:
+      enabled: false
 
 service:
   extensions: [health_check]
@@ -42,3 +52,7 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [otlp/jaeger, file/traces]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

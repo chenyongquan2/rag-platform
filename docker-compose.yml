@@ -8,8 +8,16 @@
 #   Redis            redis://127.0.0.1:26379/0
 #   OTLP gRPC        http://127.0.0.1:24317    OTLP HTTP http://127.0.0.1:24318
 #   Collector health http://127.0.0.1:33133/
+#   Metrics (Prometheus format) http://127.0.0.1:28889/metrics
 #   Jaeger UI        http://127.0.0.1:36686/
 name: rag-platform
+
+# Container stdout logs also fill the Docker disk; Docker keeps them forever by default.
+x-small-logs: &small-logs
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
 
 services:
   elasticsearch:
@@ -76,6 +84,8 @@ services:
       - "127.0.0.1:24317:4317"
       - "127.0.0.1:24318:4318"
       - "127.0.0.1:33133:13133"
+      - "127.0.0.1:28889:8889"
+    logging: *small-logs
     # The image has no shell or HTTP client, so there is no container healthcheck;
     # scripts/dev_up.sh polls the health_check extension from the host instead.
     depends_on:
@@ -85,6 +95,7 @@ services:
   jaeger:
     # Jaeger v2 all-in-one (v1 all-in-one is end of life); traces are kept in memory.
     image: jaegertracing/jaeger:2.22.0
+    logging: *small-logs
     ports:
       - "127.0.0.1:36686:16686"
     healthcheck:
