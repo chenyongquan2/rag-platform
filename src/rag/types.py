@@ -71,10 +71,22 @@ class _ResultMeta(BaseModel):
         return [category for is_set, category in flags if is_set]
 
 
+class RouteHit(BaseModel):
+    """One entry of a single route's own ranked list (BM25 or vector), before fusion (s9-1)."""
+
+    chunk_id: str
+    doc_id: str
+    rank: int = Field(ge=1)
+    score: float | None = None
+
+
 class RetrievalResult(_ResultMeta):
     """Output of the retrieval layer and of the `search_docs` tool."""
 
     chunks: list[Chunk] = Field(default_factory=list)
+    routes: dict[str, list[RouteHit]] = Field(default_factory=dict, exclude=True)
+    """Each route's own ranked list (`bm25`, `vector`, ...), for per-route eval metrics and
+    traces (s9-1, s14-1). Left out of the JSON sent to callers."""
 
 
 class Citation(BaseModel):

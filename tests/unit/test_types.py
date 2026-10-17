@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+from pydantic import ValidationError
+
 from rag.types import (
     Answer,
     AnswerSentence,
@@ -10,6 +13,7 @@ from rag.types import (
     Citation,
     ErrorCategory,
     RetrievalResult,
+    RouteHit,
 )
 
 
@@ -86,3 +90,28 @@ def test_answer_roundtrip_json() -> None:
         "degraded",
         "answer_parse_failed",
     ]
+
+
+def test_retrieval_result_routes_kept_out_of_json() -> None:
+    """Each route's own ranked list rides on the result for eval and trace (s9-1, spec P0-10),
+    but is not part of the JSON returned to tool callers."""
+    bm25 = [RouteHit(chunk_id="c1", doc_id="hf_docs:a.md", rank=1, score=7.5)]
+    vector = [
+        RouteHit(chunk_id="c2", doc_id="hf_docs:b.md", rank=1),
+        RouteHit(chunk_id="c1", doc_id="hf_docs:a.md", rank=2, score=0.8),
+    ]
+    result = RetrievalResult(
+        request_id="req-3",
+        kb="hf_docs",
+        chunks=[_chunk("c1")],
+        routes={"bm25": bm25, "vector": vector},
+    )
+    assert result.routes["vector"][1].rank == 2
+    assert result.routes["vector"][0].score is None
+    assert RetrievalResult(request_id="r", kb="hf_docs").routes == {}
+
+    dumped = json.loads(result.model_dump_json())
+    assert "routes" not in dumped
+    assert "routes" not in result.model_dump()
+    with pytest.raises(ValidationError):
+        RouteHit(chunk_id="c1", doc_id="hf_docs:a.md", rank=0)
