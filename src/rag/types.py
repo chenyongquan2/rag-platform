@@ -23,6 +23,11 @@ class ErrorCategory(StrEnum):
     LLM_ERROR = "llm_error"
     BUDGET_EXCEEDED = "budget_exceeded"
     STRUCTURED_OUTPUT_FAILED = "structured_output_failed"
+    # Retrieval (spec P0-07): both routes failed, or the deadline passed before an answer;
+    # a caller filter outside the whitelist (s16-1).
+    RETRIEVAL_FAILED = "retrieval_failed"
+    RETRIEVAL_TIMEOUT = "retrieval_timeout"
+    INVALID_FILTER = "invalid_filter"
 
 
 class AnswerStatus(StrEnum):
