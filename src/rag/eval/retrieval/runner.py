@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import time
@@ -21,6 +22,7 @@ from rag.config import REPO_ROOT, KnowledgeBaseConfig, ServiceSettings, repo_pat
 from rag.eval.questions import LabeledQuestion, QuestionSet, content_sha256
 from rag.eval.retrieval.metrics import (
     Level,
+    cap_ks,
     compute_metrics,
     first_relevant_rank,
     is_binary_metric,
@@ -55,6 +57,29 @@ def make_run_id(kb: str, label: str = "", now: datetime | None = None) -> str:
     return f"{now:%Y%m%dT%H%M%SZ}_{kb}" + (f"_{slug}" if slug else "")
 
 
+# Variables that point git at another repository (set e.g. inside git hooks); dropped so that
+# `git -C <repo_root>` always describes `repo_root` (`git rev-parse --local-env-vars`).
+_GIT_REPO_ENV = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+}
+
+
+def git_env() -> dict[str, str]:
+    """The current environment without the variables that redirect git to another repo."""
+    return {k: v for k, v in os.environ.items() if k not in _GIT_REPO_ENV}
+
+
 def _git(repo_root: Path, *args: str) -> str | None:
     try:
         done = subprocess.run(
@@ -63,6 +88,7 @@ def _git(repo_root: Path, *args: str) -> str | None:
             text=True,
             timeout=30,
             check=True,
+            env=git_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -75,10 +101,22 @@ def collect_provenance(
     models: dict[str, str] | None = None,
     repo_root: Path = REPO_ROOT,
 ) -> Provenance:
-    """Git commit and dirty flag, `uv.lock` hash, model ids (default: embed and reranker)."""
+    """Git commit and dirty flag, `uv.lock` hash, model ids (default: embed and reranker).
+
+    Dirty means changed or untracked files anywhere except under `evals/reports/` (the reports
+    are outputs of runs, not inputs).
+    """
     settings = settings if settings is not None else ServiceSettings()
     commit = _git(repo_root, "rev-parse", "HEAD")
-    status = _git(repo_root, "status", "--porcelain", "--untracked-files=no")
+    status = _git(
+        repo_root,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        ".",
+        f":(exclude){REPORTS_ROOT}",
+    )
     lock = repo_root / "uv.lock"
     return Provenance(
         git_commit=commit.strip() if commit else None,
@@ -205,13 +243,14 @@ def run_retrieval_eval(
 ) -> RunRecord:
     """Ask every question once, in file order, and score the final list and every route.
 
-    `top_k` defaults to the KB's `retrieval.final_k`. A retriever exception is recorded on the
-    question (`error`) and the question scores 0 everywhere; the run goes on. `provenance`
-    defaults to `collect_provenance()`.
+    `top_k` defaults to the KB's `retrieval.final_k`; a k above `top_k` is capped at `top_k`
+    with a warning (`cap_ks`), for the routes too, so every column is cut at the same depth. A
+    retriever exception is recorded on the question (`error`) and the question scores 0
+    everywhere; the run goes on. `provenance` defaults to `collect_provenance()`.
     """
     question_set.check_kb(kb_config.kb)
     top_k = top_k if top_k is not None else kb_config.retrieval.final_k
-    metric_names(ks)  # validates ks
+    ks = cap_ks(ks, top_k)
     now = (now or datetime.now(UTC)).astimezone(UTC)
     provenance = provenance if provenance is not None else collect_provenance()
 
@@ -282,7 +321,7 @@ def write_run(record: RunRecord, *, public: bool, reports_root: str | Path = REP
     """Write `results.json` and `report.md` into a new run directory and return it.
 
     `public` must be decided by the caller from where the KB config lives (`kb/public/` or
-    not, `rag.config.is_public_kb_file`): reports of private knowledge bases quote their
+    not, `rag.config.kb.is_public_kb_file`): reports of private knowledge bases quote their
     questions and doc ids, so they go to the git-ignored `private/` directory.
     """
     record = record.model_copy(update={"run": record.run.model_copy(update={"public": public})})

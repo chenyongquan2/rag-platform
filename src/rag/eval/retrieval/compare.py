@@ -15,6 +15,7 @@ from rag.eval.retrieval.metrics import LEVELS, Level, is_binary_metric, metric_n
 from rag.eval.retrieval.record import FINAL, QuestionRecord, RunRecord
 from rag.eval.retrieval.report import resolution_sentence
 from rag.eval.stats import (
+    CHANGE_TOL,
     PairedChanges,
     mcnemar_exact,
     paired_changes,
@@ -166,7 +167,7 @@ def compare_runs(
     for qid in paired:
         x, y = qa[qid], qb[qid]
         va, vb = x.metrics[list_name][level][metric], y.metrics[list_name][level][metric]
-        if abs(vb - va) > 1e-12:
+        if abs(vb - va) > CHANGE_TOL:
             changed.append(
                 ChangedQuestion(
                     qid=qid,

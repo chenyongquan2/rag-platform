@@ -10,6 +10,7 @@ k a perfect list still scores 1 (LlamaIndex's RetrieverEvaluator does not cap it
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Collection, Iterable, Sequence
 from typing import Literal
 
@@ -75,6 +76,26 @@ def metric_names(ks: Sequence[int]) -> list[str]:
         *(f"ndcg@{k}" for k in ks),
         *(f"recall@{k}" for k in ks),
     ]
+
+
+def cap_ks(ks: Sequence[int], list_len: int) -> tuple[int, ...]:
+    """Cap every k at the length of the final list, with a warning when one is changed.
+
+    With an 8-segment final list, "@10" would only repeat "@8" under a misleading name, and the
+    route columns (20 entries each) would be cut at 10 while the final list is cut at 8. Capped
+    ks are sorted and unique, e.g. `(1, 3, 5, 10)` with `list_len=8` gives `(1, 3, 5, 8)`.
+    """
+    metric_names(ks)  # validates
+    if list_len < 1:
+        raise ValueError(f"list length must be >= 1, got {list_len}")
+    too_big = sorted(k for k in ks if k > list_len)
+    if too_big:
+        warnings.warn(
+            f"k = {too_big} exceed the final list length {list_len}; reported as @{list_len}",
+            UserWarning,
+            stacklevel=3,
+        )
+    return tuple(sorted({min(k, list_len) for k in ks}))
 
 
 def compute_metrics(

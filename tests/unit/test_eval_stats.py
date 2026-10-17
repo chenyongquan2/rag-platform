@@ -89,6 +89,11 @@ def test_paired_changes_counts() -> None:
     with pytest.raises(ValueError):
         paired_changes([1.0], [])
 
+    # The permutation test treats the same float noise as "unchanged": only q2 is flipped.
+    perm = paired_permutation_test([*a[:2], 0.5], [*b[:2], 0.5 + 1e-15])
+    assert perm.iterations == 2  # 2**1 sign patterns, not 2**2
+    assert perm.p_value == 1.0
+
 
 def test_min_detectable_difference() -> None:
     # Design s14-4: 65 questions tell apart about 8 to 10 points. Best case: 6 better, none

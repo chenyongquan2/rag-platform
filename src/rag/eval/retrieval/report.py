@@ -68,8 +68,6 @@ def render_run_report(record: RunRecord) -> str:
         f"- Final list cut at top {run.top_k}; Hit@k, nDCG@k, Recall@k for k in "
         f"{', '.join(map(str, run.ks))}; MRR within the top {max(run.ks)}",
         "",
-        resolution_sentence(qs.count),
-        "",
     ]
     if len(run.index_versions) > 1 or len(run.data_generations) > 1:
         lines += ["**The index changed during the run; the numbers mix index versions.**", ""]
@@ -81,6 +79,8 @@ def render_run_report(record: RunRecord) -> str:
         n = record.summary[present[0]][level].n
         lines += [
             f"## {level.capitalize()}-level metrics ({_plural(n, 'question')} with {level} labels)",
+            "",
+            resolution_sentence(n),  # only the questions labelled at this level are compared
             "",
             "| metric | " + " | ".join(run.lists) + " |",
             "|---" * (len(run.lists) + 1) + "|",

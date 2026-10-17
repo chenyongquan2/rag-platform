@@ -64,18 +64,20 @@ def test_rerank_curve_measures_each_n(tmp_path: Path) -> None:
     reranker = FakeReranker(clock, {f"{KB}:q1.md", f"{KB}:q2.md"})
     assert isinstance(reranker, Reranker)
 
-    curve = rerank_latency_curve(
-        retriever,
-        reranker,
-        qs,
-        kb=KB,
-        rerank_ns=(10, 20, 30),
-        final_k=8,
-        ks=(1, 5, 10),
-        warmup=1,
-        clock=clock,
-        provenance=Provenance(models={"reranker": "fake"}),
-    )
+    with pytest.warns(UserWarning, match="final list"):  # k = 10 is reported as @8
+        curve = rerank_latency_curve(
+            retriever,
+            reranker,
+            qs,
+            kb=KB,
+            rerank_ns=(10, 20, 30),
+            final_k=8,
+            ks=(1, 5, 10),
+            warmup=1,
+            clock=clock,
+            provenance=Provenance(models={"reranker": "fake"}),
+        )
+    assert curve.ks == [1, 5, 8]
     # Candidates are fetched once per question, as many as the largest rerank_n.
     assert retriever.calls == [("one?", KB, 30), ("two?", KB, 30)]
     # One unmeasured warm-up call, then each n in turn per question, always the first n
@@ -93,20 +95,21 @@ def test_rerank_curve_measures_each_n(tmp_path: Path) -> None:
 
     fusion, n10, n20, n30 = curve.points
     assert fusion.rerank_n is None and fusion.p50_ms is None
-    assert fusion.means["mrr@10"] == pytest.approx((0 + 1 / 5) / 2)  # top 8 in fusion order
+    assert fusion.means["mrr@8"] == pytest.approx((0 + 1 / 5) / 2)  # top 8 in fusion order
     assert [p.rerank_n for p in (n10, n20, n30)] == [10, 20, 30]
     assert [p.p50_ms for p in (n10, n20, n30)] == pytest.approx([20.0, 40.0, 60.0])
     assert n30.p95_ms == pytest.approx(60.0)
     assert n10.ms_per_candidate == pytest.approx(2.0)
     assert n10.mean_candidates == 10
     # q1's page is at fusion rank 25: only rerank_n = 30 lets the reranker see it.
-    assert n10.means["mrr@10"] == pytest.approx(0.5)
-    assert n20.means["mrr@10"] == pytest.approx(0.5)
-    assert n30.means["ndcg@10"] == pytest.approx(1.0)
+    assert n10.means["mrr@8"] == pytest.approx(0.5)
+    assert n20.means["mrr@8"] == pytest.approx(0.5)
+    assert n30.means["ndcg@8"] == pytest.approx(1.0)
     assert n30.questions == 2
 
     table = render_rerank_curve(curve)
     assert "| rerank_n | candidates | P50 ms | P95 ms | mean ms | ms per candidate |" in table
+    assert "| hit@1 | hit@5 | hit@8 | mrr@8 | ndcg@8 |" in table
     assert "| fusion (no rerank) | 30.0 | - | - | - | - |" in table
     assert (
         "| 30 | 30.0 | 60.0 | 60.0 | 60.0 | 2.00 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |" in table

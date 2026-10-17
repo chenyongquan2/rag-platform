@@ -20,6 +20,10 @@ import numpy as np
 
 _BATCH = 65_536  # sign patterns evaluated per matrix product (bounds memory)
 
+CHANGE_TOL = 1e-12
+"""A per-question score changed only when it moved by more than this (float noise is not a
+change). Shared by the permutation test, the change counts and the changed-question lists."""
+
 
 def mcnemar_exact(improved: int, worsened: int) -> float:
     """Two-sided exact McNemar p-value (a sign test on the discordant questions).
@@ -53,10 +57,10 @@ def paired_permutation_test(
 ) -> PermutationResult:
     """Two-sided paired permutation test of mean(b - a) = 0 by flipping the sign of each difference.
 
-    Questions with no difference do not change under a flip, so only the `m` changed ones are
-    flipped. When `2**m <= iterations` every sign pattern is enumerated and the p-value is exact;
-    otherwise `iterations` random patterns are drawn from a generator seeded with `seed` and
-    `p = (1 + as_extreme) / (1 + iterations)`, which is never 0.
+    Questions with no difference (within `CHANGE_TOL`) do not change under a flip, so only the
+    `m` changed ones are flipped. When `2**m <= iterations` every sign pattern is enumerated and
+    the p-value is exact; otherwise `iterations` random patterns are drawn from a generator
+    seeded with `seed` and `p = (1 + as_extreme) / (1 + iterations)`, which is never 0.
     """
     da, db = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
     if da.ndim != 1 or da.shape != db.shape:
@@ -66,7 +70,7 @@ def paired_permutation_test(
     n = len(da)
     diffs = db - da
     mean_diff = float(diffs.mean()) if n else 0.0
-    changed = diffs[diffs != 0]
+    changed = diffs[np.abs(diffs) > CHANGE_TOL]
     m = len(changed)
     if m == 0:
         return PermutationResult(mean_diff=mean_diff, p_value=1.0, iterations=0, exact=True, n=n)
@@ -127,7 +131,9 @@ class PairedChanges:
     unchanged: int
 
 
-def paired_changes(a: Sequence[float], b: Sequence[float], *, tol: float = 1e-12) -> PairedChanges:
+def paired_changes(
+    a: Sequence[float], b: Sequence[float], *, tol: float = CHANGE_TOL
+) -> PairedChanges:
     """Per question: did run B score higher, lower or the same as run A (within `tol`)?"""
     if len(a) != len(b):
         raise ValueError(f"a and b must have the same length, got {len(a)} and {len(b)}")

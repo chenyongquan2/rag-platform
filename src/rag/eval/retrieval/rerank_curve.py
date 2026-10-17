@@ -18,7 +18,7 @@ import numpy as np
 from pydantic import BaseModel
 
 from rag.eval.questions import QuestionSet
-from rag.eval.retrieval.metrics import compute_metrics, metric_names, ranked_ids
+from rag.eval.retrieval.metrics import cap_ks, compute_metrics, metric_names, ranked_ids
 from rag.eval.retrieval.protocol import Reranker, Retriever
 from rag.eval.retrieval.record import Provenance, QuestionSetInfo
 from rag.eval.retrieval.runner import DEFAULT_KS, collect_provenance
@@ -68,11 +68,13 @@ def rerank_latency_curve(
     """Measure the reranker for each n in `rerank_ns` (see the module docstring).
 
     `warmup` unmeasured reranker calls on the first question's candidates come first (the first
-    call of a model is slower). Retriever and reranker errors are not caught.
+    call of a model is slower). A k above `final_k` is capped at `final_k` with a warning.
+    Retriever and reranker errors are not caught.
     """
     if not rerank_ns or min(rerank_ns) < 1:
         raise ValueError(f"rerank_ns must be positive, got {rerank_ns}")
     question_set.check_kb(kb)
+    ks = cap_ks(ks, final_k)
     names = metric_names(ks)
     top = max(rerank_ns)
     candidates = [

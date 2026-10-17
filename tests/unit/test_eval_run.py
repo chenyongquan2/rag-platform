@@ -12,12 +12,16 @@ import pytest
 from rag.config import KnowledgeBaseConfig, ServiceSettings, repo_path
 from rag.eval.questions import LabeledQuestion, content_sha256, load_question_set, save_question_set
 from rag.eval.retrieval import (
+    Provenance,
     Retriever,
     collect_provenance,
     load_run,
+    render_run_report,
     run_retrieval_eval,
     write_run,
 )
+from rag.eval.retrieval.metrics import metric_names
+from rag.eval.retrieval.runner import git_env
 from rag.testing import FakeRetriever
 from rag.types import Chunk, RetrievalResult, RouteHit
 
@@ -90,7 +94,7 @@ def _run(retriever: Retriever, question_set, **kw):
         question_set,
         kb_config=KnowledgeBaseConfig(kb=KB),
         top_k=3,
-        ks=(1, 3, 5),
+        ks=(1, 3),
         label="baseline",
         clock=_clock(),
         now=NOW,
@@ -113,11 +117,11 @@ def test_run_scores_final_list_and_routes(retriever: FakeRetriever, question_set
         {"bm25": None, "vector": 3},
     ]
     assert q1.metrics["final"]["page"]["hit@1"] == 0.0
-    assert q1.metrics["final"]["page"]["mrr@5"] == 0.5
-    assert q1.metrics["bm25"]["page"]["mrr@5"] == 1.0
-    assert q1.metrics["vector"]["page"]["mrr@5"] == pytest.approx(1 / 3)
-    assert q1.metrics["final"]["chunk"]["mrr@5"] == 0.5
-    assert q1.metrics["vector"]["chunk"]["hit@5"] == 0.0  # A#2 is not the labelled chunk
+    assert q1.metrics["final"]["page"]["mrr@3"] == 0.5
+    assert q1.metrics["bm25"]["page"]["mrr@3"] == 1.0
+    assert q1.metrics["vector"]["page"]["mrr@3"] == pytest.approx(1 / 3)
+    assert q1.metrics["final"]["chunk"]["mrr@3"] == 0.5
+    assert q1.metrics["vector"]["chunk"]["hit@3"] == 0.0  # A#2 is not the labelled chunk
     assert q1.first_relevant_rank == {
         "final": {"page": 2, "chunk": 2},
         "bm25": {"page": 1, "chunk": 1},
@@ -126,17 +130,17 @@ def test_run_scores_final_list_and_routes(retriever: FakeRetriever, question_set
     assert q1.latency_ms == pytest.approx(10.0)
     # q2 has no chunk labels and a missing route: chunk metrics absent, BM25 scored 0.
     assert "chunk" not in q2.metrics["final"]
-    assert q2.metrics["bm25"]["page"]["hit@5"] == 0.0
-    assert q2.metrics["vector"]["page"]["mrr@5"] == 1.0
+    assert q2.metrics["bm25"]["page"]["hit@3"] == 0.0
+    assert q2.metrics["vector"]["page"]["mrr@3"] == 1.0
     assert q2.degraded is True
 
     page = record.summary["final"]["page"]
     assert page.n == 3
-    assert page.means["mrr@5"] == pytest.approx((0.5 + 1 + 0) / 3)
+    assert page.means["mrr@3"] == pytest.approx((0.5 + 1 + 0) / 3)
     assert page.means["hit@1"] == pytest.approx(1 / 3)
     assert page.hit_wilson["hit@1"] == pytest.approx((0.0615, 0.7923), abs=1e-4)
-    assert record.summary["bm25"]["page"].means["mrr@5"] == pytest.approx(1 / 3)
-    assert record.summary["vector"]["page"].means["mrr@5"] == pytest.approx((1 / 3 + 1) / 3)
+    assert record.summary["bm25"]["page"].means["mrr@3"] == pytest.approx(1 / 3)
+    assert record.summary["vector"]["page"].means["mrr@3"] == pytest.approx((1 / 3 + 1) / 3)
     assert record.summary["final"]["chunk"].n == 1
     assert record.latency.p50_ms == pytest.approx(20.0)
     assert record.latency.p95_ms == pytest.approx(29.0)
@@ -175,6 +179,7 @@ def test_write_run_record_and_provenance(
         question_set,
         kb_config=cfg,
         top_k=3,
+        ks=(1, 3),
         provenance=collect_provenance(settings=settings),
         clock=_clock(),
         now=NOW,
@@ -213,6 +218,10 @@ def test_write_run_record_and_provenance(
     assert question_set.sha256 in report
     assert "| hit@1 |" in report
     assert "no reliable difference" in report  # 3 questions cannot show any binary difference
+    # The resolution line of each level counts the questions labelled at that level.
+    page_part, chunk_part = report.split("## Chunk-level metrics")
+    assert "Resolution: 3 questions cannot" in page_part.split("## Page-level metrics")[1]
+    assert "Resolution: 1 question cannot" in chunk_part
     assert "three?" in report  # missed by every list: check the label first
     assert "RuntimeError: es down" in report
 
@@ -230,3 +239,37 @@ def test_private_runs_go_to_ignored_dir(
     # In the repo, private reports are git-ignored and public ones are not.
     assert _git("check-ignore", "-q", "evals/reports/private/x/results.json").returncode == 0
     assert _git("check-ignore", "-q", "evals/reports/public/x/results.json").returncode == 1
+
+
+def test_ks_above_top_k_are_capped_with_a_warning(retriever: FakeRetriever, question_set) -> None:
+    """A k larger than the final list would only repeat @top_k under another name."""
+    with pytest.warns(UserWarning, match="final list"):
+        record = run_retrieval_eval(
+            retriever,
+            question_set,
+            kb_config=KnowledgeBaseConfig(kb=KB),
+            top_k=3,
+            ks=(1, 3, 5, 10),
+            provenance=Provenance(),
+            clock=_clock(),
+            now=NOW,
+        )
+    assert record.run.ks == [1, 3]
+    assert list(record.summary["final"]["page"].means) == metric_names((1, 3))
+    assert list(record.summary["bm25"]["page"].means) == metric_names((1, 3))
+    assert "MRR within the top 3" in render_run_report(record)
+
+
+def test_git_dirty_counts_untracked_files(tmp_path: Path) -> None:
+    # git_env(): inside a git hook GIT_DIR points at this repo, not at tmp_path.
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, env=git_env())
+    assert collect_provenance(repo_root=tmp_path, models={}).git_dirty is False
+    (tmp_path / "evals" / "reports" / "public" / "r1").mkdir(parents=True)
+    (tmp_path / "evals" / "reports" / "public" / "r1" / "results.json").write_text("{}")
+    # Eval reports are outputs, not inputs: they never make a run dirty.
+    assert collect_provenance(repo_root=tmp_path, models={}).git_dirty is False
+    (tmp_path / "new_step.py").write_text("x = 1\n")
+    provenance = collect_provenance(repo_root=tmp_path, models={})
+    assert provenance.git_dirty is True
+    assert provenance.git_commit is None  # no commit yet
+    assert provenance.lock_sha256 is None
