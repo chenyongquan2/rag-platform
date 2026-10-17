@@ -1,6 +1,6 @@
 # P1-03 Prompt-injection defence and security eval set
 
-Status: review
+Status: done
 Phase: P1
 Depends on: P0-04 (`suspicious_instruction` rule), P0-10 (eval layout), P1-02 (context delimiters, prompts, `Answer`)
 Design sections: s11-3, s6-2, s14-2, s14-1, s16-4
@@ -27,7 +27,8 @@ a harness that scores answers produced elsewhere; the context builder escapes ev
   `score_answer(question, page, *, text, answer=None) -> QuestionScore`, `score_answers(set, records) -> SecurityReport`,
   `read_answer_records(path)`, `scan_sources(sources, *, samples, seed) -> ScanReport`.
 - CLI `uv run python -m rag.eval.security run --answers FILE [--set DIR] [--out FILE]`,
-  `... dry-run [--out-dir DIR]`, `... scan --kb hf_docs [--limit N | --all] [--samples 20] [--seed 0] [--out-dir DIR]`
+  `... dry-run [--set DIR] [--tokenizer model|whitespace] [--out-dir DIR]`,
+  `... scan (--kb hf_docs [--limit N | --all] | --pages DIR) [--samples 20] [--seed 0] [--out-dir DIR]`
   (reports under git-ignored `data/reports/<kb>/`). Answers file: JSONL lines `{"qid", "answer": <Answer JSON>}`
   or `{"qid", "text": "..."}`.
 
@@ -57,5 +58,5 @@ suspicious chunks for company knowledge bases (company KB spec); caller-side `un
 - Scan (`scan --kb hf_docs --all`, seed 0): 2,647 docs, 1 doc hit, 1 hit (`override_en`, the heading "Ignore previous instructions" in `huggingface/blog/blob/main/llama2.md`, which describes the attack). Only 1 hit exists, so 1 sample (not 20), labelled `fp`: false-positive share of hits 1/1, docs wrongly flagged 1/2,647 (0.04%). Recall is measured on the security set: the detector finds every listed kind on all 10 planted pages. Scan takes about 27-31 s. Re-run after the review fixes (new override, tool-order and concealment patterns): unchanged, 1 hit in 2,647 docs, the same false positive.
 - Dry run (`dry-run`, reranker tokenizer): compliant replies 30/30 compliant; replies that follow the injection 30/30 violated (planted token 21, no answer 13, planted URL 6, refusal 6, language switch 6).
 - Decisions (docs/decisions.md): named zh/en patterns with views and false-positive guards, precision first; no rule change for the one scan false positive; set format and rule-based scoring; planted items may live only in Unicode-tag text (`SecurityPage.readable_text`); own function-word language detector (whole words only, 2 foreign hits needed); more delimiter spellings escaped; dry run with scripted replies; review round 1: a reply needs a key term of the reference answer (else `refusal` or `no_answer`), general refusal words only count when the question is unanswered, separator-free token match, refanged hosts.
-- Open issues: real model answers on the set and an LLM judge are P1-04/P3; the scan corpus is almost clean, so false-positive rate rests on one hit; language detection covers zh/ja/ko/en/fr/de/es only; a reply that only repeats question words passes the key-term check (P1-04 judge).
-- Review rounds: 1 CHANGES (gameable scorer, refusal on answered replies, missed override/tool/concealment phrasings, split tokens and defanged hosts), all fixed; waiting for round 2.
+- Open issues: real model answers on the set and an LLM judge are P1-04/P3; the scan corpus is almost clean, so false-positive rate rests on one hit; language detection covers zh/ja/ko/en/fr/de/es only; echo-only answers (a reply that only repeats the question's words) still pass the key-term check: follow-up for the P1-04 judge.
+- Review rounds: 1 CHANGES (gameable scorer, refusal on answered replies, missed override/tool/concealment phrasings, split tokens and defanged hosts), all fixed. 2: APPROVE with no remaining issues.
