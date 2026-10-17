@@ -53,6 +53,13 @@ DEFAULT_MANIFEST = "data/manifests/hf_docs.json"
 ChunkReorder = Callable[[str, Sequence[Chunk]], Sequence[Chunk]]
 
 
+def _echo(text: str) -> None:
+    """Print `text` without failing on a console that cannot show every character (a GBK
+    console on Windows and the emoji in HF questions): those characters are replaced."""
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(text.encode(encoding, errors="replace").decode(encoding), end="")
+
+
 class UsageError(Exception):
     """Bad arguments or configuration: exit code 2, one line on stderr."""
 
@@ -229,7 +236,7 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
         _close(retriever)
     out = write_run(record, public=public, reports_root=args.reports_dir)
     print(f"wrote {out}")
-    print(summary_table(record), end="")
+    _echo(summary_table(record))
     return 0
 
 
@@ -263,7 +270,7 @@ def _rerank_curve(args: argparse.Namespace, settings: ServiceSettings) -> int:
     )
     out = write_rerank_curve(curve, out_dir)
     print(f"wrote {out}")
-    print(render_rerank_curve(curve), end="")
+    _echo(render_rerank_curve(curve))
     return 0
 
 
@@ -284,9 +291,9 @@ def _compare(args: argparse.Namespace) -> int:
         alpha=args.alpha,
     )
     text = render_comparison(comparison)
-    print(text, end="")
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8", newline="\n")
+    _echo(text)
     return 0
 
 

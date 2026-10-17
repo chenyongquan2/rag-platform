@@ -182,3 +182,32 @@ def test_rerank_curve_command(
     assert data["provenance"]["models"]["reranker_revision"] == "abc123"
     assert (out / "rerank_curve.md").is_file()
     assert calls == [2, 1, 2, 1, 2]  # one warm-up call, then n = 1, 2 per question
+
+
+def test_output_survives_a_non_utf8_console(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A question with an emoji must not crash `compare` on a GBK console (Windows); the
+    `--out` file keeps the exact text."""
+    import io
+    import sys
+
+    emoji = "What does 🤗 Datasets do?"
+    questions = tmp_path / "emoji.jsonl"
+    save_question_set(
+        [LabeledQuestion(qid="e1", question=emoji, answer="a", relevant_pages=["hf_docs:a"])],
+        questions,
+    )
+    env["built"].retriever.results[emoji] = _result("a")
+    base = ["--kb", KB, "--questions", str(questions), "--reports-dir", str(env["reports"])]
+    assert cli.main(["run", *base, "--label", "a"], settings=env["settings"]) == 0
+    env["built"].retriever.results[emoji] = _result("c", "a")
+    assert cli.main(["run", *base, "--label", "b"], settings=env["settings"]) == 0
+    run_a, run_b = sorted(p.name for p in (env["reports"] / "public").iterdir())
+
+    console = io.TextIOWrapper(io.BytesIO(), encoding="gbk")
+    monkeypatch.setattr(sys, "stdout", console)
+    out = tmp_path / "cmp.md"
+    argv = ["compare", run_a, run_b, "--reports-dir", str(env["reports"]), "--out", str(out)]
+    assert cli.main(argv) == 0
+    assert emoji in out.read_text(encoding="utf-8")
