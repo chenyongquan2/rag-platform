@@ -290,6 +290,7 @@ class FakeElasticsearch:
     def _hits(
         self, index: str, query: Mapping[str, Any] | None
     ) -> list[tuple[str, dict[str, Any]]]:
+        index = self.aliases.get(index, index)  # reads through an alias, as Elasticsearch does
         self.require(index)
         return [(i, s) for i, s in self.docs[index].items() if matches(s, i, query)]
 
