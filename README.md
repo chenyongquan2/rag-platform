@@ -245,3 +245,26 @@ the final list and each route, latency, git commit, KB config, index version, da
 question-set hash, model ids and the `uv.lock` hash. A k larger than the final list is capped
 at its length (with a warning). `rerank_latency_curve` measures a reranker
 for rerank_n 10, 20, 30.
+
+## Answer evaluation
+
+The standard (non-agentic) path end to end: search pipeline, `build_context`,
+`generate_answer`; then an LLM judge against the reference answers (spec P1-04). `run`,
+`security` and `judge` call real models and cost money (every call is in the cost ledger).
+Records go to the git-ignored `data/reports/answer-eval/`.
+
+```bash
+uv run python -m rag.eval.answer run --kb hf_docs --limit 5 --label pilot   # a pilot first
+uv run python -m rag.eval.answer project --answers <pilot run> --judge <pilot judge run>
+uv run python -m rag.eval.answer run --kb hf_docs --label full
+uv run python -m rag.eval.answer judge --answers <run> --scales 1-5,1-3 --repeat 2
+uv run python -m rag.eval.answer stability <judge run 1> <judge run 2>
+uv run python -m rag.eval.answer security                 # P1-03 set, rule-scored
+uv run python -m rag.eval.answer human-sheet --answers <run> --n 50   # blind CSV for people
+uv run python -m rag.eval.answer human-agreement --sheet S --key K --judge <judge run>
+```
+
+A run records per question the answer, cited chunk ids, citation check counts, parse outcome,
+latencies and the ledger's tokens and CNY, plus format compliance with Wilson intervals. The
+judge (`qwen/qwen3.6-flash`, thinking off, temperature 0, prompt `p1-04-hf-v1`) uses the HF
+rag_evaluation (1-5) and agent_rag (1-3) rubrics; answers that are not given score 1 by rule.
