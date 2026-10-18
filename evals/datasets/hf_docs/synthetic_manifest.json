@@ -1,9 +1,9 @@
 {
- "created_at": "2026-10-18T15:14:33Z",
+ "created_at": "2026-10-18T16:12:48Z",
  "kb": "hf_docs",
  "run": "data/reports/synthetic/20261018T135147Z_hf_docs_synthetic",
  "spec": "P1-05",
- "git_commit": "5df2e871ad9b12d017abbde0a97f08ecbedd7247",
+ "git_commit": "ab28f7dc4337db49f73beff3c7eeba81ff4bfc46",
  "source": {
   "manifest": "data/manifests/hf_docs.json",
   "repo_id": "m-ric/huggingface_doc",
@@ -104,6 +104,45 @@
   "standalone_low": 45
  },
  "redacted_tokens": 2,
+ "labels": {
+  "rule": "source page + every other page containing the answer (also in the span) and all question words found in the span (rag.eval.synthetic.labels)",
+  "questions_with_added_pages": 90,
+  "pages_added": 856
+ },
+ "near_duplicate_groups": [
+  [
+   "synthetic:1869daf650d0",
+   "synthetic:74892a7ce1ef"
+  ],
+  [
+   "synthetic:26d963b3dac3",
+   "synthetic:6af7798dc939"
+  ],
+  [
+   "synthetic:2aeeeec83db5",
+   "synthetic:9c281dd245fa"
+  ],
+  [
+   "synthetic:53be86044092",
+   "synthetic:9ffb8c0e7315"
+  ],
+  [
+   "synthetic:61c5805f57b4",
+   "synthetic:f4a1608bad98"
+  ],
+  [
+   "synthetic:62796bfe6812",
+   "synthetic:ec586b33413d"
+  ],
+  [
+   "synthetic:7145b1096fa7",
+   "synthetic:f626b8fce863"
+  ],
+  [
+   "synthetic:7724b081598b",
+   "synthetic:e6b3f246874b"
+  ]
+ ],
  "strata": {
   "dev": {
    "huggingface/datasets:markdown": 4,
@@ -111,23 +150,23 @@
    "huggingface/transformers:markdown": 18,
    "huggingface/optimum:mdx": 4,
    "huggingface/blog:markdown": 11,
-   "huggingface/pytorch-image-models:mdx": 4,
-   "gradio-app/gradio:markdown": 5,
-   "huggingface/course:mdx": 3,
-   "huggingface/evaluate:markdown": 3,
-   "huggingface/peft:notebook": 3,
-   "huggingface/pytorch-image-models:markdown": 3,
+   "gradio-app/gradio:markdown": 6,
    "huggingface/peft:markdown": 3,
+   "huggingface/course:mdx": 3,
+   "huggingface/peft:notebook": 3,
+   "huggingface/evaluate:markdown": 2,
+   "huggingface/pytorch-image-models:markdown": 3,
+   "huggingface/pytorch-image-models:mdx": 4,
    "huggingface/datasets:mdx": 5,
    "huggingface/hub-docs:markdown": 7,
    "huggingface/diffusers:markdown": 9,
    "huggingface/datasets-server:markdown": 1,
    "huggingface/tokenizers:mdx": 2,
-   "gradio-app/gradio:notebook": 2,
-   "huggingface/huggingface_hub:markdown": 2,
    "huggingface/tokenizers:markdown": 1,
+   "gradio-app/gradio:notebook": 2,
+   "huggingface/huggingface_hub:markdown": 1,
+   "huggingface/hf-endpoints-documentation:mdx": 2,
    "huggingface/datasets-server:mdx": 1,
-   "huggingface/hf-endpoints-documentation:mdx": 1,
    "huggingface/safetensors:mdx": 1
   },
   "holdout": {
@@ -135,23 +174,23 @@
    "huggingface/blog:markdown": 11,
    "gradio-app/gradio:notebook": 2,
    "huggingface/hub-docs:markdown": 6,
-   "huggingface/peft:markdown": 3,
-   "huggingface/datasets-server:mdx": 1,
-   "huggingface/diffusers:markdown": 10,
-   "huggingface/hf-endpoints-documentation:mdx": 2,
-   "huggingface/transformers:markdown": 17,
-   "huggingface/evaluate:markdown": 3,
-   "huggingface/datasets:markdown": 4,
-   "huggingface/course:markdown": 8,
-   "gradio-app/gradio:markdown": 6,
-   "huggingface/huggingface_hub:markdown": 1,
-   "huggingface/course:mdx": 4,
-   "huggingface/tokenizers:markdown": 1,
    "huggingface/pytorch-image-models:mdx": 3,
+   "huggingface/transformers:markdown": 17,
+   "huggingface/datasets:markdown": 4,
+   "huggingface/datasets-server:mdx": 1,
+   "huggingface/evaluate:markdown": 4,
+   "huggingface/diffusers:markdown": 10,
+   "huggingface/hf-endpoints-documentation:mdx": 1,
+   "gradio-app/gradio:markdown": 5,
+   "huggingface/course:markdown": 8,
+   "huggingface/peft:markdown": 3,
+   "huggingface/huggingface_hub:markdown": 2,
    "huggingface/optimum:mdx": 4,
+   "huggingface/course:mdx": 4,
    "huggingface/tokenizers:mdx": 2,
-   "huggingface/pytorch-image-models:markdown": 2,
    "huggingface/peft:notebook": 2,
+   "huggingface/pytorch-image-models:markdown": 2,
+   "huggingface/tokenizers:markdown": 1,
    "huggingface/evaluate:mdx": 1,
    "huggingface/datasets-server:markdown": 2
   }
@@ -176,11 +215,11 @@
  },
  "files": {
   "synthetic_dev.jsonl": {
-   "sha256": "205609cf239e860325529cd5a59274bec1d7e4deb619be4c1591f0c9d7709712",
+   "sha256": "342c9a11e8b8efff45a70e15cdd4d033a60b5107d699f40141a25d295fc3d989",
    "questions": 100
   },
   "synthetic_holdout.jsonl": {
-   "sha256": "c6996e1faae8e2a88103a071ed8004eb4450a66c94568c764c233c12274ec936",
+   "sha256": "76eddda4224a76af94266b4a060e11f18398ae91f109948c17e37e4cf7dc5fcd",
    "questions": 100
   }
  },

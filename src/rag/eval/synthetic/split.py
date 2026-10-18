@@ -5,8 +5,9 @@ questions (design s14-2, s14-4). Near-duplicate questions (the same question ask
 templated pages) form a group, and a group always lands in one set, so holdout never repeats a
 dev question. The holdout size is `round(total * holdout_share)` questions, allocated to strata
 in proportion to their sizes (a group counts in the stratum of its first id); inside a stratum the
-groups are sorted, shuffled with the seed and go to holdout until the stratum's quota is reached,
-so the result depends on the seed, the ids and the groups only.
+groups are sorted, shuffled with the seed and go to holdout while they fit into the stratum's
+quota (a group that would overshoot it goes to dev), so the result depends on the seed, the ids
+and the groups only.
 """
 
 from __future__ import annotations
@@ -100,7 +101,7 @@ def split_dev_holdout(
         rng.shuffle(units)
         taken = 0
         for group in units:
-            if taken < quota[stratum]:
+            if taken + len(members[group]) <= quota[stratum]:
                 holdout += members[group]
                 taken += len(members[group])
             else:
