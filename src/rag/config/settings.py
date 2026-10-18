@@ -200,13 +200,15 @@ class ServiceSettings(BaseSettings):
     # is the model's 512 positions for question + title path + chunk. Candidates go in batches
     # of `rerank_batch_size`; a batch that would not finish before the deadline is not started.
     # Each rerank runs on `reranker_torch_threads` torch threads (set process-wide at load;
-    # default half the physical cores) and at most `rerank_max_concurrency` requests rerank at
-    # the same time (default physical cores // torch threads, so together they use each
-    # physical core once); the others wait, and the wait counts against their deadline.
+    # default all physical cores, spec P0-13) and at most `rerank_max_concurrency` requests
+    # rerank at the same time (default physical cores // torch threads, so together they use
+    # each physical core once: 1 by default); the others wait, and the wait counts against
+    # their deadline. P0-13 load test on 8 cores, rerank_n 10: 8 x 1 had search P95 3.4 s at one
+    # request and 6.5-7.1 s at two, like 8 x 2 and better than 4 x 2 (5.8-6.2 s at one).
     reranker_device: str = "cpu"
     reranker_max_length: int = Field(default=512, gt=0, le=512)
     rerank_batch_size: int = Field(default=8, gt=0)
-    reranker_torch_threads: int = Field(default_factory=lambda: max(1, physical_cores() // 2), ge=1)
+    reranker_torch_threads: int = Field(default_factory=lambda: max(1, physical_cores()), ge=1)
     rerank_max_concurrency: int = Field(
         default_factory=lambda data: max(
             1, physical_cores() // max(1, int(data.get("reranker_torch_threads") or 1))

@@ -319,15 +319,16 @@ def test_cross_encoder_loaded_once_per_process(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_rerank_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Torch threads default to half the physical cores; slots x threads = physical cores.
+    # Torch threads default to all physical cores, one slot (spec P0-13: under 1-2 concurrent
+    # requests 8 x 1 was as fast as 8 x 2 and faster than 4 x 2); slots x threads = cores.
     monkeypatch.setattr(settings_module, "physical_cores", lambda: 8)
     settings = ServiceSettings(_env_file=None)  # type: ignore[call-arg]
     assert settings.reranker_model == "BAAI/bge-reranker-base"
     assert settings.reranker_device == "cpu"
     assert settings.reranker_max_length == 512
     assert settings.rerank_batch_size == 8
-    assert settings.reranker_torch_threads == 4
-    assert settings.rerank_max_concurrency == 2
+    assert settings.reranker_torch_threads == 8
+    assert settings.rerank_max_concurrency == 1
     monkeypatch.setenv("RERANKER_TORCH_THREADS", "2")
     assert ServiceSettings(_env_file=None).rerank_max_concurrency == 4  # type: ignore[call-arg]
     monkeypatch.setenv("RERANK_MAX_CONCURRENCY", "3")
