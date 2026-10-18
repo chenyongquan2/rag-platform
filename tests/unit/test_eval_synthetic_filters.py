@@ -96,3 +96,98 @@ def test_redact_secrets() -> None:
         "use hf_hub_download and sk-learn",
         0,
     )
+
+
+def test_near_duplicates_stay_in_one_set() -> None:
+    from rag.eval.synthetic.split import near_duplicate_groups
+
+    items = [
+        (
+            "q1",
+            "Which parameter in timm.create_model specifies the number of classes?",
+            "num_classes",
+        ),
+        ("q2", "Which parameter in timm.create_model sets the number of classes?", "`num_classes`"),
+        ("q3", "What PyTorch function is used to get the top 5 predictions?", "torch.topk"),
+        (
+            "q4",
+            "What PyTorch function returns the top 5 probabilities and class IDs?",
+            "torch.topk",
+        ),
+        ("q5", "What does the label O mean in token classification?", "no entity"),
+        ("q6", "Which scheduler is recommended for Stable Diffusion 2?", "DPMSolver"),
+    ]
+    groups = near_duplicate_groups(items)
+    assert groups["q2"] == "q1" and groups["q4"] == "q3"
+    assert len({groups[q] for q in ("q1", "q3", "q5", "q6")}) == 4
+    # q3/q4 share only 45% of their words: grouped because the answers are equal
+    assert near_duplicate_groups([items[2], (*items[3][:2], "other")])["q4"] == "q4"
+
+    pairs = [(f"a{i:03d}", "A") for i in range(150)] + [(f"b{i:03d}", "B") for i in range(90)]
+    dupes = {f"a{i:03d}": "a000" for i in range(0, 20, 2)}  # one group of 10 questions
+    for seed in range(5):
+        dev, holdout = split_dev_holdout(pairs, seed=seed, min_each=100, groups=dupes)
+        group = set(dupes)
+        assert group <= set(dev) or group <= set(holdout)
+        assert len(dev) + len(holdout) == 240 and abs(len(holdout) - 120) < 10
+    # without groups the split is the same as before
+    assert split_dev_holdout(pairs, seed=3, min_each=100, groups={}) == split_dev_holdout(
+        pairs, seed=3, min_each=100
+    )
+
+
+def test_answering_pages_by_exact_text() -> None:
+    from rag.eval.synthetic.labels import PageIndex
+    from rag.eval.synthetic.sampler import Page
+
+    card = (
+        "Use timm.create_model('{m}', pretrained=True, num_classes=NUMBER_OF_CLASSES) to finetune."
+    )
+    pages = [
+        Page(
+            doc_id=f"hf_docs:{m}.md",
+            source_rel=f"{m}.md",
+            doc_type="markdown",
+            language="en",
+            text=f"# {m}\n" + card.format(m=m),
+        )
+        for m in ("pnasnet", "xception65", "dla102")
+    ]
+    pages.append(
+        Page(
+            doc_id="hf_docs:other.md",
+            source_rel="other.md",
+            doc_type="markdown",
+            language="en",
+            text="num_classes is also a field of other configs.",
+        )
+    )
+    index = PageIndex(pages)
+    span = pages[0].text
+    # a generic question: every model card answers it, the unrelated page does not
+    assert index.answering_pages(
+        question="Which timm.create_model parameter sets the number of classes to finetune?",
+        answer="`num_classes`.",
+        span=span,
+        source="hf_docs:pnasnet.md",
+    ) == ["hf_docs:dla102.md", "hf_docs:xception65.md"]
+    # a page-specific answer stays on its page
+    assert (
+        index.answering_pages(
+            question="What model name loads the pretrained PNASNet?",
+            answer="pnasnet",
+            span=span,
+            source="hf_docs:pnasnet.md",
+        )
+        == []
+    )
+    # an answer that is not in the span (a paraphrase) adds nothing
+    assert (
+        index.answering_pages(
+            question="Which argument sets the class count?",
+            answer="the class count argument",
+            span=span,
+            source="hf_docs:pnasnet.md",
+        )
+        == []
+    )
