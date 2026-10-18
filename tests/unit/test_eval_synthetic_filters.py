@@ -6,7 +6,13 @@ from collections import Counter
 
 import pytest
 
-from rag.eval.synthetic.filters import FilterConfig, lexical_overlap, rejection_reasons
+from rag.eval.synthetic.filters import (
+    REDACTED,
+    FilterConfig,
+    lexical_overlap,
+    redact_secrets,
+    rejection_reasons,
+)
 from rag.eval.synthetic.split import split_dev_holdout
 
 SPAN = (
@@ -80,3 +86,13 @@ def test_split_dev_holdout() -> None:
     assert split_dev_holdout(items, seed=4, holdout_share=0.5, min_each=100) != (dev, holdout)
     with pytest.raises(ValueError, match="holdout"):
         split_dev_holdout(_items(100, 50), seed=0, holdout_share=0.5, min_each=100)
+
+
+def test_redact_secrets() -> None:
+    token = "hf_" + "Ab3" * 12
+    text, n = redact_secrets(f"Run `HF_TOKEN={token} python app.py`, key sk-{'x1' * 12}.")
+    assert n == 2 and token not in text and text.count(REDACTED) == 2
+    assert redact_secrets("use hf_hub_download and sk-learn") == (
+        "use hf_hub_download and sk-learn",
+        0,
+    )

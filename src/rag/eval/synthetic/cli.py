@@ -44,7 +44,12 @@ from rag.eval.questions import (
 )
 from rag.eval.retrieval.cli import UsageError, _kb_config, _question_file
 from rag.eval.retrieval.runner import collect_provenance, make_run_id
-from rag.eval.synthetic.filters import FilterConfig, lexical_overlap, rejection_reasons
+from rag.eval.synthetic.filters import (
+    FilterConfig,
+    lexical_overlap,
+    redact_secrets,
+    rejection_reasons,
+)
 from rag.eval.synthetic.pipeline import (
     TRANSIENT_ERRORS,
     CriticConfig,
@@ -359,6 +364,7 @@ def _build(args: argparse.Namespace, settings: ServiceSettings) -> int:
     runs_all: list[float] = []
     runs_kept: list[float] = []
     recall_kept: list[float] = []
+    redacted = 0
     for gen in gens:
         span = spans[gen.span_id]
         q_scores = scores.get(gen.span_id, {})
@@ -389,16 +395,20 @@ def _build(args: argparse.Namespace, settings: ServiceSettings) -> int:
                 }
             )
             continue
+        span_text, n_redacted = redact_secrets(span.text)
+        question, n_q = redact_secrets(gen.question or "")
+        answer, n_a = redact_secrets(gen.answer or "")
+        redacted += n_redacted + n_q + n_a
         runs_kept.append(overlap.longest_run)
         recall_kept.append(overlap.content_recall)
         kept.append(
             LabeledQuestion(
                 qid=f"{QID_PREFIX}:{gen.span_id}",
-                question=gen.question or "",
-                answer=gen.answer or "",
+                question=question,
+                answer=answer,
                 relevant_pages=[gen.doc_id],
                 meta={
-                    "span": span.text,
+                    "span": span_text,
                     "span_start": span.start,
                     "span_end": span.end,
                     "source_rel": span.source_rel,
@@ -460,6 +470,7 @@ def _build(args: argparse.Namespace, settings: ServiceSettings) -> int:
         "counts": counts,
         "rejections": dict(sorted(reasons_count.items())),
         "rejections_only_reason": dict(sorted(only_reason.items())),
+        "redacted_tokens": redacted,
         "strata": split_strata,
         "usage": {"generation": g_usage.model_dump(), "critique": c_usage.model_dump()},
         "files": files,

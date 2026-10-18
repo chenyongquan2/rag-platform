@@ -66,6 +66,23 @@ def lexical_overlap(question: str, text: str) -> Overlap:
     return Overlap(longest_run=best, content_recall=round(recall, 4), question_words=len(q))
 
 
+_SECRETS = (
+    re.compile(r"\bhf_[A-Za-z0-9]{30,}\b"),  # Hugging Face access token
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),  # OpenAI-style API key
+)
+REDACTED = "<redacted-token>"
+
+
+def redact_secrets(text: str) -> tuple[str, int]:
+    """Text with token-like strings replaced by `REDACTED`, and how many were replaced. The
+    corpus has example tokens in some READMEs; committed question sets must not carry them."""
+    count = 0
+    for pattern in _SECRETS:
+        text, n = pattern.subn(REDACTED, text)
+        count += n
+    return text, count
+
+
 def rejection_reasons(
     *,
     question: str | None,
