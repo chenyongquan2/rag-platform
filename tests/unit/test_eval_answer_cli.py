@@ -53,8 +53,13 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             responses=["Log in with login [1].", "In logs [1]."]
         ),
     )
-    judge = FakeChatModel(default_response="Feedback: right. [RESULT] 3")
-    monkeypatch.setattr(cli, "build_judge_model", lambda settings, config: judge)
+    judges: list[FakeChatModel] = []
+
+    def build_judge(settings: ServiceSettings, config: Any) -> FakeChatModel:
+        judges.append(FakeChatModel(default_response="Feedback: right. [RESULT] 3"))
+        return judges[-1]
+
+    monkeypatch.setattr(cli, "build_judge_model", build_judge)
     settings = ServiceSettings(
         chat_backend="fake",
         otel_mode="off",
@@ -62,7 +67,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         log_dir="",
         cost_ledger_path=str(tmp_path / "ledger.jsonl"),
     )
-    return {"qfile": qfile, "out": tmp_path / "out", "settings": settings, "tmp": tmp_path}
+    return {"qfile": qfile, "out": tmp_path / "out", "settings": settings, "judges": judges}
 
 
 def _main(env: dict[str, Any], *argv: str) -> int:
@@ -132,6 +137,8 @@ def test_cli_with_fakes(env: dict[str, Any], capsys: pytest.CaptureFixture[str])
     )
     judges = sorted((out / "judge").iterdir())
     assert len(judges) == 2
+    # one model per judge run: an HTTP client must not outlive its event loop
+    assert len(env["judges"]) == 2 and all(len(j.calls) == 2 for j in env["judges"])
     data = json.loads((judges[0] / "results.json").read_text("utf-8"))
     assert data["summary"]["1-3"]["percent"] == pytest.approx(100.0)
     assert data["answer_run_id"] == full.run_id

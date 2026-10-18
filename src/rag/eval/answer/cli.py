@@ -215,9 +215,11 @@ def _judge(args: argparse.Namespace, settings: ServiceSettings) -> int:
     if args.model:
         update["model"] = args.model
     config = JudgeConfig().model_copy(update=update)
-    model = build_judge_model(settings, config)
     print(_spent(settings))
     for i in range(1, args.repeat + 1):
+        # A new model (and HTTP client) per run: pooled connections belong to the event loop of
+        # the `asyncio.run` that opened them and fail once that loop is closed.
+        model = build_judge_model(settings, config)
         label = args.label or ""
         if args.repeat > 1:
             label = f"{label}-r{i}" if label else f"r{i}"
