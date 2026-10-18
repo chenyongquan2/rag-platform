@@ -1,7 +1,7 @@
 """Command line of the synthetic question sets (spec P1-05, design s14-2).
 
 uv run python -m rag.eval.synthetic sample --kb hf_docs [--n 420] [--seed 0] [--span-chars 2000]
-    [--min-chars 400] [--no-exclude-public] [--label L] [--out-dir D]
+    [--min-chars 400] [--no-exclude-public] [--label L] [--out-dir D] [--extend RUN]
 uv run python -m rag.eval.synthetic generate --run DIR [--limit N] [--concurrency 4] [--batch 20]
 uv run python -m rag.eval.synthetic critique --run DIR [--concurrency 4] [--batch 60]
 uv run python -m rag.eval.synthetic project --run DIR [--n 420]
@@ -63,6 +63,7 @@ REPORTS_ROOT = "data/reports/synthetic"
 SPANS = "spans.jsonl"
 GENERATIONS = "generations.jsonl"
 CRITIQUES = "critiques.jsonl"
+SAMPLE = "sample.json"
 DEV_FILE = "synthetic_dev.jsonl"
 HOLDOUT_FILE = "synthetic_holdout.jsonl"
 MANIFEST_FILE = "synthetic_manifest.json"
@@ -159,8 +160,17 @@ def _public_pages(cfg: KnowledgeBaseConfig) -> list[str]:
 
 
 def _sample(args: argparse.Namespace, settings: ServiceSettings) -> int:
+    """A new run, or with `--extend RUN` more spans appended to that run (never from a page the
+    run already has), so a pilot's records stay valid when the run needs more questions."""
     cfg, _public = _kb_config(settings, args.kb)
-    exclude = [] if args.no_exclude_public else _public_pages(cfg)
+    public = [] if args.no_exclude_public else _public_pages(cfg)
+    previous: list[Span] = []
+    batches: list[dict[str, Any]] = []
+    if args.extend:
+        run = _run_dir(argparse.Namespace(run=args.extend))
+        previous = _read_jsonl(run / SPANS, Span)
+        batches = json.loads((run / SAMPLE).read_text(encoding="utf-8"))["batches"]
+    exclude = sorted({*public, *(s.doc_id for s in previous)})
     config = SamplerConfig(
         n=args.n,
         seed=args.seed,
@@ -170,19 +180,22 @@ def _sample(args: argparse.Namespace, settings: ServiceSettings) -> int:
     )
     pages = load_pages(cfg, settings)
     result = sample_spans(pages, config)
-    label = f"synthetic-{args.label}" if args.label else "synthetic"
-    out = Path(args.out_dir) if args.out_dir else repo_path(REPORTS_ROOT)
-    run = out / make_run_id(cfg.kb, label)
-    run.mkdir(parents=True)
-    _write_jsonl(run / SPANS, result.spans)
+    if not args.extend:
+        label = f"synthetic-{args.label}" if args.label else "synthetic"
+        out = Path(args.out_dir) if args.out_dir else repo_path(REPORTS_ROOT)
+        run = out / make_run_id(cfg.kb, label)
+        run.mkdir(parents=True)
+    _write_jsonl(run / SPANS, [*previous, *result.spans])
     summary = result.summary()
-    summary["kb"] = cfg.kb
-    summary["config"]["exclude_pages"] = f"{len(exclude)} public question pages" if exclude else []
-    _write_json(run / "sample.json", summary)
+    summary["config"]["exclude_pages"] = (
+        f"{len(public)} public question pages, {len(previous)} pages already in the run"
+    )
+    _write_json(run / SAMPLE, {"kb": cfg.kb, "batches": [*batches, summary]})
     print(f"wrote {run}")
     print(
-        f"spans {len(result.spans)} of {config.n}; pages {result.pages_total}, excluded "
-        f"{result.pages_excluded}, skipped {result.pages_skipped}, shortfall {result.shortfall}"
+        f"spans {len(result.spans)} of {config.n} (run total {len(previous) + len(result.spans)}); "
+        f"pages {result.pages_total}, excluded {result.pages_excluded}, skipped "
+        f"{result.pages_skipped}, shortfall {result.shortfall}"
     )
     return 0
 
@@ -322,7 +335,7 @@ def _build(args: argparse.Namespace, settings: ServiceSettings) -> int:
     spans = {s.span_id: s for s in _read_jsonl(run / SPANS, Span)}
     gens = _read_jsonl(run / GENERATIONS, GenerationRecord)
     crits = _read_jsonl(run / CRITIQUES, CritiqueRecord)
-    sample = json.loads((run / "sample.json").read_text(encoding="utf-8"))
+    batches = json.loads((run / SAMPLE).read_text(encoding="utf-8"))["batches"]
     filters = FilterConfig(max_copy_run=args.max_copy_run)
     scores: dict[str, dict[str, float | None]] = {}
     rationales: dict[str, dict[str, str]] = {}
@@ -428,14 +441,14 @@ def _build(args: argparse.Namespace, settings: ServiceSettings) -> int:
         "spec": "P1-05",
         "git_commit": provenance.git_commit,
         "source": _corpus_source(cfg),
-        "sampler": sample.get("config", {}),
+        "sampler": [b["config"] for b in batches],
         "generator": generator.model_dump(),
         "critic": critic.model_dump(),
         "prompt_versions": {
             "generation": gens[0].prompt_version if gens else GENERATION_PROMPT_VERSION,
             "critique": crits[0].prompt_version if crits else CRITIQUE_PROMPT_VERSION,
         },
-        "seeds": {"sample": sample.get("config", {}).get("seed"), "split": args.seed},
+        "seeds": {"sample": [b["config"]["seed"] for b in batches], "split": args.seed},
         "thresholds": filters.model_dump(),
         "split": {"holdout_share": args.holdout_share, "min_each": args.min_each},
         "counts": counts,
@@ -489,6 +502,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--label")
     p.add_argument("--out-dir", help=f"default: {REPORTS_ROOT}")
+    p.add_argument("--extend", metavar="RUN", help="append the new spans to this run")
     p = sub.add_parser("generate", help="one question per span (costs money)")
     p.add_argument("--run", required=True)
     p.add_argument("--limit", type=int)

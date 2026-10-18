@@ -108,19 +108,24 @@ def test_cli_end_to_end_with_fakes(env: dict[str, Any], capsys: pytest.CaptureFi
     spans = (run / "spans.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(spans) == 40
     sample = json.loads((run / "sample.json").read_text(encoding="utf-8"))
-    assert sample["config"]["seed"] == 0 and sample["allocation"]
+    assert sample["batches"][0]["config"]["seed"] == 0 and sample["batches"][0]["allocation"]
 
     assert _main(env, "generate", "--run", str(run), "--limit", "10", "--concurrency", "1") == 0
     assert len((run / "generations.jsonl").read_text(encoding="utf-8").splitlines()) == 10
+    # a pilot run extended with spans of pages it does not have yet
+    extend = ["--kb", "hf_docs", "--n", "10", "--seed", "5", "--span-chars", "5000"]
+    assert _main(env, "sample", *extend, "--min-chars", "100", "--extend", str(run)) == 0
+    spans = [json.loads(x) for x in (run / "spans.jsonl").read_text("utf-8").splitlines()]
+    assert len(spans) == 50 and len({s["doc_id"] for s in spans}) == 50
     assert _main(env, "generate", "--run", str(run), "--concurrency", "2") == 0  # resumes
     gens = [json.loads(x) for x in (run / "generations.jsonl").read_text("utf-8").splitlines()]
-    assert len(gens) == 40 and len({g["span_id"] for g in gens}) == 40
+    assert len(gens) == 50 and len({g["span_id"] for g in gens}) == 50
 
     assert _main(env, "critique", "--run", str(run), "--concurrency", "2") == 0
     critiques = (run / "critiques.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(critiques) == 120
+    assert len(critiques) == 150
     assert _main(env, "critique", "--run", str(run)) == 0  # nothing left to score
-    assert len((run / "critiques.jsonl").read_text(encoding="utf-8").splitlines()) == 120
+    assert len((run / "critiques.jsonl").read_text(encoding="utf-8").splitlines()) == 150
 
     assert _main(env, "project", "--run", str(run), "--n", "420") == 0
     assert "projected" in capsys.readouterr().out
@@ -146,7 +151,7 @@ def test_cli_end_to_end_with_fakes(env: dict[str, Any], capsys: pytest.CaptureFi
     dev = load_question_set(out / "synthetic_dev.jsonl", kb="hf_docs")
     holdout = load_question_set(out / "synthetic_holdout.jsonl", kb="hf_docs")
     rejected = sum(1 for g in gens if re.search(r"tool \d*7 use\?", g["question"]))
-    assert len(dev.questions) + len(holdout.questions) == 40 - rejected
+    assert len(dev.questions) + len(holdout.questions) == 50 - rejected
     assert {q.qid for q in dev.questions}.isdisjoint({q.qid for q in holdout.questions})
     q = dev.questions[0]
     assert q.relevant_pages[0].startswith("hf_docs:") and q.answer
@@ -156,10 +161,10 @@ def test_cli_end_to_end_with_fakes(env: dict[str, Any], capsys: pytest.CaptureFi
     assert manifest["generator"]["model"] == "deepseek-v4-flash"
     assert manifest["critic"]["model"] == "qwen/qwen3.6-flash"
     assert manifest["prompt_versions"]["generation"] and manifest["prompt_versions"]["critique"]
-    assert manifest["seeds"] == {"sample": 0, "split": 0}
+    assert manifest["seeds"] == {"sample": [0, 5], "split": 0}
     assert manifest["thresholds"]["min_relevance"] == 4
-    assert manifest["counts"]["generated"] == 40
-    assert manifest["counts"]["kept"] == 40 - rejected
+    assert manifest["counts"]["generated"] == 50
+    assert manifest["counts"]["kept"] == 50 - rejected
     assert manifest["rejections"]["relevance_low"] == rejected
     assert manifest["files"]["synthetic_dev.jsonl"]["sha256"] == dev.sha256
     assert manifest["files"]["synthetic_holdout.jsonl"]["questions"] == len(holdout.questions)
