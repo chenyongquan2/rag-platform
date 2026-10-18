@@ -1,0 +1,2 @@
+# Line endings in the repo are LF on every platform (spec P0-13, docs/decisions.md).
+* text=auto eol=lf
