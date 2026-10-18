@@ -180,3 +180,54 @@ def min_detectable_difference(
                 alpha=alpha,
             )
     return None
+
+
+def weighted_kappa(
+    a: Sequence[int],
+    b: Sequence[int],
+    *,
+    low: int,
+    high: int,
+    weights: str = "quadratic",
+) -> float | None:
+    """Cohen's weighted kappa of two raters on the integer scale `low..high` (design s14-3).
+
+    Disagreement weights are `((i - j) / (high - low)) ** 2` (quadratic) or `|i - j| / (high -
+    low)` (linear), so a one-point miss costs less than a three-point one. Kappa is
+    `1 - sum(w * observed) / sum(w * expected)`, the expected table being the product of the two
+    raters' marginals. None when the expected disagreement is 0 (both raters give one score).
+    """
+    if len(a) != len(b):
+        raise ValueError(f"a and b must have the same length, got {len(a)} and {len(b)}")
+    if high <= low:
+        raise ValueError(f"need low < high, got {low}..{high}")
+    if weights not in ("quadratic", "linear"):
+        raise ValueError(f"weights must be quadratic or linear, got {weights!r}")
+    values = [*a, *b]
+    if any(v < low or v > high or int(v) != v for v in values):
+        raise ValueError(f"scores must be integers in {low}..{high}")
+    if not a:
+        return None
+    k = high - low + 1
+    observed = np.zeros((k, k))
+    for x, y in zip(a, b, strict=True):
+        observed[int(x) - low, int(y) - low] += 1
+    observed /= observed.sum()
+    expected = np.outer(observed.sum(axis=1), observed.sum(axis=0))
+    steps = np.abs(np.subtract.outer(np.arange(k), np.arange(k))) / (k - 1)
+    w = steps**2 if weights == "quadratic" else steps
+    disagreement = float((w * expected).sum())
+    if disagreement <= 0:
+        return None
+    return 1.0 - float((w * observed).sum()) / disagreement
+
+
+def spearman(a: Sequence[float], b: Sequence[float]) -> float | None:
+    """Spearman rank correlation (ties get average ranks); None when either side is constant."""
+    if len(a) != len(b):
+        raise ValueError(f"a and b must have the same length, got {len(a)} and {len(b)}")
+    if len(a) < 2 or len(set(a)) < 2 or len(set(b)) < 2:
+        return None
+    from scipy.stats import spearmanr
+
+    return float(spearmanr(a, b).statistic)

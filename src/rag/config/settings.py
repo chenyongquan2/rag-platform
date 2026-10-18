@@ -86,6 +86,8 @@ def _default_model_prices() -> dict[str, ModelPrice]:
         # The gateway lists no prices and shows no bill per call. Deliberately high estimates:
         # the budget check then stops early rather than late. See docs/decisions.md.
         "deepseek-v4-flash": ModelPrice(input_cny_per_m=2.0, output_cny_per_m=8.0, estimated=True),
+        # Answer judge (spec P1-04): another family than the generator. Same high guess.
+        "qwen/qwen3.6-flash": ModelPrice(input_cny_per_m=2.0, output_cny_per_m=8.0, estimated=True),
     }
 
 
