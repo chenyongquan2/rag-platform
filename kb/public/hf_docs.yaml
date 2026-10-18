@@ -47,6 +47,7 @@ retrieval:
   expand_max_tokens: 4000
 eval:
   dir: evals/datasets/hf_docs
+  questions: huggingface_doc_qa_eval.jsonl   # the 65 public questions; no_answer.jsonl is a separate set
 access:
   callers: ["*"]
 answer:

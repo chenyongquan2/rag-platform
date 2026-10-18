@@ -137,3 +137,22 @@ def test_committed_hf_question_set() -> None:
     assert all(len(q.relevant_pages) == 1 and q.answer for q in qs.questions)
     assert qs.has_chunk_labels is False
     assert repo_path(COMMITTED_SET).read_bytes().count(b"\n") == 65
+
+
+def test_no_answer_set_and_label_overrides() -> None:
+    """Spec P0-13 AC4: 10 hand-written no-answer questions without labels; every label override
+    names a question of the public set, gives a finding, an action and a reason."""
+    root = repo_path("evals/datasets/hf_docs")
+    no_answer = load_question_set(root / "no_answer.jsonl", kb="hf_docs")
+    assert len(no_answer.questions) == 10
+    assert all(not q.relevant_pages and not q.relevant_chunks for q in no_answer.questions)
+    public = {q.qid for q in load_question_set(root / "huggingface_doc_qa_eval.jsonl").questions}
+    assert not public & {q.qid for q in no_answer.questions}
+    lines = (root / "label_overrides.jsonl").read_text(encoding="utf-8").splitlines()
+    overrides = [json.loads(line) for line in lines if line.strip()]
+    assert overrides
+    for entry in overrides:
+        assert entry["qid"] in public
+        assert entry["finding"] in {"label_error", "retrieval_failure"}
+        assert entry["action"] in {"exclude", "keep"}
+        assert len(entry["reason"]) > 40

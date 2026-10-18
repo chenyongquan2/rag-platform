@@ -18,6 +18,7 @@ and final confirmation waits for the P1-05 dev set.
   weights are exact (decimal) fractions; a route with weight 0 adds nothing but keeps its trace list.
 - Config: `RetrievalConfig.rrf_weights` (default `{bm25: 1.0, vector: 1.0}`; keys must be route names,
   weights >= 0, not all 0); `EsHybridRetriever` passes it to `rrf_fuse`.
+- Config: `EvalConfig.questions` (file name of the default labelled set in `eval.dir`).
 - `kb/public/hf_docs.yaml`: `title_boost`, `rrf_weights`, `threshold` set from this spec.
 - Service defaults for `reranker_torch_threads` / `rerank_max_concurrency` from the concurrency test.
 - Data: `evals/datasets/hf_docs/no_answer.jsonl` (10 questions, empty labels),
@@ -28,6 +29,7 @@ and final confirmation waits for the P1-05 dev set.
 - [ ] AC1 Weighted RRF matches hand-computed values; default weights equal plain RRF — `tests/unit/test_retrieve_fusion.py::test_weighted_rrf_hand_computed`
 - [ ] AC2 Weight 0 removes a route's contribution; negative weights and unknown routes are refused — `::test_weighted_rrf_zero_and_invalid_weights`
 - [ ] AC3 Config validates `rrf_weights` (route names, >= 0, not all 0) and the retriever fuses with them — `tests/unit/test_retrieve_hybrid.py::test_retriever_uses_rrf_weights`, `tests/unit/test_config.py::test_rrf_weights_validation`
+- [ ] AC5 With several *.jsonl in eval.dir, `eval.questions` names the default set; without it `run` is a usage error — `tests/unit/test_eval_cli_run.py::test_run_uses_the_configured_question_file`
 - [ ] AC4 The no-answer set loads (10 questions, no labels) and override file entries name existing qids — `tests/unit/test_eval_questions.py::test_no_answer_set_and_label_overrides`
 
 Also (by running): fusion variants pre/post rerank with `compare`; concurrency P50/P95; threshold sweep with

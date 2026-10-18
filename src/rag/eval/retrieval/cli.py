@@ -144,6 +144,11 @@ def _question_file(cfg: KnowledgeBaseConfig, given: str | None) -> Path:
     if given:
         return Path(given)
     eval_dir = repo_path(cfg.eval.dir or f"evals/datasets/{cfg.kb}")
+    if cfg.eval.questions:
+        path = eval_dir / cfg.eval.questions
+        if not path.is_file():
+            raise UsageError(f"{path}: eval.questions file not found")
+        return path
     files = sorted(eval_dir.glob("*.jsonl"))
     if len(files) != 1:
         raise UsageError(f"{eval_dir}: expected one *.jsonl question set, found {len(files)}")

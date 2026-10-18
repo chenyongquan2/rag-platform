@@ -211,3 +211,25 @@ def test_output_survives_a_non_utf8_console(
     argv = ["compare", run_a, run_b, "--reports-dir", str(env["reports"]), "--out", str(out)]
     assert cli.main(argv) == 0
     assert emoji in out.read_text(encoding="utf-8")
+
+
+def test_run_uses_the_configured_question_file(env: dict[str, Any], tmp_path: Path) -> None:
+    """Spec P0-13 AC5: with several *.jsonl in eval.dir, `eval.questions` names the one `run`
+    uses by default; without it several files are a usage error."""
+    eval_dir = tmp_path / "evals"
+    eval_dir.mkdir()
+    save_question_set(QUESTIONS, eval_dir / "main.jsonl")
+    (eval_dir / "no_answer.jsonl").write_text(
+        '{"qid": "na:01", "question": "capital of Australia?", "answer": ""}\n', encoding="utf-8"
+    )
+    kb_yaml = env["settings"].kb_dir + "/public/hf_docs.yaml"
+    base = [a for a in env["base"] if a not in ("--questions",)]
+    base = [base[0], base[1], *base[3:]]  # drop --questions and its value
+    Path(kb_yaml).write_text(KB_YAML + f"eval: {{dir: '{eval_dir.as_posix()}'}}\n", "utf-8")
+    assert cli.main(["run", *base], settings=env["settings"]) == 2
+
+    Path(kb_yaml).write_text(
+        KB_YAML + f"eval: {{dir: '{eval_dir.as_posix()}', questions: main.jsonl}}\n", "utf-8"
+    )
+    assert cli.main(["run", *base], settings=env["settings"]) == 0
+    assert _only_run(env["reports"])["counts"]["questions"] == 2

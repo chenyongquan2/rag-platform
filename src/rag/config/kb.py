@@ -167,9 +167,12 @@ class RetrievalConfig(_Strict):
 
 
 class EvalConfig(_Strict):
-    """Question sets. `None` means `evals/datasets/<kb>` (design s16-2)."""
+    """Question sets. `dir`: `None` means `evals/datasets/<kb>` (design s16-2). `questions`: the
+    file name in `dir` of the labelled set the eval uses by default; `None` = the only *.jsonl
+    there (the directory may also hold other sets, e.g. no-answer questions, spec P0-13)."""
 
     dir: str | None = None
+    questions: str | None = None
 
 
 class AccessConfig(_Strict):
