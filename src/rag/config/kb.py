@@ -98,6 +98,9 @@ class EsConfig(_Strict):
     analyzer: str = "standard"
 
 
+RRF_ROUTES = ("bm25", "vector")
+"""Route names of the hybrid retriever (`rag.retrieve.hybrid.ROUTES`; config cannot import it)."""
+
 # Elasticsearch rejects a kNN search with num_candidates above this.
 MAX_NUM_CANDIDATES = 10_000
 
@@ -108,7 +111,9 @@ class RetrievalConfig(_Strict):
     - `top_k_per_route`: hits each route (BM25, vector) returns before fusion.
     - `num_candidates`: HNSW candidates per shard of the kNN route (tuned on the question set).
     - `title_boost`: weight of `title_path` against `content` in the BM25 `multi_match`.
-    - `rrf_k`: the constant of reciprocal rank fusion, score = sum over routes 1 / (k + rank).
+    - `rrf_k`: the constant of reciprocal rank fusion, score = sum over routes w / (k + rank).
+    - `rrf_weights`: the weight w of each route (`bm25`, `vector`) in that sum; equal by default
+      (s9-3), >= 0, not all 0 (spec P0-13).
     - `rerank_n`: fused candidates sent to the reranker (s10-1); later ones are dropped.
     - `final_k`: chunks returned when the caller gives no top_k.
     - `threshold`: rerank score (sigmoid, 0 to 1) a chunk needs to be returned (s10-2).
@@ -122,12 +127,28 @@ class RetrievalConfig(_Strict):
     num_candidates: int = Field(default=100, gt=0, le=MAX_NUM_CANDIDATES)
     title_boost: float = Field(default=2.0, gt=0)
     rrf_k: int = Field(default=60, ge=0)
+    rrf_weights: dict[str, float] = Field(
+        default_factory=lambda: {route: 1.0 for route in RRF_ROUTES}
+    )
     rerank_n: int = Field(default=30, gt=0)
     final_k: int = Field(default=8, gt=0)
     threshold: float = Field(default=0.3, ge=0, le=1)
     expand: Literal["none", "neighbors", "parent"] = "none"
     expand_window: int = Field(default=1, ge=1)
     expand_max_tokens: int = Field(default=4000, gt=0)
+
+    @model_validator(mode="after")
+    def _rrf_weights_per_route(self) -> Self:
+        if set(self.rrf_weights) != set(RRF_ROUTES):
+            raise ValueError(
+                f"rrf_weights must give one weight for each route {list(RRF_ROUTES)}, "
+                f"got {sorted(self.rrf_weights)}"
+            )
+        if any(w < 0 for w in self.rrf_weights.values()):
+            raise ValueError(f"rrf_weights must be >= 0, got {self.rrf_weights}")
+        if not any(w > 0 for w in self.rrf_weights.values()):
+            raise ValueError("rrf_weights must not all be 0")
+        return self
 
     @model_validator(mode="after")
     def _final_k_within_rerank_n(self) -> Self:

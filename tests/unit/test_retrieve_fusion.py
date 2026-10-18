@@ -89,3 +89,38 @@ def test_rrf_ties_are_deterministic() -> None:
     for names in itertools.permutations(routes):
         shuffled = {name: list(reversed(routes[name])) for name in names}
         assert [h.chunk_id for h in rrf_fuse(shuffled, k=60)] == expected
+
+
+# ---- spec P0-13: weighted RRF -------------------------------------------------------------------
+
+
+def test_weighted_rrf_hand_computed() -> None:
+    routes = {
+        "bm25": _hits("a#0", "b#0"),
+        "vector": _hits("c#0", "a#0"),
+    }
+    fused = rrf_fuse(routes, k=60, weights={"bm25": 1.0, "vector": 2.0})
+
+    # a: 1/61 + 2/62, b: 1/62, c: 2/61.
+    expected = {"a#0": 1 / 61 + 2 / 62, "b#0": 1 / 62, "c#0": 2 / 61}
+    assert [h.chunk_id for h in fused] == ["a#0", "c#0", "b#0"]
+    for hit in fused:
+        assert hit.score == pytest.approx(expected[hit.chunk_id])
+    # Equal weights are plain RRF, also with non-integer weights (exact decimal fractions).
+    plain = rrf_fuse(routes, k=60)
+    assert rrf_fuse(routes, k=60, weights={"bm25": 1.0, "vector": 1.0}) == plain
+    halves = rrf_fuse(routes, k=60, weights={"bm25": 0.5, "vector": 0.5})
+    assert [h.chunk_id for h in halves] == [h.chunk_id for h in plain]
+
+
+def test_weighted_rrf_zero_and_invalid_weights() -> None:
+    routes = {"bm25": _hits("a#0", "b#0"), "vector": _hits("b#0", "c#0")}
+    fused = rrf_fuse(routes, k=60, weights={"bm25": 0.0, "vector": 1.0})
+    # BM25 adds nothing: b 1/61, c 1/62, a 0 (kept last, with its route rank for the trace).
+    assert [h.chunk_id for h in fused] == ["b#0", "c#0", "a#0"]
+    assert fused[2].score == 0.0
+    assert fused[2].route_ranks == {"bm25": 1}
+    with pytest.raises(ValueError, match="weight"):
+        rrf_fuse(routes, weights={"bm25": -1.0, "vector": 1.0})
+    with pytest.raises(ValueError, match="weight"):
+        rrf_fuse(routes, weights={"bm25": 1.0})  # vector has no weight

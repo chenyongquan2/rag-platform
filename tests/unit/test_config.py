@@ -232,3 +232,19 @@ def test_load_kb_configs_rejects_duplicate_names(tmp_path: Path) -> None:
     (tmp_path / "private" / "c.yaml").write_text("kb: same\n" + private, "utf-8")
     with pytest.raises(ValueError, match="same"):
         load_kb_configs(tmp_path)
+
+
+def test_rrf_weights_validation() -> None:
+    """Spec P0-13 AC3: one weight per route name, >= 0, not all 0; equal by default."""
+    from rag.config import RetrievalConfig
+
+    assert RetrievalConfig().rrf_weights == {"bm25": 1.0, "vector": 1.0}
+    assert RetrievalConfig(rrf_weights={"bm25": 0.5, "vector": 2}).rrf_weights["vector"] == 2.0
+    for bad in (
+        {"bm25": 1.0, "vectors": 1.0},  # unknown route
+        {"bm25": 1.0},  # missing route
+        {"bm25": -0.1, "vector": 1.0},
+        {"bm25": 0.0, "vector": 0.0},
+    ):
+        with pytest.raises(ValidationError):
+            RetrievalConfig(rrf_weights=bad)

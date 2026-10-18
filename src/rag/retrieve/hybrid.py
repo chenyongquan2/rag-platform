@@ -411,7 +411,7 @@ class EsHybridRetriever(BaseRetriever):
         if not trace.index_version:
             trace.index_version = self._resolve_index(query.deadline)
 
-        fused = rrf_fuse(trace.routes, k=self.config.rrf_k)
+        fused = rrf_fuse(trace.routes, k=self.config.rrf_k, weights=self.config.rrf_weights)
         nodes: list[NodeWithScore] = []
         for hit in fused:
             source = dict(sources[hit.chunk_id])

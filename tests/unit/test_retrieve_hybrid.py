@@ -482,3 +482,21 @@ def test_unknown_route_is_refused() -> None:
             es_margin_ms=200,
             routes=("sparse",),
         )
+
+
+def test_retriever_uses_rrf_weights() -> None:
+    """Spec P0-13 AC3: the KB's `rrf_weights` reach the fusion."""
+    es = FakeMsearchClient(bm25=BM25_HITS, vector=VECTOR_HITS)
+    config = RetrievalConfig(rrf_weights={BM25: 3.0, VECTOR: 1.0})
+    nodes = _retriever(es, config=config).retrieve(_query())
+
+    # p: 3/61; q: 3/62 + 1/61; r: 1/62.
+    assert [n.node.node_id for n in nodes] == ["q#0", "p#0", "r#2"]
+    assert [n.score for n in nodes] == pytest.approx([3 / 62 + 1 / 61, 3 / 61, 1 / 62])
+    config = RetrievalConfig(rrf_weights={BM25: 0.0, VECTOR: 1.0})
+    nodes = _retriever(es, config=config).retrieve(_query())
+    assert [n.node.node_id for n in nodes] == ["q#0", "r#2", "p#0"]
+    from rag.config.kb import RRF_ROUTES
+    from rag.retrieve.hybrid import ROUTES
+
+    assert RRF_ROUTES == ROUTES  # the config's copy of the route names stays in step
