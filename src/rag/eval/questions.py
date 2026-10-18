@@ -12,6 +12,7 @@ import hashlib
 import json
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -30,6 +31,9 @@ class LabeledQuestion(BaseModel):
     """doc_ids of the pages that answer the question."""
     relevant_chunks: list[str] = Field(default_factory=list)
     """Optional chunk_ids; depend on the chunking, so they are a supplement only."""
+    meta: dict[str, Any] = Field(default_factory=dict)
+    """Optional provenance (synthetic questions: source span, critique scores); not used by
+    metrics and not written when empty."""
 
     @field_validator("relevant_pages", "relevant_chunks")
     @classmethod
@@ -107,7 +111,12 @@ def save_question_set(questions: Sequence[LabeledQuestion], path: str | Path) ->
     qids = [q.qid for q in questions]
     if len(set(qids)) != len(qids):
         raise ValueError("duplicate qids")
-    lines = [json.dumps(q.model_dump(mode="json"), ensure_ascii=False) for q in questions]
+    lines = [
+        json.dumps(
+            q.model_dump(mode="json", exclude=set() if q.meta else {"meta"}), ensure_ascii=False
+        )
+        for q in questions
+    ]
     data = "".join(f"{line}\n" for line in lines).encode("utf-8")
     file = repo_path(path)
     file.parent.mkdir(parents=True, exist_ok=True)
