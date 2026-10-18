@@ -116,3 +116,14 @@ def test_span_problem_reasons() -> None:
     assert pages[0].doc_id not in {s.doc_id for s in result.spans}
     assert result.pages_skipped == {"code_only": 1}
     assert result.shortfall == {"huggingface/transformers:markdown": 1}
+
+
+def test_shortfall_reallocated() -> None:
+    code = "```python\n" + "x = model(**inputs)\nprint(x.shape)\n" * 20 + "```\n"
+    pages = [_page(i, "gradio-app/gradio", "notebook", text=code) for i in range(10)]
+    pages += [_page(100 + i) for i in range(30)]
+    result = sample_spans(pages, SamplerConfig(n=20, seed=0, span_chars=500, min_chars=200))
+    assert result.allocation["gradio-app/gradio:notebook"] == 5
+    assert result.shortfall == {"gradio-app/gradio:notebook": 5}
+    assert result.reallocated == {"huggingface/transformers:markdown": 5}
+    assert len(result.spans) == 20 and result.missing == 0

@@ -10,7 +10,8 @@ page counts (largest remainder), and pages are drawn without replacement, one sp
 span starts at a random line start and is `span_chars` long, extended to the end of its last line
 (at most `max_line_extension` more characters). Tiny, code-only and boilerplate spans are
 rejected; a page gets `attempts` tries before it is skipped and the next page of its stratum is
-drawn. The final list is shuffled with the same seed, so the first spans (a pilot) cover the
+drawn. What a stratum cannot give (it ran out of usable pages) is drawn from the strata that still
+have pages. The final list is shuffled with the same seed, so the first spans (a pilot) cover the
 strata in proportion too.
 """
 
@@ -61,7 +62,7 @@ class SamplerConfig(BaseModel):
     """HF rag_evaluation cuts 2,000-character contexts."""
     max_line_extension: int = Field(default=300, ge=0)
     min_chars: int = Field(default=400, ge=1)
-    min_prose_share: float = Field(default=0.3, ge=0, le=1)
+    min_prose_share: float = Field(default=0.1, ge=0, le=1)
     """Share of the span's characters in prose lines (outside code fences, not table rows)."""
     attempts: int = Field(default=3, ge=1)
     languages: list[str] = Field(default_factory=lambda: ["en"])
@@ -82,7 +83,11 @@ class SampleResult(BaseModel):
     span_problems: dict[str, int]
     """Every rejected attempt, by reason."""
     shortfall: dict[str, int]
-    """Strata that ran out of usable pages: spans missing."""
+    """Strata that ran out of usable pages: spans they could not give."""
+    reallocated: dict[str, int] = Field(default_factory=dict)
+    """Extra spans drawn from the other strata in place of the shortfall."""
+    missing: int = 0
+    """Spans short of n after the reallocation (every usable page used)."""
 
     def summary(self) -> dict[str, Any]:
         return self.model_dump(exclude={"spans"})
@@ -227,15 +232,17 @@ def sample_spans(pages: Iterable[Page], config: SamplerConfig) -> SampleResult:
     spans: list[Span] = []
     skipped: Counter[str] = Counter()
     problems: Counter[str] = Counter()
-    shortfall: dict[str, int] = {}
+    queues: dict[str, list[Page]] = {}
     for stratum in sorted(by_stratum):
         candidates = sorted(by_stratum[stratum], key=lambda p: p.doc_id)
         rng.shuffle(candidates)
-        want = allocation[stratum]
+        queues[stratum] = candidates
+
+    def fill(stratum: str, want: int) -> int:
         got = 0
-        for page in candidates:
-            if got >= want:
-                break
+        queue = queues[stratum]
+        while got < want and queue:
+            page = queue.pop(0)
             span, reasons = _draw(page, stratum, rng, config)
             problems.update(reasons)
             if span is None:
@@ -243,8 +250,24 @@ def sample_spans(pages: Iterable[Page], config: SamplerConfig) -> SampleResult:
             else:
                 spans.append(span)
                 got += 1
-        if got < want:
-            shortfall[stratum] = want - got
+        return got
+
+    shortfall: dict[str, int] = {}
+    for stratum in sorted(queues):
+        got = fill(stratum, allocation[stratum])
+        if got < allocation[stratum]:
+            shortfall[stratum] = allocation[stratum] - got
+    # Strata that ran out of usable pages: their missing spans go to the strata that still have
+    # pages, in proportion to the pages left, until n is reached or no page is left.
+    reallocated: Counter[str] = Counter()
+    while len(spans) < config.n:
+        left = {k: len(q) for k, q in sorted(queues.items()) if q}
+        if not left:
+            break
+        extra = allocate(left, min(config.n - len(spans), sum(left.values())))
+        for stratum, want in extra.items():
+            if want:
+                reallocated[stratum] += fill(stratum, want)
     rng.shuffle(spans)
     return SampleResult(
         config=config,
@@ -256,6 +279,8 @@ def sample_spans(pages: Iterable[Page], config: SamplerConfig) -> SampleResult:
         pages_skipped=dict(skipped),
         span_problems=dict(problems),
         shortfall=shortfall,
+        reallocated={k: v for k, v in sorted(reallocated.items()) if v},
+        missing=config.n - len(spans),
     )
 
 
