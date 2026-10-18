@@ -41,7 +41,7 @@ retrieval:
   rrf_k: 60
   rerank_n: 10         # fused candidates sent to the reranker (s10-1); P0-12 curve, docs/decisions.md
   final_k: 8
-  threshold: 0.3       # rerank score (0 to 1) a chunk needs; calibrated in P0-12 (s10-2)
+  threshold: 0.3       # rerank score (0 to 1) a chunk needs; uncalibrated (P2 threshold script, s10-2)
   expand: none         # none | neighbors | parent: context added around returned chunks (s10-3)
   expand_window: 1     # neighbors: chunks on each side
   expand_max_tokens: 4000
