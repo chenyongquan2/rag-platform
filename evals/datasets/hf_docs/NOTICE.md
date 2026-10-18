@@ -22,3 +22,18 @@ Written by `uv run python -m rag.eval.retrieval export-hf` (spec P0-10):
   scheme of spec P0-03); `relevant_chunks` is empty.
 - Added `qid` = `huggingface_doc_qa_eval:<row index>` (row order of the pinned file).
 - Format changed from parquet to JSON Lines, one question per line.
+
+# NOTICE: synthetic_dev.jsonl, synthetic_holdout.jsonl, synthetic_manifest.json
+
+These files are derived from the corpus dataset
+[`m-ric/huggingface_doc`](https://huggingface.co/datasets/m-ric/huggingface_doc) (MIT licence;
+revision, files and sha256 in `data/manifests/hf_docs.json`), whose pages are the Hugging Face
+documentation. Written by `uv run python -m rag.eval.synthetic build` (spec P1-05):
+
+- `meta.span` is a verbatim span of one page's text after the knowledge base's cleaning rules.
+- `question` and `answer` were generated from that span by the model `deepseek-v4-flash`;
+  `meta.scores` and `meta.rationales` were written by `qwen/qwen3.6-flash`. Prompts adapted from
+  the Hugging Face cookbook `rag_evaluation` notebook (Apache License 2.0).
+- `relevant_pages` is the page's doc_id (`hf_docs:<path>`).
+
+The derived files are distributed under the MIT licence of the corpus.

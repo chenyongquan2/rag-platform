@@ -268,3 +268,28 @@ A run records per question the answer, cited chunk ids, citation check counts, p
 latencies and the ledger's tokens and CNY, plus format compliance with Wilson intervals. The
 judge (`qwen/qwen3.6-flash`, thinking off, temperature 0, prompt `p1-04-hf-v1`) uses the HF
 rag_evaluation (1-5) and agent_rag (1-3) rubrics; answers that are not given score 1 by rule.
+
+## Synthetic question sets
+
+Dev and holdout sets generated from the corpus (spec P1-05, design s14-2): random spans of the
+cleaned page text (not index chunks), stratified by repository and doc type, one span per page,
+the 65 public questions' pages left out. `deepseek-v4-flash` writes one factoid question per span
+in the user's own words; `qwen/qwen3.6-flash` rates groundedness, relevance and standalone 1-5
+(HF rag_evaluation prompts); a question is kept when all three are at least 4, it does not copy
+more than 6 words in a row from its span and its answer is under 300 characters. `generate` and
+`critique` cost money and resume where they stopped; run records go to the git-ignored
+`data/reports/synthetic/<run_id>/`.
+
+```bash
+uv run python -m rag.eval.synthetic sample --kb hf_docs --n 420 --seed 0
+uv run python -m rag.eval.synthetic generate --run <run dir> --limit 20     # a pilot first
+uv run python -m rag.eval.synthetic critique --run <run dir>
+uv run python -m rag.eval.synthetic project --run <run dir> --n 420
+uv run python -m rag.eval.synthetic sample --kb hf_docs --n 380 --seed 1 --extend <run dir>
+uv run python -m rag.eval.synthetic build --run <run dir> --kb hf_docs --seed 0
+uv run python -m rag.eval.retrieval run --kb hf_docs     --questions evals/datasets/hf_docs/synthetic_dev.jsonl --label synthetic-dev
+```
+
+`build` writes `evals/datasets/hf_docs/synthetic_{dev,holdout}.jsonl` (page labels, the span and
+scores in `meta`) and `synthetic_manifest.json` (models, prompt versions, seeds, thresholds,
+counts, sha256). Tune on dev only; report holdout once per phase.
