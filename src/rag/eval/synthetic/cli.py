@@ -50,6 +50,7 @@ from rag.eval.synthetic.filters import (
     redact_secrets,
     rejection_reasons,
 )
+from rag.eval.synthetic.labels import PageIndex
 from rag.eval.synthetic.pipeline import (
     TRANSIENT_ERRORS,
     CriticConfig,
@@ -62,7 +63,7 @@ from rag.eval.synthetic.pipeline import (
 )
 from rag.eval.synthetic.prompts import CRITERIA, CRITIQUE_PROMPT_VERSION, GENERATION_PROMPT_VERSION
 from rag.eval.synthetic.sampler import Page, SamplerConfig, Span, load_clean_pages, sample_spans
-from rag.eval.synthetic.split import split_dev_holdout
+from rag.eval.synthetic.split import near_duplicate_groups, split_dev_holdout
 
 REPORTS_ROOT = "data/reports/synthetic"
 SPANS = "spans.jsonl"
@@ -353,6 +354,7 @@ def _build(args: argparse.Namespace, settings: ServiceSettings) -> int:
     for c in crits:
         scores.setdefault(c.span_id, {})[c.criterion] = c.score
         rationales.setdefault(c.span_id, {})[c.criterion] = c.rationale
+    index = PageIndex(load_pages(cfg, settings))
     generator = GeneratorConfig(**({"model": gens[0].model} if gens else {}))
     critic = CriticConfig(**({"model": crits[0].model} if crits else {}))
 
@@ -399,6 +401,9 @@ def _build(args: argparse.Namespace, settings: ServiceSettings) -> int:
         question, n_q = redact_secrets(gen.question or "")
         answer, n_a = redact_secrets(gen.answer or "")
         redacted += n_redacted + n_q + n_a
+        others = index.answering_pages(
+            question=gen.question or "", answer=gen.answer or "", span=span.text, source=gen.doc_id
+        )
         runs_kept.append(overlap.longest_run)
         recall_kept.append(overlap.content_recall)
         kept.append(
@@ -406,7 +411,7 @@ def _build(args: argparse.Namespace, settings: ServiceSettings) -> int:
                 qid=f"{QID_PREFIX}:{gen.span_id}",
                 question=question,
                 answer=answer,
-                relevant_pages=[gen.doc_id],
+                relevant_pages=[gen.doc_id, *others],
                 meta={
                     "span": span_text,
                     "span_start": span.start,
@@ -417,15 +422,20 @@ def _build(args: argparse.Namespace, settings: ServiceSettings) -> int:
                     "scores": q_scores,
                     "rationales": rationales.get(gen.span_id, {}),
                     "overlap": overlap.model_dump(),
+                    "source_page": gen.doc_id,
+                    "pages_added": len(others),
                 },
             )
         )
     by_qid = {q.qid: q for q in kept}
+    groups = near_duplicate_groups([(q.qid, q.question, q.answer) for q in kept])
+    group_sizes = Counter(groups.values())
     dev_ids, holdout_ids = split_dev_holdout(
         [(q.qid, str(q.meta["stratum"])) for q in kept],
         seed=args.seed,
         holdout_share=args.holdout_share,
         min_each=args.min_each,
+        groups=groups,
     )
     out = (
         Path(args.out_dir)
@@ -471,6 +481,17 @@ def _build(args: argparse.Namespace, settings: ServiceSettings) -> int:
         "rejections": dict(sorted(reasons_count.items())),
         "rejections_only_reason": dict(sorted(only_reason.items())),
         "redacted_tokens": redacted,
+        "labels": {
+            "rule": "source page + every other page containing the answer (also in the span) "
+            "and all question words found in the span (rag.eval.synthetic.labels)",
+            "questions_with_added_pages": sum(bool(q.meta["pages_added"]) for q in kept),
+            "pages_added": sum(int(q.meta["pages_added"]) for q in kept),
+        },
+        "near_duplicate_groups": [
+            sorted(q for q, g in groups.items() if g == group)
+            for group, size in sorted(group_sizes.items())
+            if size > 1
+        ],
         "strata": split_strata,
         "usage": {"generation": g_usage.model_dump(), "critique": c_usage.model_dump()},
         "files": files,

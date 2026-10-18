@@ -39,7 +39,8 @@ class EchoGenerator(FakeChatModel):
         found = re.search(r"Page number (\d+)", str(messages[-1].content))
         n = found.group(1) if found else "?"
         return AIMessage(
-            content=f"Factoid question: Which cache folder does tool {n} use?\nAnswer: Folder {n}."
+            content=f"Factoid question: Where does library w{n}a keep files for package w{n}b?\n"
+            f"Answer: Folder {n}."
         )
 
 
@@ -49,7 +50,7 @@ class Critic(FakeChatModel):
     def _next_message(self, messages: list[BaseMessage]) -> AIMessage:
         self._calls.append(list(messages))
         text = str(messages[-1].content)
-        low = "useful" in text and re.search(r"tool \d*7 use\?", text)
+        low = "useful" in text and re.search(r"library w\d*7a ", text)
         return AIMessage(content=f"Evaluation: ok.\nTotal rating: {2 if low else 5}")
 
 
@@ -167,12 +168,14 @@ def test_cli_end_to_end_with_fakes(env: dict[str, Any], capsys: pytest.CaptureFi
     )
     dev = load_question_set(out / "synthetic_dev.jsonl", kb="hf_docs")
     holdout = load_question_set(out / "synthetic_holdout.jsonl", kb="hf_docs")
-    rejected = sum(1 for g in gens if re.search(r"tool \d*7 use\?", g["question"]))
+    rejected = sum(1 for g in gens if re.search(r"library w\d*7a ", g["question"]))
     assert len(dev.questions) + len(holdout.questions) == 50 - rejected
     assert {q.qid for q in dev.questions}.isdisjoint({q.qid for q in holdout.questions})
     q = dev.questions[0]
     assert q.relevant_pages[0].startswith("hf_docs:") and q.answer
     assert q.meta["span"] and q.meta["scores"]["groundedness"] == 5
+    assert q.relevant_pages[0] == q.meta["source_page"]
+    assert len(q.relevant_pages) == 1 + q.meta["pages_added"]
 
     manifest = json.loads((out / "synthetic_manifest.json").read_text(encoding="utf-8"))
     assert manifest["generator"]["model"] == "deepseek-v4-flash"
@@ -186,3 +189,9 @@ def test_cli_end_to_end_with_fakes(env: dict[str, Any], capsys: pytest.CaptureFi
     assert manifest["files"]["synthetic_dev.jsonl"]["sha256"] == dev.sha256
     assert manifest["files"]["synthetic_holdout.jsonl"]["questions"] == len(holdout.questions)
     assert (run / "filter_report.json").exists()
+    assert manifest["labels"]["rule"] and "near_duplicate_groups" in manifest
+    # near-duplicate groups (none expected here) stay in one set
+    for group in manifest["near_duplicate_groups"]:
+        assert set(group) <= {q.qid for q in dev.questions} or set(group) <= {
+            q.qid for q in holdout.questions
+        }
