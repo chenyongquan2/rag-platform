@@ -1,6 +1,6 @@
 # P1-04 Answer evaluation with an LLM judge
 
-Status: review
+Status: done
 Phase: P1
 Depends on: P0-08/P0-13 (`SearchPipeline` settings), P0-10 (eval layout, stats), P1-01 (chat factory, ledger), P1-02 (answer generation), P1-03 (security set and scorer)
 Design sections: s14-1, s14-3, s14-4, s13-1, s13-5, s11-2, s20-1
@@ -67,5 +67,5 @@ comparison (P3, s13-5); human scores themselves (the owner fills the sheet); jud
 - Files: `src/rag/eval/answer/{__init__,__main__,record,usage,runner,compliance,cost,judge,agreement,security,cli}.py`, `src/rag/eval/stats.py` (`weighted_kappa`, `spearman`), `src/rag/config/settings.py` (judge price), `tests/unit/test_eval_answer_{run,judge,agreement,cli}.py` (14 test functions), `tests/llm/test_judge_gateway.py`, `README.md`, `docs/decisions.md`, `docs/reports/P1-04-report.md`. Raw records in git-ignored `data/reports/answer-eval/`.
 - Results (65 HF questions): found 64/65 (015, the known label error, answered "not in the docs"); every sentence cited 64/64 [94.3%, 100%]; unknown numbers 0/65; unsupported sentences 0/148; answer_parse_failed 0/65; retries 0. Judge 1-5 mean 4.80 / 4.86 (two runs), 1-3 97.7% both (HF standard RAG 73.1% en / 70.0% zh, other models and retrieval: direction only). Stability: 1-5 flips 1/64 (050, 1 -> 5), kappa 0.67; 1-3 0/64. Security: 29 compliant, 0 violated, 1 llm_timeout; judge 1-5 gives all 29 answers 5. Latency per question P50 5.8 s, P95 8.0 s (retrieval 3.2 s, generation 5.0 s P95). Human sheet (50, seed 0) exported, not scored.
 - Decisions (docs/decisions.md): judge `qwen/qwen3.6-flash` with `enable_thinking: false`, same high price estimate; HF templates kept verbatim in meaning, no-answer = 1 by rule, strict `[RESULT]` parse with flagged loose variants; security contexts are the planted pages' own chunks (not indexed); full run repeats the pilot questions; judge prompt not changed despite it overruling references (comparability with HF).
-- Open issues: judge overrules correct answers with its own knowledge (020, 024, 050) and once gave 5 with a "wrong" rationale -> new prompt version vs human scores; citation check level 2 not done; sec-en-01-q1 not re-run after the gateway connect timeout; 61/65 answers score 5, the public set cannot separate good systems (P1-05 dev set); one CLI bug found in the real run (judge model reused across event loops) fixed with a test, the failed partial run cost 0.012 CNY.
-- Review rounds:
+- Open issues: judge overrules correct answers with its own knowledge (020, 024, 050) (it marks correct answers down; on 050 run 1 gave 1, run 2 corrected itself in the rationale and gave 5) -> new prompt version vs human scores; citation check level 2 not done; sec-en-01-q1 not re-run after the gateway connect timeout; 61/65 answers score 5, the public set cannot separate good systems (P1-05 dev set); one CLI bug found in the real run (judge model reused across event loops) fixed with a test, the failed partial run cost 0.012 CNY.
+- Review rounds: 1 (APPROVE with three report fixes: judge is strict not lenient, 050 run 2 rationale is consistent, real-gateway judge test passed; done).
