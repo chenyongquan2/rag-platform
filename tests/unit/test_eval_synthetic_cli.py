@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage
+from pydantic import Field
 
 from rag.config import ServiceSettings
 from rag.eval.questions import load_question_set
@@ -23,7 +25,14 @@ SENTENCE = (
 
 
 class EchoGenerator(FakeChatModel):
-    """Writes a different question for every span (the span's page number)."""
+    """Writes a different question for every span (the span's page number) and records the
+    event loop of every call: the real model's HTTP clients fail on a second loop."""
+
+    loops: set[int] = Field(default_factory=set)
+
+    async def _agenerate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> Any:
+        self.loops.add(id(asyncio.get_running_loop()))
+        return self._generate(messages)
 
     def _next_message(self, messages: list[BaseMessage]) -> AIMessage:
         self._calls.append(list(messages))
@@ -64,7 +73,13 @@ def _pages() -> list[Page]:
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(cli, "load_pages", lambda cfg, settings: _pages())
-    monkeypatch.setattr(cli, "build_generator_model", lambda settings, config: EchoGenerator())
+    generators: list[EchoGenerator] = []
+
+    def build_generator(settings: ServiceSettings, config: Any) -> EchoGenerator:
+        generators.append(EchoGenerator())
+        return generators[-1]
+
+    monkeypatch.setattr(cli, "build_generator_model", build_generator)
     monkeypatch.setattr(cli, "build_critic_model", lambda settings, config: Critic())
     settings = ServiceSettings(
         chat_backend="fake",
@@ -73,7 +88,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         log_dir="",
         cost_ledger_path=str(tmp_path / "ledger.jsonl"),
     )
-    return {"settings": settings, "tmp": tmp_path}
+    return {"settings": settings, "tmp": tmp_path, "generators": generators}
 
 
 def _main(env: dict[str, Any], *argv: str) -> int:
@@ -117,7 +132,9 @@ def test_cli_end_to_end_with_fakes(env: dict[str, Any], capsys: pytest.CaptureFi
     assert _main(env, "sample", *extend, "--min-chars", "100", "--extend", str(run)) == 0
     spans = [json.loads(x) for x in (run / "spans.jsonl").read_text("utf-8").splitlines()]
     assert len(spans) == 50 and len({s["doc_id"] for s in spans}) == 50
-    assert _main(env, "generate", "--run", str(run), "--concurrency", "2") == 0  # resumes
+    # resumes; several batches share one event loop
+    assert _main(env, "generate", "--run", str(run), "--concurrency", "2", "--batch", "7") == 0
+    assert len(env["generators"][-1].loops) == 1
     gens = [json.loads(x) for x in (run / "generations.jsonl").read_text("utf-8").splitlines()]
     assert len(gens) == 50 and len({g["span_id"] for g in gens}) == 50
 

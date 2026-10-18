@@ -226,11 +226,15 @@ def _generate(args: argparse.Namespace, settings: ServiceSettings) -> int:
     model = build_generator_model(settings, config)
     order = {s.span_id: i for i, s in enumerate(spans)}
     new: list[GenerationRecord] = []
-    try:
+
+    async def work() -> None:  # one event loop for every batch: the model's clients belong to it
         for batch in _batches(todo, args.batch):
-            new += asyncio.run(generate_questions(batch, model, config=config))
+            new.extend(await generate_questions(batch, model, config=config))
             rows = sorted([*kept, *new], key=lambda g: order[g.span_id])
             _write_jsonl(run / GENERATIONS, rows)
+
+    try:
+        asyncio.run(work())
     finally:
         failed = Counter(g.error for g in new if g.error)
         print(
@@ -258,15 +262,17 @@ def _critique(args: argparse.Namespace, settings: ServiceSettings) -> int:
     model = build_critic_model(settings, config)
     order = {s.span_id: i for i, s in enumerate(spans)}
     new: list[CritiqueRecord] = []
-    try:
+
+    async def work() -> None:  # one event loop for every batch: the model's clients belong to it
         for batch in _batches(todo, args.batch):
-            new += asyncio.run(
-                critique_questions(spans, gens, model, config=config, criteria=batch)
-            )
+            new.extend(await critique_questions(spans, gens, model, config=config, criteria=batch))
             rows = sorted(
                 [*kept, *new], key=lambda c: (order[c.span_id], CRITERIA.index(c.criterion))
             )
             _write_jsonl(run / CRITIQUES, rows)
+
+    try:
+        asyncio.run(work())
     finally:
         failed = Counter(c.error for c in new if c.error)
         print(f"critiques {len(new)}; errors {dict(failed)}")
