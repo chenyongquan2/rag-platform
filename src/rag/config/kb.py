@@ -110,7 +110,8 @@ class RetrievalConfig(_Strict):
 
     - `top_k_per_route`: hits each route (BM25, vector) returns before fusion.
     - `num_candidates`: HNSW candidates per shard of the kNN route (tuned on the question set).
-    - `title_boost`: weight of `title_path` against `content` in the BM25 `multi_match`.
+    - `title_boost`: weight of `title_path` against `content` in the BM25 `multi_match`; 1.0 since
+      P0-13b (2.0 let short section titles that match only question words win, docs/decisions.md).
     - `rrf_k`: the constant of reciprocal rank fusion, score = sum over routes w / (k + rank).
     - `rrf_weights`: the weight w of each route (`bm25`, `vector`) in that sum; equal by default
       (s9-3), >= 0, not all 0 (spec P0-13).
@@ -125,7 +126,7 @@ class RetrievalConfig(_Strict):
 
     top_k_per_route: int = Field(default=20, gt=0)
     num_candidates: int = Field(default=100, gt=0, le=MAX_NUM_CANDIDATES)
-    title_boost: float = Field(default=2.0, gt=0)
+    title_boost: float = Field(default=1.0, gt=0)
     rrf_k: int = Field(default=60, ge=0)
     rrf_weights: dict[str, float] = Field(
         default_factory=lambda: {route: 1.0 for route in RRF_ROUTES}

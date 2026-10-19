@@ -172,7 +172,7 @@ def test_retrieval_config_defaults() -> None:
     assert cfg.top_k_per_route == 20
     assert cfg.num_candidates == 100
     assert cfg.rrf_k == 60
-    assert cfg.title_boost == 2.0
+    assert cfg.title_boost == 1.0  # P0-13b: confirmed on the synthetic dev set
     with pytest.raises(ValidationError, match="num_candidates"):
         RetrievalConfig(top_k_per_route=50, num_candidates=40)
     with pytest.raises(ValidationError):
