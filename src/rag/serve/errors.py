@@ -27,6 +27,7 @@ _STATUS: dict[str, int] = {
     ErrorCategory.RETRIEVAL_TIMEOUT: 504,
     ErrorCategory.INTERNAL_ERROR: 500,
     ErrorCategory.AGENT_DEADLINE: 504,
+    ErrorCategory.INVALID_RESUME_TOKEN: 400,
 }
 
 _MESSAGES: dict[str, str] = {
@@ -34,7 +35,8 @@ _MESSAGES: dict[str, str] = {
         "The request is malformed or an argument is out of range: query must be non-empty "
         "text, top_k between 1 and the knowledge base's maximum, deadline_ms positive and "
         "within the service maximum, question (ask_docs) non-empty text, session_id (ask_docs) "
-        "1 to 64 letters, digits, dot, dash or underscore, chunk_id as returned by "
+        "1 to 64 letters, digits, dot, dash or underscore, answer (ask_docs) non-empty text "
+        "and only together with resume_token, chunk_id as returned by "
         "search_docs, mode one of chunk, neighbors, parent, page."
     ),
     ErrorCategory.INVALID_FILTER: (
@@ -55,6 +57,11 @@ _MESSAGES: dict[str, str] = {
     ErrorCategory.AGENT_DEADLINE: (
         "The request waited for an earlier request of the same session until its deadline_ms "
         "ran out; retry, perhaps with a larger deadline_ms."
+    ),
+    ErrorCategory.INVALID_RESUME_TOKEN: (
+        "The resume_token is not valid: it is unknown, expired, already used, or was issued "
+        "for another caller, knowledge base or session. A token can answer one question "
+        "once; ask the question again to get a new one."
     ),
 }
 

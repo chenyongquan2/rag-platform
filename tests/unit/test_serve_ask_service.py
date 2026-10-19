@@ -20,7 +20,7 @@ from rag.retrieve.hybrid import RetrievalError
 from rag.security.access import Credentials
 from rag.serve.errors import ServiceError
 from rag.serve.service import SearchService
-from rag.testing import StreamingFakeChatModel, memory_observability, metric_points
+from rag.testing import FakeChatModel, StreamingFakeChatModel, memory_observability, metric_points
 from rag.testing.agent import ScriptedSearchBackend, agent_settings, pages_result
 from rag.testing.serve import FakePipelineBuilder
 from rag.types import ErrorCategory
@@ -233,3 +233,139 @@ def test_history_is_kept_per_caller_and_knowledge_base() -> None:
     assert _ask(alice, session_id="s1").used_history is False
     assert _ask(alice, session_id="s1").used_history is True
     assert _ask(bob, session_id="s1").used_history is False
+
+
+# ---- P3-02: rewrite and clarify through the service -----------------------------------------
+
+VAGUE = "How do I fix this error?"
+
+
+def _asking_service(
+    helper: Any = None, *, path: Path | None = None, agent: Any = None, **settings: Any
+) -> SearchService:
+    """A service whose KB rewrites, and asks back about a question that names nothing."""
+    from rag.config import AgentConfig
+
+    cfg = KnowledgeBaseConfig(
+        kb="hf_docs",
+        description="hf_docs pages",
+        language="en",
+        access=AccessConfig(callers=["*"]),
+        agent=AgentConfig(rewrite=True, clarify=True, route_model=True),
+    )
+    service = SearchService(
+        agent_settings(**({"business_record_path": str(path)} if path else {}), **settings),
+        configs={"hf_docs": cfg},
+        builder=FakePipelineBuilder({"hf_docs": ScriptedSearchBackend("hf_docs")}),
+        answer_model=StreamingFakeChatModel(default_response=REPLY),
+        helper_model=helper or FakeChatModel(responses=[]),
+        agent=agent,
+    )
+    service.load()
+    return service
+
+
+def test_resume_arguments_and_errors(tmp_path: Path) -> None:
+    path = tmp_path / "records.jsonl"
+    with memory_observability(business_record_path=str(path)):
+        service = _asking_service(path=path)
+        first = _ask(service, question=VAGUE, session_id="s1", request_id="req-1")
+        assert first.status == "need_clarification" and first.resume_token
+        assert "Could you be more specific?" in first.answer and first.sources == []
+        token = first.resume_token
+
+        def refused(category: str, **kwargs: Any) -> ServiceError:
+            err = _error(service, **kwargs)
+            assert err.category == category, kwargs
+            return err
+
+        # Arguments that cannot be a resume: the request itself is wrong.
+        for kwargs in (
+            {"resume_token": token},  # no answer
+            {"resume_token": token, "answer": ""},
+            {"resume_token": token, "answer": "   "},
+            {"resume_token": token, "answer": "x" * 2001},
+            {"resume_token": token, "answer": 5},
+            {"resume_token": 5, "answer": "a reply"},
+            {"answer": "a reply"},  # an answer with no token
+        ):
+            refused(ErrorCategory.INVALID_REQUEST, session_id="s1", **kwargs)
+        # A token that cannot be ours (shape) and one that is not known look the same.
+        for bad in ("short", "has space in it but is long enough", "ä" * 30, token + "x"):
+            err = refused(
+                ErrorCategory.INVALID_RESUME_TOKEN,
+                session_id="s1",
+                resume_token=bad,
+                answer="a reply",
+            )
+            assert bad not in str(err) and bad not in repr(err)
+        # Another session and another caller (a service of the same process with its own
+        # configured caller): refused, and the token is still good for its owner.
+        refused(ErrorCategory.INVALID_RESUME_TOKEN, session_id="s2", resume_token=token, answer="r")
+        bob = _asking_service(agent=service.agent, service_caller="bob")
+        with pytest.raises(ServiceError) as info:
+            asyncio.run(
+                bob.ask_docs(
+                    CREDS,
+                    kb="hf_docs",
+                    question=VAGUE,
+                    session_id="s1",
+                    resume_token=token,
+                    answer="a reply",
+                )
+            )
+        assert info.value.category == ErrorCategory.INVALID_RESUME_TOKEN
+
+        done = _ask(
+            service,
+            question=VAGUE,
+            session_id="s1",
+            resume_token=token,
+            answer="transformers raises KeyError 'llama'",
+            request_id="req-2",
+        )
+        assert (done.status, done.clarified, done.resume_token) == ("answered", True, None)
+        assert done.request_id == "req-2" and done.thread_id == first.thread_id
+        refused(
+            ErrorCategory.INVALID_RESUME_TOKEN, session_id="s1", resume_token=token, answer="r"
+        )  # used once
+
+    records = _records(path)
+    by_id = {r["request_id"]: r for r in records}
+    assert by_id["req-1"]["extra"]["status"] == "need_clarification"
+    assert by_id["req-2"]["extra"]["resumed"] is True and by_id["req-2"]["extra"]["clarified"]
+    # No record or log line carries the token itself.
+    assert token not in path.read_text("utf-8")
+    refused_records = [r for r in records if r["flags"] == ["invalid_resume_token"]]
+    assert refused_records and all(token not in json.dumps(r) for r in refused_records)
+
+
+def test_rewrite_in_the_business_record(tmp_path: Path) -> None:
+    from rag.testing.agent import structured_reply
+
+    question = "How do I push a model to the hub?"
+    statement = "Push a model to the hub with push_to_hub"
+    helper = FakeChatModel(
+        responses=[
+            structured_reply(
+                "RewritePlan", standalone_question=question, search_queries=[statement]
+            ),
+        ]
+    )
+    path = tmp_path / "records.jsonl"
+    with memory_observability(business_record_path=str(path)):
+        service = _asking_service(helper, path=path)
+        response = _ask(service, question=question, request_id="req-r")
+        # The rewrite fails (script says garbage next): a fallback, flagged degraded.
+        helper.responses.append("not a tool call")
+        failed = _ask(service, question="How do I load a model?", request_id="req-f")
+
+    assert response.search_queries == [statement] and response.standalone_question == question
+    assert response.fallbacks == [] and response.degraded is False
+    assert failed.fallbacks == ["rewrite:parse_failed"] and failed.degraded is True
+    assert "degraded" in failed.error_categories
+    ok, bad = _records(path)
+    assert ok["extra"]["search_queries"] == [statement]
+    assert ok["extra"]["standalone_question"] == question and ok["extra"]["fallbacks"] == []
+    assert ok["extra"]["tokens_used"] > 0
+    assert bad["extra"]["fallbacks"] == ["rewrite:parse_failed"] and bad["flags"] == ["degraded"]

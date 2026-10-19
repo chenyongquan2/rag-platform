@@ -5,7 +5,8 @@ One Starlette app, so one process holds one reranker for every way in:
     GET  /healthz              200 {"status": "ok"} while the process runs
     GET  /readyz               200 when the reranker and the chains are loaded, else 503
     POST /v1/search_docs       {kb, query, filters?, top_k?, deadline_ms?} -> SearchResponse
-    POST /v1/ask_docs          {kb, question, session_id?, deadline_ms?}   -> AskResponse
+    POST /v1/ask_docs          {kb, question, session_id?, deadline_ms?, resume_token?, answer?}
+                               -> AskResponse
     POST /v1/get_context       {chunk_id, mode?}                           -> ContextResponse
     GET  /v1/knowledge_bases                                               -> KnowledgeBaseList
     /mcp                       MCP over streamable-http (when an MCPServer is given)
@@ -67,6 +68,8 @@ class AskRequest(BaseModel):
     question: str
     session_id: str | None = None
     deadline_ms: int | None = None
+    resume_token: str | None = None
+    answer: str | None = None
 
 
 class ContextRequest(BaseModel):
@@ -191,6 +194,8 @@ def build_http_app(
             question=body.question,
             session_id=body.session_id,
             deadline_ms=body.deadline_ms,
+            resume_token=body.resume_token,
+            answer=body.answer,
         )
 
     async def get_context(request: Request) -> JSONResponse:

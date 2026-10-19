@@ -90,7 +90,10 @@ class AskResponse(BaseModel):
     thread_id: str = Field(
         description="Checkpoint thread of this request: session id, colon, a server-made run id."
     )
-    status: str = Field(description="answered, not_found, or need_clarification (P3-02).")
+    status: str = Field(
+        description="answered, not_found, or need_clarification: then answer is a question for "
+        "the user and resume_token continues the run."
+    )
     found: bool = Field(description="The fragments contained the answer.")
     answer: str = Field(description="The answer text; empty when no answer could be written.")
     sentences: list[AnswerSentence] = Field(
@@ -104,7 +107,10 @@ class AskResponse(BaseModel):
     index_version: str
     data_generation: int
     config_version: str
-    degraded: bool = Field(description="A search used only one retrieval route.")
+    degraded: bool = Field(
+        description="A search used only one retrieval route, or a step fell back to the "
+        "original question (see fallbacks)."
+    )
     rerank_timeout: bool
     coverage_unconfirmed: bool = Field(
         description="Not confirmed that everything was searched: the run stopped at a limit."
@@ -117,7 +123,22 @@ class AskResponse(BaseModel):
     )
     used_history: bool = Field(description="Earlier turns of the session went into this run.")
     cache_allowed: bool = Field(description="False when the call carried history (s12-1).")
-    resume_token: str | None = Field(description="Only with need_clarification (P3-02).")
+    resume_token: str | None = Field(
+        description="Only with need_clarification: pass it back with answer (and the same kb "
+        "and session_id) to continue. Valid once, for this caller, until it expires."
+    )
+    clarified: bool = Field(description="This run was continued with the caller's answer.")
+    standalone_question: str | None = Field(
+        description="The question made understandable without the conversation, when the "
+        "rewrite changed it; the answer was written for it."
+    )
+    search_queries: list[str] = Field(
+        description="What was searched, one query per search (empty: the question as asked)."
+    )
+    fallbacks: list[str] = Field(
+        description="Steps that fell back to the rules or the original question, for example "
+        "rewrite:timeout, rewrite:identifiers_lost, route:parse_failed."
+    )
     tokens_used: int = Field(description="Model tokens this request spent (usage or estimate).")
     error_categories: list[str] = Field(description="Flags set above, as category names.")
     citation_check: CitationCheck
@@ -149,6 +170,10 @@ class AskResponse(BaseModel):
             used_history=result.used_history,
             cache_allowed=result.cache_allowed,
             resume_token=result.resume_token,
+            clarified=result.clarified,
+            standalone_question=result.standalone_question,
+            search_queries=result.search_queries,
+            fallbacks=result.fallbacks,
             tokens_used=result.tokens_used,
             error_categories=[str(c) for c in result.error_categories],
             citation_check=result.citation_check,

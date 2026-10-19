@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -88,7 +89,10 @@ _CALLER_ERRORS = {
     ErrorCategory.INVALID_REQUEST,
     ErrorCategory.INVALID_FILTER,
     ErrorCategory.KB_NOT_FOUND,
+    ErrorCategory.INVALID_RESUME_TOKEN,
 }
+# What a resume token looks like (`rag.agent.resume.new_token`): anything else cannot be one.
+_RESUME_TOKEN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
 class SearchBackend(Protocol):
@@ -243,6 +247,7 @@ class SearchService:
         builder: PipelineBuilder | None = None,
         agent: AgentRuntime | None = None,
         answer_model: Any = None,
+        helper_model: Any = None,
     ) -> None:
         self.settings = settings
         self.configs: dict[str, KnowledgeBaseConfig] = (
@@ -260,6 +265,7 @@ class SearchService:
         self.load_s: float | None = None
         self._agent = agent
         self._answer_model = answer_model  # None: the runtime's `online` chat model
+        self._helper_model = helper_model  # None: the runtime's `agent_rewrite_profile` model
 
     # ---- lifecycle --------------------------------------------------------------------------
 
@@ -496,10 +502,17 @@ class SearchService:
         session_id: str | None = None,
         deadline_ms: int | None = None,
         request_id: str | None = None,
+        resume_token: str | None = None,
+        answer: str | None = None,
     ) -> AskResponse:
         """Answer a question from one knowledge base with the ask_docs graph (s16-1, s13-3);
         raises `ServiceError`. Runs on the caller's event loop: the graph is async and the
-        session locks belong to it (the blocking searches run in worker threads)."""
+        session locks belong to it (the blocking searches run in worker threads).
+
+        A result with status `need_clarification` carries a `resume_token`; the caller answers
+        with `resume_token` and `answer` (and the same `kb` and `session_id`; `question` is
+        required as always but not used). A token that is unknown, used, expired or not the
+        caller's is `invalid_resume_token`."""
         request_id = request_id or new_request_id()
         caller, cfg = self._resolve(credentials, kb, request_id)
         pipeline = self._pipelines.get(cfg.kb) if cfg is not None else None
@@ -507,6 +520,7 @@ class SearchService:
             "question": _clip(question, self.settings.search_max_query_chars),
             "session_id": _clip(session_id, RECORD_TEXT_CHARS) if session_id is not None else None,
             "deadline_ms": deadline_ms if _is_int(deadline_ms) else None,
+            "resumed": resume_token is not None,
         }
         if cfg is None:
             extra["requested_kb"] = _clip(kb, RECORD_TEXT_CHARS)
@@ -521,7 +535,9 @@ class SearchService:
             if cfg is None:
                 raise ServiceError(ErrorCategory.KB_NOT_FOUND, request_id, detail=f"kb {kb!r}")
             deadline_ms = self.settings.agent_deadline_ms if deadline_ms is None else deadline_ms
-            self._check_ask_args(question, session_id, deadline_ms, request_id)
+            self._check_ask_args(
+                question, session_id, deadline_ms, request_id, resume_token, answer
+            )
             deadline = Deadline.after_ms(deadline_ms)
             pipeline = await asyncio.to_thread(self._ready_pipeline, cfg.kb, deadline, request_id)
             result = await self.agent.ask(
@@ -535,6 +551,9 @@ class SearchService:
                 # What is left of the call's time after waiting for the load.
                 deadline_ms=max(1, int(deadline.remaining_ms())),
                 model=self._answer_model,
+                helper_model=self._helper_model,
+                resume_token=resume_token,
+                answer=answer,
             )
             assert call.scope is not None
             call.scope.set_result(result)
@@ -560,6 +579,12 @@ class SearchService:
                     "cache_allowed": result.cache_allowed,
                     "coverage_unconfirmed": result.coverage_unconfirmed,
                     "stop_reason": result.stop_reason,
+                    "clarified": result.clarified,
+                    "standalone_question": _clip(result.standalone_question, RECORD_TEXT_CHARS)
+                    if result.standalone_question
+                    else None,
+                    "search_queries": [_clip(q, RECORD_TEXT_CHARS) for q in result.search_queries],
+                    "fallbacks": result.fallbacks,
                 },
             )
             call.record = record.model_copy(
@@ -719,7 +744,13 @@ class SearchService:
             raise ServiceError(ErrorCategory.INVALID_REQUEST, request_id, detail=problem)
 
     def _check_ask_args(
-        self, question: Any, session_id: Any, deadline_ms: Any, request_id: str
+        self,
+        question: Any,
+        session_id: Any,
+        deadline_ms: Any,
+        request_id: str,
+        resume_token: Any = None,
+        answer: Any = None,
     ) -> None:
         problem = None
         if not isinstance(question, str) or not question.strip():
@@ -734,8 +765,22 @@ class SearchService:
             problem = (
                 f"deadline_ms {deadline_ms!r} outside 1..{self.settings.search_max_deadline_ms}"
             )
+        elif resume_token is None and answer is not None:
+            problem = "answer is only used together with resume_token"
+        elif resume_token is not None:
+            if not isinstance(resume_token, str):
+                problem = "resume_token must be text"
+            elif not isinstance(answer, str) or not answer.strip():
+                problem = "answer must be non-empty text when resume_token is given"
+            elif len(answer) > self.settings.search_max_query_chars:
+                problem = f"answer longer than {self.settings.search_max_query_chars} characters"
         if problem is not None:
             raise ServiceError(ErrorCategory.INVALID_REQUEST, request_id, detail=problem)
+        if resume_token is not None and not _RESUME_TOKEN.match(resume_token):
+            # Cannot be a token we issued: the same answer as for one that is unknown.
+            raise ServiceError(
+                ErrorCategory.INVALID_RESUME_TOKEN, request_id, detail="malformed resume_token"
+            )
 
     def _ready_pipeline(self, kb: str, deadline: Deadline, request_id: str) -> SearchBackend:
         """The KB's chain once the load has ended (waiting at most until the deadline)."""

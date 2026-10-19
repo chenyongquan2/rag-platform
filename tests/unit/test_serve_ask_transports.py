@@ -80,7 +80,14 @@ def test_mcp_ask_docs() -> None:
 
     listing, answered, hidden, empty = anyio.run(main)
     tool = {t.name: t for t in listing.tools}["ask_docs"]
-    assert set(tool.input_schema["properties"]) == {"kb", "question", "session_id", "deadline_ms"}
+    assert set(tool.input_schema["properties"]) == {
+        "kb",
+        "question",
+        "session_id",
+        "deadline_ms",
+        "resume_token",
+        "answer",
+    }
     assert set(tool.input_schema["required"]) == {"kb", "question"}
     assert "hf_docs" in tool.description and "secret_kb" not in tool.description
     assert "untrusted" in tool.description.lower()
@@ -154,3 +161,88 @@ def test_http_ask_docs() -> None:
         r = client.post("/v1/ask_docs", json={"kb": "hf_docs", "question": "q"})
         error(r, 500, "internal_error")
         assert "secret" not in r.text
+
+
+# ---- P3-02: the question asked back, over both transports -------------------------------------
+
+VAGUE = "How do I fix this error?"
+REPLY_TO_QUESTION = "transformers raises KeyError 'llama'"
+
+
+def _asking_service(caller: str = "local", agent: Any = None) -> SearchService:
+    from rag.config import AgentConfig
+
+    backend = ScriptedSearchBackend("hf_docs")
+    service = SearchService(
+        agent_settings(service_caller=caller),
+        configs={
+            "hf_docs": KnowledgeBaseConfig(
+                kb="hf_docs",
+                description="Hugging Face library documentation.",
+                language="en",
+                access=AccessConfig(callers=["*"]),
+                agent=AgentConfig(clarify=True),
+            )
+        },
+        builder=FakePipelineBuilder({"hf_docs": backend}),
+        answer_model=StreamingFakeChatModel(default_response=REPLY),
+        agent=agent,
+    )
+    service.load()
+    return service
+
+
+def test_clarification_over_mcp_and_http() -> None:
+    service = _asking_service()
+
+    async def mcp() -> tuple[Any, Any, Any]:
+        async with Client(build_mcp_server(service)) as client:
+            asked = await client.call_tool(
+                "ask_docs", {"kb": "hf_docs", "question": VAGUE, "session_id": "m1"}
+            )
+            token = _payload(asked)["resume_token"]
+            args = {"kb": "hf_docs", "question": VAGUE, "session_id": "m1"}
+            answered = await client.call_tool(
+                "ask_docs", {**args, "resume_token": token, "answer": REPLY_TO_QUESTION}
+            )
+            reused = await client.call_tool(
+                "ask_docs", {**args, "resume_token": token, "answer": REPLY_TO_QUESTION}
+            )
+            return asked, answered, reused
+
+    asked, answered, reused = anyio.run(mcp)
+    first = AskResponse.model_validate(_payload(asked))
+    assert first.status == "need_clarification" and first.resume_token and first.sources == []
+    assert "Could you be more specific?" in first.answer
+    second = AskResponse.model_validate(_payload(answered))
+    assert (second.status, second.clarified, second.resume_token) == ("answered", True, None)
+    assert second.answer == "Use push_to_hub. Or upload_folder." and second.rounds == 1
+    assert reused.is_error and _payload(reused)["error"] == "invalid_resume_token"
+    assert set(_payload(reused)) == ERROR_KEYS
+    assert first.resume_token not in json.dumps(_payload(reused))
+
+    service = _asking_service(agent=service.agent)  # the same process, a fresh service object
+    other = _asking_service(caller="mallory", agent=service.agent)
+    with TestClient(build_http_app(service)) as client, TestClient(build_http_app(other)) as evil:
+        assert service.wait_ready(5) and other.wait_ready(5)
+        body = {"kb": "hf_docs", "question": VAGUE, "session_id": "h1"}
+        r = client.post("/v1/ask_docs", json=body, headers={"X-Request-Id": "h-1"})
+        assert r.status_code == 200 and r.json()["status"] == "need_clarification"
+        token = r.json()["resume_token"]
+        assert token and r.json()["answer"] and r.json()["sources"] == []
+        resume = {**body, "resume_token": token, "answer": REPLY_TO_QUESTION}
+
+        stolen = evil.post("/v1/ask_docs", json=resume)  # another caller's token is no use
+        assert stolen.status_code == 400 and stolen.json()["error"] == "invalid_resume_token"
+        assert set(stolen.json()) == ERROR_KEYS and token not in stolen.text
+        wrong = client.post("/v1/ask_docs", json={**resume, "session_id": "h2"})
+        assert wrong.status_code == 400 and wrong.json()["error"] == "invalid_resume_token"
+        no_answer = client.post("/v1/ask_docs", json={**body, "resume_token": token})
+        assert no_answer.status_code == 400 and no_answer.json()["error"] == "invalid_request"
+
+        done = client.post("/v1/ask_docs", json=resume, headers={"X-Request-Id": "h-2"})
+        assert done.status_code == 200, done.text
+        response = AskResponse.model_validate(done.json())
+        assert response.status == "answered" and response.clarified and response.request_id == "h-2"
+        again = client.post("/v1/ask_docs", json=resume)
+        assert again.status_code == 400 and again.json()["error"] == "invalid_resume_token"
