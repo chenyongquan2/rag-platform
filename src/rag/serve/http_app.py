@@ -5,6 +5,7 @@ One Starlette app, so one process holds one reranker for every way in:
     GET  /healthz              200 {"status": "ok"} while the process runs
     GET  /readyz               200 when the reranker and the chains are loaded, else 503
     POST /v1/search_docs       {kb, query, filters?, top_k?, deadline_ms?} -> SearchResponse
+    POST /v1/ask_docs          {kb, question, session_id?, deadline_ms?}   -> AskResponse
     POST /v1/get_context       {chunk_id, mode?}                           -> ContextResponse
     GET  /v1/knowledge_bases                                               -> KnowledgeBaseList
     /mcp                       MCP over streamable-http (when an MCPServer is given)
@@ -22,7 +23,7 @@ from __future__ import annotations
 import functools
 import logging
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -56,6 +57,15 @@ class SearchRequest(BaseModel):
     query: str
     filters: dict[str, Any] | None = None
     top_k: int | None = None
+    deadline_ms: int | None = None
+
+
+class AskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    kb: str
+    question: str
+    session_id: str | None = None
     deadline_ms: int | None = None
 
 
@@ -110,6 +120,20 @@ async def _call(fn: Callable[..., BaseModel], request_id: str, **kwargs: Any) ->
     return JSONResponse(response.model_dump(mode="json"), headers={REQUEST_ID_HEADER: request_id})
 
 
+async def _acall(
+    fn: Callable[..., Awaitable[BaseModel]], request_id: str, **kwargs: Any
+) -> JSONResponse:
+    """Like `_call` for a service method that is async (it runs on this event loop)."""
+    try:
+        response = await fn(Credentials(transport=TRANSPORT), request_id=request_id, **kwargs)
+    except ServiceError as err:
+        return _error(err.category, err.request_id)
+    except Exception:
+        logger.exception("request %s failed outside the service", request_id)
+        return _error(ErrorCategory.INTERNAL_ERROR, request_id)
+    return JSONResponse(response.model_dump(mode="json"), headers={REQUEST_ID_HEADER: request_id})
+
+
 def build_http_app(
     service: SearchService, *, mcp: MCPServer | None = None, host: str = "127.0.0.1"
 ) -> Starlette:
@@ -155,6 +179,20 @@ def build_http_app(
             deadline_ms=body.deadline_ms,
         )
 
+    async def ask_docs(request: Request) -> JSONResponse:
+        request_id = _request_id(request)
+        body, problem = await _body(request, AskRequest)
+        if body is None:
+            return await reject("ask_docs", request_id, problem)
+        return await _acall(
+            service.ask_docs,
+            request_id,
+            kb=body.kb,
+            question=body.question,
+            session_id=body.session_id,
+            deadline_ms=body.deadline_ms,
+        )
+
     async def get_context(request: Request) -> JSONResponse:
         request_id = _request_id(request)
         body, problem = await _body(request, ContextRequest)
@@ -169,6 +207,7 @@ def build_http_app(
         Route("/healthz", healthz, methods=["GET"]),
         Route("/readyz", readyz, methods=["GET"]),
         Route("/v1/search_docs", search_docs, methods=["POST"]),
+        Route("/v1/ask_docs", ask_docs, methods=["POST"]),
         Route("/v1/get_context", get_context, methods=["POST"]),
         Route("/v1/knowledge_bases", knowledge_bases, methods=["GET"]),
     ]

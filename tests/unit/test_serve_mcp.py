@@ -19,7 +19,7 @@ from rag.serve.service import SearchService
 from rag.testing import observe_settings
 from rag.testing.serve import FakePipelineBuilder, FakeSearchPipeline
 
-TOOLS = {"search_docs", "get_context", "list_knowledge_bases"}
+TOOLS = {"search_docs", "ask_docs", "get_context", "list_knowledge_bases"}
 
 
 @pytest.fixture(autouse=True)

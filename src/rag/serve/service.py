@@ -30,6 +30,7 @@ each call in a worker thread.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -39,13 +40,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from rag.agent import AgentRuntime, valid_session_id
 from rag.config import KnowledgeBaseConfig, ServiceSettings, load_kb_configs, repo_path
 from rag.observe import (
     BusinessRecord,
     RankedId,
     business_record_from_result,
     current_trace_id,
-    get_observability,
     layer_span,
     new_request_id,
     request_span,
@@ -56,6 +57,7 @@ from rag.observe.spans import RequestScope
 from rag.retrieve.context import CONTEXT_MODES
 from rag.retrieve.deadline import Deadline
 from rag.retrieve.filters import FilterError, build_es_filter
+from rag.retrieve.observe import observe_retrieval
 from rag.security.access import (
     AclResolver,
     Caller,
@@ -65,7 +67,13 @@ from rag.security.access import (
     visible_kbs,
 )
 from rag.serve.errors import ServiceError, error_category
-from rag.serve.schema import ContextResponse, KnowledgeBaseInfo, KnowledgeBaseList, SearchResponse
+from rag.serve.schema import (
+    AskResponse,
+    ContextResponse,
+    KnowledgeBaseInfo,
+    KnowledgeBaseList,
+    SearchResponse,
+)
 from rag.types import ContextResult, ErrorCategory, RetrievalResult
 
 logger = logging.getLogger(__name__)
@@ -75,8 +83,6 @@ logger = logging.getLogger(__name__)
 MAX_CHUNK_ID_CHARS = 1000
 RECORD_TEXT_CHARS = 64
 RECORD_FILTERS_CHARS = 1000
-# Steps of `RetrievalResult.timings_ms` that are not a step of their own.
-_NOT_STEPS = {"total"}
 # Errors caused by the request itself: logged without a stack trace.
 _CALLER_ERRORS = {
     ErrorCategory.INVALID_REQUEST,
@@ -235,6 +241,8 @@ class SearchService:
         configs: Mapping[str, KnowledgeBaseConfig] | None = None,
         resolver: AclResolver | None = None,
         builder: PipelineBuilder | None = None,
+        agent: AgentRuntime | None = None,
+        answer_model: Any = None,
     ) -> None:
         self.settings = settings
         self.configs: dict[str, KnowledgeBaseConfig] = (
@@ -250,8 +258,18 @@ class SearchService:
         self._thread: threading.Thread | None = None
         self._closed = False
         self.load_s: float | None = None
+        self._agent = agent
+        self._answer_model = answer_model  # None: the runtime's `online` chat model
 
     # ---- lifecycle --------------------------------------------------------------------------
+
+    @property
+    def agent(self) -> AgentRuntime:
+        """The ask_docs runtime (session locks, history, checkpoints), made on first use from the
+        connection strings in the settings."""
+        if self._agent is None:
+            self._agent = AgentRuntime.from_settings(self.settings)
+        return self._agent
 
     @property
     def ready(self) -> bool:
@@ -469,6 +487,88 @@ class SearchService:
             )
             return response
 
+    async def ask_docs(
+        self,
+        credentials: Credentials,
+        *,
+        kb: str,
+        question: str,
+        session_id: str | None = None,
+        deadline_ms: int | None = None,
+        request_id: str | None = None,
+    ) -> AskResponse:
+        """Answer a question from one knowledge base with the ask_docs graph (s16-1, s13-3);
+        raises `ServiceError`. Runs on the caller's event loop: the graph is async and the
+        session locks belong to it (the blocking searches run in worker threads)."""
+        request_id = request_id or new_request_id()
+        caller, cfg = self._resolve(credentials, kb, request_id)
+        pipeline = self._pipelines.get(cfg.kb) if cfg is not None else None
+        extra: dict[str, Any] = {
+            "question": _clip(question, self.settings.search_max_query_chars),
+            "session_id": _clip(session_id, RECORD_TEXT_CHARS) if session_id is not None else None,
+            "deadline_ms": deadline_ms if _is_int(deadline_ms) else None,
+        }
+        if cfg is None:
+            extra["requested_kb"] = _clip(kb, RECORD_TEXT_CHARS)
+        with self._call(
+            "ask_docs",
+            request_id=request_id,
+            caller=caller,
+            cfg=cfg,
+            config_version=self._config_version(cfg, pipeline),
+            extra=extra,
+        ) as call:
+            if cfg is None:
+                raise ServiceError(ErrorCategory.KB_NOT_FOUND, request_id, detail=f"kb {kb!r}")
+            deadline_ms = self.settings.agent_deadline_ms if deadline_ms is None else deadline_ms
+            self._check_ask_args(question, session_id, deadline_ms, request_id)
+            deadline = Deadline.after_ms(deadline_ms)
+            pipeline = await asyncio.to_thread(self._ready_pipeline, cfg.kb, deadline, request_id)
+            result = await self.agent.ask(
+                question,
+                cfg=cfg,
+                retriever=pipeline,
+                session_id=session_id,
+                request_id=request_id,
+                acl_groups=caller.acl_groups,
+                # What is left of the call's time after waiting for the load.
+                deadline_ms=max(1, int(deadline.remaining_ms())),
+                model=self._answer_model,
+            )
+            assert call.scope is not None
+            call.scope.set_result(result)
+            response = AskResponse.from_result(result, timings_ms={"request": call.elapsed_ms()})
+            cited = {c.chunk_id for s in result.sentences for c in s.citations}
+            record = self._record(
+                call,
+                final=[
+                    RankedId(chunk_id=c.chunk_id) for c in result.sources if c.chunk_id in cited
+                ],
+                flags=[str(c) for c in result.error_categories],
+                timings_ms=response.timings_ms,
+                extra={
+                    **extra,
+                    "deadline_ms": deadline_ms,
+                    "thread_id": result.thread_id,
+                    "status": str(result.status),
+                    "found": result.found,
+                    "rounds": result.rounds,
+                    "sources": len(result.sources),
+                    "tokens_used": result.tokens_used,
+                    "used_history": result.used_history,
+                    "cache_allowed": result.cache_allowed,
+                    "coverage_unconfirmed": result.coverage_unconfirmed,
+                    "stop_reason": result.stop_reason,
+                },
+            )
+            call.record = record.model_copy(
+                update={
+                    "index_version": result.index_version,
+                    "data_generation": result.data_generation,
+                }
+            )
+            return response
+
     def get_context(
         self,
         credentials: Credentials,
@@ -617,6 +717,25 @@ class SearchService:
         if problem is not None:
             raise ServiceError(ErrorCategory.INVALID_REQUEST, request_id, detail=problem)
 
+    def _check_ask_args(
+        self, question: Any, session_id: Any, deadline_ms: Any, request_id: str
+    ) -> None:
+        problem = None
+        if not isinstance(question, str) or not question.strip():
+            problem = "question must be non-empty text"
+        elif len(question) > self.settings.search_max_query_chars:
+            problem = f"question longer than {self.settings.search_max_query_chars} characters"
+        elif session_id is not None and not valid_session_id(session_id):
+            problem = "session_id must be 1 to 64 letters, digits, dot, dash or underscore"
+        elif (
+            not _is_int(deadline_ms) or not 1 <= deadline_ms <= self.settings.search_max_deadline_ms
+        ):
+            problem = (
+                f"deadline_ms {deadline_ms!r} outside 1..{self.settings.search_max_deadline_ms}"
+            )
+        if problem is not None:
+            raise ServiceError(ErrorCategory.INVALID_REQUEST, request_id, detail=problem)
+
     def _ready_pipeline(self, kb: str, deadline: Deadline, request_id: str) -> SearchBackend:
         """The KB's chain once the load has ended (waiting at most until the deadline)."""
         if not self._done.wait(deadline.remaining_s()) or self._state != "ready":
@@ -630,19 +749,7 @@ class SearchService:
 
     @staticmethod
     def _observe_result(result: RetrievalResult, kb: str) -> None:
-        """Step durations from the chain's own timings (s15-1: P95 per step) and the quality
-        signals: not found, best rerank score."""
-        metrics = get_observability().metrics
-        for step, ms in result.timings_ms.items():
-            if step not in _NOT_STEPS:
-                metrics.record_step(step, ms / 1000.0, outcome=attr.OUTCOME_OK, kb=kb)
-        scores = [h.score for h in result.rerank if h.score is not None]
-        metrics.record_retrieval(
-            kb=kb,
-            tool="search_docs",
-            not_found=result.not_found,
-            top_rerank_score=max(scores) if scores else None,
-        )
+        observe_retrieval(result, kb, "search_docs")
 
     @staticmethod
     def _record(

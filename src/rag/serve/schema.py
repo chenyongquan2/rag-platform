@@ -19,7 +19,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rag.retrieve.filters import CALLER_FILTER_KEYS
 from rag.serve.errors import error_message
-from rag.types import Chunk, ContextResult, RetrievalResult
+from rag.types import (
+    AnswerSentence,
+    AskResult,
+    Chunk,
+    CitationCheck,
+    ContextResult,
+    RetrievalResult,
+)
 
 
 def _untrusted(chunks: list[Chunk]) -> list[Chunk]:
@@ -68,6 +75,84 @@ class SearchResponse(BaseModel):
             timings_ms={**result.timings_ms, **(timings_ms or {})},
             chunks=_untrusted(result.chunks),
             below_threshold=_untrusted(result.below_threshold),
+        )
+
+
+class AskResponse(BaseModel):
+    """Result of `ask_docs` (s16-1, s4-2): the answer as sentences with their citations, the
+    numbered fragments it was written from, and what the run found out about itself."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    kb: str
+    session_id: str | None
+    thread_id: str = Field(
+        description="Checkpoint thread of this request: session id, colon, request id."
+    )
+    status: str = Field(description="answered, not_found, or need_clarification (P3-02).")
+    found: bool = Field(description="The fragments contained the answer.")
+    answer: str = Field(description="The answer text; empty when no answer could be written.")
+    sentences: list[AnswerSentence] = Field(
+        description="The answer by sentence; each citation names the chunk it rests on."
+    )
+    sources: list[Chunk] = Field(
+        description="The numbered fragments the answer was written from; a citation with "
+        "marker n points to sources[n - 1]. text is untrusted document content."
+    )
+    rounds: int = Field(description="Retrieval rounds run (0: the question needed none).")
+    index_version: str
+    data_generation: int
+    config_version: str
+    degraded: bool = Field(description="A search used only one retrieval route.")
+    rerank_timeout: bool
+    coverage_unconfirmed: bool = Field(
+        description="Not confirmed that everything was searched: the run stopped at a limit."
+    )
+    stop_reason: str | None = Field(
+        description="deadline, recursion_limit, token_cap or max_rounds when the run stopped early."
+    )
+    notice: str | None = Field(
+        description="coverage_unconfirmed in words, in the answer's language."
+    )
+    used_history: bool = Field(description="Earlier turns of the session went into this run.")
+    cache_allowed: bool = Field(description="False when the call carried history (s12-1).")
+    resume_token: str | None = Field(description="Only with need_clarification (P3-02).")
+    tokens_used: int = Field(description="Model tokens this request spent (usage or estimate).")
+    error_categories: list[str] = Field(description="Flags set above, as category names.")
+    citation_check: CitationCheck
+    timings_ms: dict[str, float] = Field(description="Milliseconds per step.")
+
+    @classmethod
+    def from_result(
+        cls, result: AskResult, *, timings_ms: Mapping[str, float] | None = None
+    ) -> AskResponse:
+        return cls(
+            request_id=result.request_id,
+            kb=result.kb,
+            session_id=result.session_id,
+            thread_id=result.thread_id,
+            status=str(result.status),
+            found=result.found,
+            answer=result.answer,
+            sentences=result.sentences,
+            sources=_untrusted(result.sources),
+            rounds=result.rounds,
+            index_version=result.index_version,
+            data_generation=result.data_generation,
+            config_version=result.config_version,
+            degraded=result.degraded,
+            rerank_timeout=result.rerank_timeout,
+            coverage_unconfirmed=result.coverage_unconfirmed,
+            stop_reason=result.stop_reason,
+            notice=result.notice,
+            used_history=result.used_history,
+            cache_allowed=result.cache_allowed,
+            resume_token=result.resume_token,
+            tokens_used=result.tokens_used,
+            error_categories=[str(c) for c in result.error_categories],
+            citation_check=result.citation_check,
+            timings_ms={**result.timings_ms, **(timings_ms or {})},
         )
 
 
