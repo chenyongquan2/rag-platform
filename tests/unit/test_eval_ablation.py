@@ -1,4 +1,4 @@
-"""Spec P2-03 AC5-AC7: the ablation table (variants against one baseline run, design s14-4)."""
+"""Spec P2-03 AC4-AC6: the ablation table (variants against one baseline run, design s14-4)."""
 
 from __future__ import annotations
 

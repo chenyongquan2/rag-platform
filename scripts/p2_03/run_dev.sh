@@ -6,7 +6,7 @@
 #   run_dev.sh public65         the same variants on the 65 public questions (external check)
 # Runs go to data/reports/p2-03/public/<run id>/; the table is made afterwards with
 #   uv run python -m rag.eval.retrieval ablate BASE --variant NAME=RUN ... --reports-dir data/reports/p2-03
-set -e
+set -eo pipefail   # a failed or killed command inside a pipe must stop the script
 cd "$(dirname "$0")/../.."
 export PYTHONIOENCODING=utf-8 HF_HUB_OFFLINE=1
 R=data/reports/p2-03

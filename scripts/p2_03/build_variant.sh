@@ -12,7 +12,7 @@
 # gate: the family is new and only this script reads it; the gate of a real switch is the dev
 # eval below) -> status -> kNN bench -> dev eval without and with rerank -> delete the family.
 # Stops without building when the C: drive has less than 1.5 GB free.
-set -e
+set -eo pipefail   # a failed or killed command inside a pipe must stop the script
 cd "$(dirname "$0")/../.."
 export PYTHONIOENCODING=utf-8 HF_HUB_OFFLINE=1
 NAME=$1; DIR=$2; PREFIX=$3; BENCH=$4

@@ -310,7 +310,7 @@ def test_make_search_pipeline_from_config(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_pipeline_passes_the_rerank_title_switch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Spec P2-03 AC4: `retrieval.rerank_with_title` reaches the reranker, defaults to true and
+    """Spec P2-03 AC3: `retrieval.rerank_with_title` reaches the reranker, defaults to true and
     is part of the config version (another setting is another version)."""
     assert RetrievalConfig().rerank_with_title is True
     hf = load_kb_config(repo_path("kb/public/hf_docs.yaml"), kb_root=repo_path("kb"))

@@ -85,7 +85,7 @@ def test_rerank_text_is_question_title_path_and_body() -> None:
 
 
 def test_rerank_without_title_reads_the_body_only() -> None:
-    """Spec P2-03 AC3: `include_title=False` sends the body alone; the default is unchanged."""
+    """Spec P2-03 AC2: `include_title=False` sends the body alone; the default is unchanged."""
     scorer = FakeCrossEncoder()
     post = BatchedTimeoutRerank(runner=_runner(scorer), top_n=30, include_title=False)
     post.postprocess_nodes([_node(0), _node(1)], query_bundle=_query("how to install?"))

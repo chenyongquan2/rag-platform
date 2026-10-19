@@ -494,7 +494,9 @@ class BatchedTimeoutRerank(BaseNodePostprocessor):
 
 class ChunkReranker:
     """The P0-10 `Reranker` protocol over a runner: `(question, chunks) -> chunks` sorted by
-    rerank score (set on each returned copy), no deadline. Used by the rerank latency curve."""
+    rerank score (set on each returned copy), no deadline. Used by the rerank latency curve. It
+    always sends the title path: `retrieval.rerank_with_title` (spec P2-03) applies to the search
+    chain (`BatchedTimeoutRerank`) only."""
 
     def __init__(self, runner: RerankRunner) -> None:
         self.runner = runner
