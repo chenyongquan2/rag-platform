@@ -178,27 +178,37 @@ class _FakeIndices:
         self._es.refreshes.append(index)
         return {"_shards": {"failed": 0}}
 
+    def close(self, *, index: str, **_: Any) -> dict[str, Any]:
+        self._es.require(index)
+        return {"acknowledged": True}
+
+    def open(self, *, index: str, **_: Any) -> dict[str, Any]:
+        self._es.require(index)
+        self._es.reopens.append(index)
+        return {"acknowledged": True, "shards_acknowledged": True}
+
     def forcemerge(
         self, *, index: str, max_num_segments: int | None = None, **_: Any
     ) -> dict[str, Any]:
-        """Records the call with the number of bulk requests so far (tests check that nothing
-        is written after it); deleted documents are never kept, so there is nothing to drop."""
+        """Records the call with the number of bulk requests and of re-opens of the index so
+        far (tests check that nothing is written after it); the fake never keeps deleted
+        documents, so there is nothing to drop."""
         self._es.require(index)
         self._es.merges.append(
             {
                 "index": index,
                 "max_num_segments": max_num_segments,
                 "bulk_calls": len(self._es.bulk_calls),
+                "reopens": self._es.reopens.count(index),
             }
         )
         return {"_shards": {"failed": 0}}
 
-    def stats(self, *, index: str, **_: Any) -> dict[str, Any]:
+    def segments(self, *, index: str, **_: Any) -> dict[str, Any]:
         self._es.require(index)
         count = len(self._es.docs[index])
-        docs = {"count": count, "deleted": 0}
-        segments = {"count": 1 if count else 0}
-        return {"_all": {"primaries": {"docs": docs, "segments": segments}}}
+        segments = {"_0": {"num_docs": count, "deleted_docs": 0}} if count else {}
+        return {"indices": {index: {"shards": {"0": [{"segments": segments}]}}}}
 
 
 class FakeElasticsearch:
@@ -214,8 +224,10 @@ class FakeElasticsearch:
         self.bulk_calls: list[int] = []
         """Number of operations (documents) in each bulk request."""
         self.refreshes: list[str] = []
+        self.reopens: list[str] = []
+        """Indices opened again (the force merge closes and opens its index first)."""
         self.merges: list[dict[str, Any]] = []
-        """Force merge requests: index, max_num_segments, bulk requests sent before it."""
+        """Force merge requests: index, max_num_segments, bulk requests and re-opens before it."""
         self.fail_ids: set[str] = set()
         self.delete_failures: list[dict[str, Any]] = []
         self.delete_queries: list[dict[str, Any]] = []

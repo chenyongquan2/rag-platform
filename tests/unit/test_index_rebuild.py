@@ -231,6 +231,7 @@ def test_force_merge_after_last_write_before_gate(env: Env) -> None:
     assert [m["index"] for m in seen["merges"]] == [env.index(2)]
     assert seen["merges"][0]["bulk_calls"] == seen["bulks"] == len(env.es.bulk_calls)
     assert seen["merges"][0]["max_num_segments"] == 1
+    assert seen["merges"][0]["reopens"] == 1  # closed and opened first: drops the history
     assert (seen["new"], seen["old"]) == (env.index(2), env.index(1))
     assert env.alias() == env.index(2)  # the gate ran before the switch, the switch followed
 

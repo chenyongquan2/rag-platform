@@ -244,27 +244,50 @@ def update_index_meta(es: Elasticsearch, index: str, **values: Any) -> dict[str,
 @dataclass(frozen=True)
 class MergeResult:
     deleted_docs_before: int
-    """Documents marked deleted but still counted in the index (they distort BM25's IDF, s7-4)."""
+    """Deleted documents still stored in the index's segments before the merge."""
     deleted_docs_after: int
     segments_after: int
 
 
-def _docs_and_segments(es: Elasticsearch, index: str) -> tuple[int, int]:
-    stats = es.indices.stats(index=index, metric="docs,segments")["_all"]["primaries"]
-    return int(stats["docs"]["deleted"]), int(stats["segments"]["count"])
+def _segment_counts(es: Elasticsearch, index: str) -> tuple[int, int]:
+    """`(deleted documents still stored, segments)` over the segments of every shard.
+
+    Read from the segments API: the `docs.deleted` figure of the stats API did not go down after
+    a merge that did purge the documents (Elasticsearch 9.5.5), so it is not used.
+    """
+    shards = es.indices.segments(index=index)["indices"][index]["shards"]
+    deleted = segments = 0
+    for copies in shards.values():
+        for copy in copies:
+            for segment in copy["segments"].values():
+                deleted += int(segment["deleted_docs"])
+                segments += 1
+    return deleted, segments
 
 
 def force_merge_index(
     es: Elasticsearch, index: str, *, max_num_segments: int = 1, timeout_s: float = 3600.0
 ) -> MergeResult:
-    """Merge the index down to `max_num_segments`, which drops deleted documents (design s7-5).
+    """Merge the index down to `max_num_segments` and drop its deleted documents (design s7-5).
 
-    Only for an index that nothing writes to any more: merging a live index makes segments larger
-    than 5 GB that later merges leave alone (s7-4). Blocks until the merge is done.
+    Only for an index that nothing reads from or writes to: it is closed and opened once, and
+    merging a live index makes segments larger than 5 GB that later merges leave alone (s7-4).
+    Blocks until the merge is done.
+
+    Why the close and open: Elasticsearch deletes documents softly and keeps the soft-deleted
+    ones (also the old versions of overwritten chunks) in the segments as history until the
+    shard's retention point moves past them. On a single-copy index the running shard never moves
+    it, so a plain force merge leaves them in the segments and BM25 still counts them
+    (measured on 9.5.5: N 30 and a term's n 3 before and after the merge, though 5 documents were
+    live). Opening the index again makes the shard compute the point from its checkpoints, and
+    the next merge drops the history: N 5, n 1. If opening fails the index stays closed; open
+    it by hand (`POST <index>/_open`) before a resume.
     """
-    deleted_before, _ = _docs_and_segments(es, index)
-    es.options(request_timeout=timeout_s).indices.forcemerge(
-        index=index, max_num_segments=max_num_segments, flush=True
-    )
-    deleted_after, segments = _docs_and_segments(es, index)
+    deleted_before, _ = _segment_counts(es, index)
+    client = es.options(request_timeout=timeout_s)
+    client.indices.close(index=index)
+    client.indices.open(index=index, wait_for_active_shards="all")
+    client.indices.forcemerge(index=index, max_num_segments=max_num_segments, flush=True)
+    client.indices.refresh(index=index)  # searchers only see the merged segments after a refresh
+    deleted_after, segments = _segment_counts(es, index)
     return MergeResult(deleted_before, deleted_after, segments)
