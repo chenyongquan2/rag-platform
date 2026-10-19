@@ -1,7 +1,7 @@
 """Chat history per session and the lock for one session's requests (design s13-3, s16-7).
 
 The history is not LangGraph state: every request is its own checkpoint thread
-(`session_id:request_id`, so one request never sees another's retrieved chunks) and the turns of
+(`session_id:run_id`, so one request never sees another's retrieved chunks) and the turns of
 a session (what was asked, what was answered, nothing else) are stored here, per session id, and
 handed to the graph as input. Both stores are created from a connection string by
 `rag.factories.make_session_store` and `make_session_locks`.

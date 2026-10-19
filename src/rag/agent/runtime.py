@@ -10,7 +10,7 @@ One call:
    requests of one session run one after another; the wait counts
    against the deadline: `AgentDeadlineExceeded` when it does not end in time) and loads the
    session's last turns;
-2. runs the graph on the checkpoint thread `session_id:request_id` with `recursion_limit` set,
+2. runs the graph on the checkpoint thread `session_id:run_id` with `recursion_limit` set,
    inside the total deadline: when the deadline passes the run is cancelled and the result is
    built from the last checkpoint (the chunks found so far, no generated text), flagged "not
    confirmed that everything was searched"; the soft part of the deadline (no round starts when

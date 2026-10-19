@@ -4,7 +4,7 @@
                             runtime=runtime, session_id="s1")   # -> rag.types.AskResult
 
 Our own LangGraph `StateGraph`: route (rules) -> rewrite -> retrieve -> judge -> answer ->
-verify, one checkpoint thread per request (`session_id:request_id`), chat history per session,
+verify, one checkpoint thread per request (`session_id:run_id`), chat history per session,
 requests of one session one after another, a total deadline, a recursion limit and a token cap.
 Rewrite, clarify and the sufficiency judge are stubs (`AgentHooks`) that P3-02 and P3-03 fill in.
 """

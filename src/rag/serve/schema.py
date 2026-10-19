@@ -88,7 +88,7 @@ class AskResponse(BaseModel):
     kb: str
     session_id: str | None
     thread_id: str = Field(
-        description="Checkpoint thread of this request: session id, colon, request id."
+        description="Checkpoint thread of this request: session id, colon, a server-made run id."
     )
     status: str = Field(description="answered, not_found, or need_clarification (P3-02).")
     found: bool = Field(description="The fragments contained the answer.")
