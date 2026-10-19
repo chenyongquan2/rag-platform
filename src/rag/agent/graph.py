@@ -1,11 +1,12 @@
 """The ask_docs `StateGraph` (design s13-2, s13-3, s4-2; spec P3-01).
 
     START -> route
-    route    -> clarify   (the rules flag the question as unclear; P3-02)
+    route    -> clarify   (the question is too unclear to search: ask the caller, P3-02)
              -> answer    (no retrieval: a greeting)
              -> rewrite   (otherwise)
-    clarify  -> verify    (a question for the caller: the run ends)
-             -> rewrite   (nothing to ask)
+    clarify  -> rewrite   (the caller answered; the run stopped in this node with `interrupt`
+                           and continues from it when `ask_docs` is called with the answer)
+             -> answer    (no retrieval)
     rewrite  -> retrieve
              -> answer    (token cap reached while rewriting)
     retrieve -> judge
@@ -15,8 +16,8 @@
 
 Our own graph rather than `create_agent`: the steps are fixed and only the number of rounds
 varies, so rounds, cost and the path on failure are decided by these edges (s13-2). The edge
-functions read plain state fields (`needs_clarification`, `needs_retrieval`, `clarification`,
-`stop_reason`, `loop`) that the nodes set, so a hook that fills in a stub changes what it sets,
+functions read plain state fields (`needs_clarification`, `needs_retrieval`, `stop_reason`,
+`loop`) that the nodes set, so a hook that fills in a stub changes what it sets,
 not the wiring.
 """
 
@@ -44,8 +45,6 @@ def _after_route(state: AgentState) -> str:
 
 
 def _after_clarify(state: AgentState) -> str:
-    if state.get("clarification"):
-        return "verify"  # the run ends with the question for the caller
     return "rewrite" if state.get("needs_retrieval", True) else "answer"
 
 
@@ -74,7 +73,7 @@ def build_graph(checkpointer: Any) -> Any:
         "route", _after_route, {"clarify": "clarify", "rewrite": "rewrite", "answer": "answer"}
     )
     graph.add_conditional_edges(
-        "clarify", _after_clarify, {"verify": "verify", "rewrite": "rewrite", "answer": "answer"}
+        "clarify", _after_clarify, {"rewrite": "rewrite", "answer": "answer"}
     )
     graph.add_conditional_edges(
         "rewrite", _after_rewrite, {"retrieve": "retrieve", "answer": "answer"}

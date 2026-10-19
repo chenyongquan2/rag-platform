@@ -39,6 +39,10 @@ class ErrorCategory(StrEnum):
     # recursion limit, or by the per-request token cap; the answer uses what was found so far.
     AGENT_DEADLINE = "agent_deadline"
     TOKEN_CAP_REACHED = "token_cap_reached"
+    # ask_docs clarification (spec P3-02, s13-3): a `resume_token` that is unknown, expired, already
+    # used, issued to another caller, knowledge base or session, or whose run is not waiting for
+    # an answer. One category for all of them, so a caller cannot tell which tokens exist.
+    INVALID_RESUME_TOKEN = "invalid_resume_token"
 
 
 class AnswerStatus(StrEnum):
@@ -245,8 +249,13 @@ class AskResult(_ResultMeta):
 
     `sources` are the numbered fragments the answer was written from (the citation with marker n
     points to `sources[n - 1]`); after a run cut short, the chunks found so far. `rounds` counts
-    retrieval rounds (0 when the question needed none). `status` is `need_clarification` only in
-    P3-02 (`answer` is then the question to ask and `resume_token` the thread to resume).
+    retrieval rounds (0 when the question needed none). `status` is `need_clarification` when the
+    run stopped to ask the caller (spec P3-02): `answer` is then the question to ask and
+    `resume_token` the opaque token that continues the run (`ask_docs(..., resume_token=...,
+    answer=...)`); `clarified` marks a result of a run that was continued that way.
+    `standalone_question` and `search_queries` are what the rewrite made of the question (empty:
+    searched as asked); `fallbacks` lists the steps that fell back to the rules or the original
+    question (`route:timeout`, `rewrite:parse_failed`, ...), which also sets `degraded`.
     `coverage_unconfirmed` is the s13-3 flag "not confirmed that everything was searched": set
     with `stop_reason`, and `notice` says so in the answer's language. `cache_allowed` is False
     for a call that carried history (the exact cache neither reads nor writes it, s12-1).
@@ -271,6 +280,10 @@ class AskResult(_ResultMeta):
     used_history: bool = False
     cache_allowed: bool = True
     resume_token: str | None = None
+    clarified: bool = False
+    standalone_question: str | None = None
+    search_queries: list[str] = Field(default_factory=list)
+    fallbacks: list[str] = Field(default_factory=list)
 
     @property
     def chunks(self) -> list[Chunk]:

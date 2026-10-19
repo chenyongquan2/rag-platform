@@ -17,6 +17,17 @@ One call:
    less than the answer's time is left) is inside the graph (`plan_next`);
 3. stores the turn (question and answer text) in the session's history.
 
+A run can stop to ask the caller (`status: need_clarification`, the clarify step's `interrupt`).
+Then the call ends and the session's lock is released: the waiting run is only a checkpoint
+thread, it blocks nobody. The result carries an opaque `resume_token` (`rag.agent.resume`);
+`ask_docs(..., resume_token=..., answer=...)` continues that thread with the caller's answer.
+The continuing call is a new call: it takes the session's lock again (and waits for it within
+its own deadline), takes the token (once, only for the caller, knowledge base and session it
+was issued for, only while the thread is waiting), and writes the history when it completes.
+Nothing is written to the history while the question is open; the finished run writes the
+question, the question asked back, the caller's answer and the answer as two turns, so the
+conversation reads as it happened. The request's token cap counts both calls.
+
 The checkpoint thread is `session_id:run_id`, with a `run_id` the server makes for each call:
 the caller's request id (an `X-Request-Id` header, which anyone can repeat) is only for
 correlation, so two runs never write to, or get rebuilt from, one thread.
@@ -30,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AsyncExitStack
@@ -37,24 +49,29 @@ from typing import Any
 
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.errors import GraphRecursionError
+from langgraph.types import Command
 
 from rag.agent.budget import TokenBudget
 from rag.agent.context import AgentContext, AgentRetriever
 from rag.agent.graph import build_graph
 from rag.agent.hooks import AgentHooks
 from rag.agent.result import compose_result
+from rag.agent.resume import MemoryResumeStore, ResumeStore, ResumeTokenInvalid
 from rag.agent.session import HistoryTurn, SessionLocks, SessionStore
 from rag.agent.state import MSGPACK_ALLOWED, thread_id
 from rag.config import KnowledgeBaseConfig, ServiceSettings
 from rag.factories import (
     CheckpointerSource,
     make_checkpointer_source,
+    make_resume_store,
     make_session_locks,
     make_session_store,
 )
 from rag.observe import new_request_id
 from rag.retrieve.deadline import Deadline
 from rag.types import AnswerStatus, AskResult, ErrorCategory, StopReason
+
+logger = logging.getLogger(__name__)
 
 
 class AgentDeadlineExceeded(Exception):  # noqa: N818 - named like BudgetExceeded
@@ -75,6 +92,7 @@ class AgentRuntime:
         store: SessionStore,
         locks: SessionLocks,
         checkpointers: CheckpointerSource,
+        resumes: ResumeStore | None = None,
         hooks: AgentHooks | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -82,9 +100,11 @@ class AgentRuntime:
         self.store = store
         self.locks = locks
         self.checkpointers = checkpointers
+        self.resumes = resumes or MemoryResumeStore(settings.agent_resume_ttl_s)
         self.hooks = hooks or AgentHooks()
         self.clock = clock
         self._chat: Any = None
+        self._helper: Any = None
 
     @classmethod
     def from_settings(
@@ -104,11 +124,14 @@ class AgentRuntime:
         # each created them failed with "database is locked".
         store.prepare()
         checkpointers.prepare()
+        resumes = make_resume_store(settings.session_store_url, ttl_s=settings.agent_resume_ttl_s)
+        resumes.prepare()
         return cls(
             settings,
             store=store,
             locks=make_session_locks(settings.session_lock_url),
             checkpointers=checkpointers,
+            resumes=resumes,
             hooks=hooks,
             clock=clock,
         )
@@ -137,6 +160,16 @@ class AgentRuntime:
             self._chat = make_chat_model("online", self.settings)
         return self._chat
 
+    def default_helper_model(self) -> Any:
+        """The small model of the route and rewrite steps (`agent_rewrite_profile`), built once,
+        when a step first needs it: a gateway that is not configured fails there, as that
+        step's fallback, not at start-up."""
+        if self._helper is None:
+            from rag.llm import make_chat_model
+
+            self._helper = make_chat_model(self.settings.agent_rewrite_profile, self.settings)
+        return self._helper
+
     async def state_values(self, thread: str) -> dict[str, Any]:
         """The last checkpointed state of a thread (empty for an unknown one); for tests and
         for finding out what a request did."""
@@ -156,15 +189,24 @@ class AgentRuntime:
         acl_groups: tuple[str, ...] = ("public",),
         deadline_ms: int | None = None,
         model: Any = None,
+        helper_model: Any = None,
         filters: Mapping[str, Any] | None = None,
         run_id: str | None = None,
+        resume_token: str | None = None,
+        answer: str | None = None,
     ) -> AskResult:
-        """Run one request; see the module doc. `ValueError` for a session id that is not
-        1 to 64 letters, digits, dot, dash or underscore (and not `-`). `run_id` names the
-        checkpoint thread (default: a new one); only a caller that deliberately continues a
-        thread passes it (P3-02 resumes with the run id of its `resume_token`)."""
+        """Run one request, or continue one that asked the caller back (see the module doc).
+
+        `ValueError` for a session id that is not 1 to 64 letters, digits, dot, dash or
+        underscore (and not `-`), and for only one of `resume_token` and `answer`. With a
+        `resume_token` the run continues from the question it stopped at and `question` is not
+        used; `ResumeTokenInvalid` when the token cannot be used by this caller, knowledge base
+        and session (or at all). `run_id` names the checkpoint thread of a new run (default: a
+        new one); `helper_model` is the small model of the route and rewrite steps."""
+        if (resume_token is None) != (answer is None):
+            raise ValueError("resume_token and answer go together")
         request_id = request_id or new_request_id()
-        thread = thread_id(session_id, run_id or new_request_id())
+        resuming = resume_token is not None
         settings = self.settings
         total_ms = deadline_ms if deadline_ms is not None else settings.agent_deadline_ms
         began = time.perf_counter()
@@ -177,10 +219,11 @@ class AgentRuntime:
             total_ms=total_ms,
             budget=TokenBudget(settings.agent_token_cap, settings.agent_answer_reserve_tokens),
             model=model if model is not None else self.default_model,
+            helper_model=helper_model if helper_model is not None else self.default_helper_model,
             hooks=self.hooks,
             request_id=request_id,
             session_id=session_id,
-            thread_id=thread,
+            thread_id="" if resuming else thread_id(session_id, run_id or new_request_id()),
             acl_groups=tuple(acl_groups),
             filters=filters,
         )
@@ -190,9 +233,24 @@ class AgentRuntime:
             if session_id is not None:
                 key = self.session_key(caller_id, cfg.kb, session_id)
                 await self._hold_session(stack, key, deadline)
-                history = await self.store.load(key)
+                if not resuming:
+                    history = await self.store.load(key)
+            inputs: Mapping[str, Any] | Command
+            if resume_token is not None:
+                inputs = Command(resume=answer)
+                history = await self._take_token(
+                    resume_token, ctx, caller_id=caller_id, session_id=session_id
+                )
+            else:
+                inputs = {
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "kb": cfg.kb,
+                    "question": question,
+                    "history": history,
+                }
             ctx.used_history = bool(history)
-            result = await self._run(question, history, ctx)
+            result, values = await self._run(inputs, ctx)
             result = result.model_copy(
                 update={
                     "timings_ms": {
@@ -201,16 +259,77 @@ class AgentRuntime:
                     }
                 }
             )
-            if (
-                session_id is not None
-                and result.answer
-                and result.status != AnswerStatus.NEED_CLARIFICATION
-            ):
-                await self.store.append(
-                    key,
-                    HistoryTurn(request_id=request_id, question=question, answer=result.answer),
+            if result.status == AnswerStatus.NEED_CLARIFICATION:
+                await self._drop_abandoned_questions()
+                token = await self.resumes.create(
+                    caller_id=caller_id, kb=cfg.kb, session_id=session_id, thread_id=ctx.thread_id
                 )
+                result = result.model_copy(update={"resume_token": token})
+            elif session_id is not None and result.answer:
+                for turn in self._turns(values, question, request_id, result):
+                    await self.store.append(key, turn)
         return result
+
+    async def _drop_abandoned_questions(self) -> None:
+        """Delete the checkpoint threads of questions nobody answered in time (their tokens have
+        expired). Done when a new question is asked back; a failure is logged, never a failure of
+        the request."""
+        try:
+            threads = await self.resumes.purge_expired()
+            if threads:
+                async with self.checkpointers.open() as saver:
+                    for thread in threads:
+                        await saver.adelete_thread(thread)
+        except Exception:
+            logger.warning("could not clean up abandoned clarification threads", exc_info=True)
+
+    @staticmethod
+    def _turns(
+        values: Mapping[str, Any], question: str, request_id: str, result: AskResult
+    ) -> list[HistoryTurn]:
+        """What the session remembers of a finished run: question and answer; after a
+        clarification, the question with the question asked back as its answer, then the
+        caller's answer with the real answer (so a later follow-up reads the conversation as
+        it happened)."""
+        asked = values.get("question") or question
+        if values.get("clarified") and values.get("clarify_question"):
+            return [
+                HistoryTurn(
+                    request_id=values.get("request_id") or request_id,
+                    question=asked,
+                    answer=values["clarify_question"],
+                ),
+                HistoryTurn(
+                    request_id=request_id,
+                    question=values.get("clarification_answer") or "",
+                    answer=result.answer,
+                ),
+            ]
+        return [HistoryTurn(request_id=request_id, question=asked, answer=result.answer)]
+
+    async def _take_token(
+        self, token: str, ctx: AgentContext, *, caller_id: str, session_id: str | None
+    ) -> list[HistoryTurn]:
+        """Use the resume token for this call and point the call at its thread. Checks that
+        the token is this caller's, for this knowledge base and session (`claim`), and that the
+        thread really waits for an answer and belongs to this session. Returns
+        the history the run started with (kept in its checkpoint) and carries over the tokens
+        it had spent, so the request's cap counts both calls."""
+        record = await self.resumes.claim(
+            token, caller_id=caller_id, kb=ctx.cfg.kb, session_id=session_id
+        )
+        ctx.thread_id = record.thread_id
+        ctx.resumed = True
+        async with self.checkpointers.open() as saver:
+            snapshot = await build_graph(saver).aget_state(self.run_config(record.thread_id))
+        waiting = bool(snapshot.next) and any(task.interrupts for task in snapshot.tasks)
+        values = dict(snapshot.values)
+        if not waiting:
+            raise ResumeTokenInvalid("the run is not waiting for an answer")
+        if values.get("session_id") != session_id:
+            raise ResumeTokenInvalid("the thread belongs to another session")
+        ctx.budget.add(int(values.get("tokens_before_clarify") or 0))
+        return list(values.get("history") or [])
 
     async def _hold_session(self, stack: AsyncExitStack, key: str, deadline: Deadline) -> None:
         """Take the session's lock within the request's deadline."""
@@ -225,14 +344,10 @@ class AgentRuntime:
                 "waited for the session's lock until the deadline"
             ) from None
 
-    async def _run(self, question: str, history: list[HistoryTurn], ctx: AgentContext) -> AskResult:
-        inputs = {
-            "request_id": ctx.request_id,
-            "session_id": ctx.session_id,
-            "kb": ctx.cfg.kb,
-            "question": question,
-            "history": history,
-        }
+    async def _run(
+        self, inputs: Mapping[str, Any] | Command, ctx: AgentContext
+    ) -> tuple[AskResult, Mapping[str, Any]]:
+        """Run (or continue) the graph; the result and the state it was made from."""
         async with self.checkpointers.open() as saver:
             graph = build_graph(saver)
             config = self.run_config(ctx.thread_id)
@@ -251,26 +366,29 @@ class AgentRuntime:
                 return await self._salvage(graph, config, ctx, "recursion_limit")
         result: AskResult | None = final.get("result")
         if result is None:
-            # No `result` in the state: the run stopped at an `interrupt` (the clarify hook,
-            # P3-02). The question to ask is the interrupt's value; resuming is P3-02.
+            # No `result` in the state: the run stopped at an `interrupt` (the clarify step).
+            # The question to ask is the interrupt's value; the answer comes with a new call.
             interrupts = final.get("__interrupt__") or []
             if not interrupts:
                 raise RuntimeError("the graph ended without a result and without an interrupt")
             values = {**final, "clarification": str(interrupts[0].value)}
-            result = compose_result(
-                values, ctx, timings_ms=dict(final.get("timings_ms") or {}), stop_reason=None
+            return (
+                compose_result(
+                    values, ctx, timings_ms=dict(final.get("timings_ms") or {}), stop_reason=None
+                ),
+                values,
             )
-        return result
+        return result, final
 
     async def _salvage(
         self, graph: Any, config: Mapping[str, Any], ctx: AgentContext, reason: StopReason
-    ) -> AskResult:
+    ) -> tuple[AskResult, Mapping[str, Any]]:
         """The result of a run that was stopped: built from the last checkpoint, which holds the
         rounds finished so far (and the answer, if it was written before the stop)."""
         snapshot = await graph.aget_state(config)
         values = dict(snapshot.values)
         timings = dict(values.get("timings_ms") or {})
-        return compose_result(values, ctx, timings_ms=timings, stop_reason=reason)
+        return compose_result(values, ctx, timings_ms=timings, stop_reason=reason), values
 
 
 async def ask_docs(
@@ -286,10 +404,14 @@ async def ask_docs(
     acl_groups: tuple[str, ...] = ("public",),
     deadline_ms: int | None = None,
     model: Any = None,
+    helper_model: Any = None,
     filters: Mapping[str, Any] | None = None,
     run_id: str | None = None,
+    resume_token: str | None = None,
+    answer: str | None = None,
 ) -> AskResult:
     """Answer `question` from knowledge base `cfg` with the ask_docs graph (see the module doc).
+    A run that asked the caller back continues with `resume_token` and the caller's `answer`.
 
     `retriever` is the KB's `SearchPipeline`; `acl_groups` the caller's document groups.
     Requests that may overlap must share one `runtime`: it owns the session locks. Without one
@@ -305,6 +427,9 @@ async def ask_docs(
         acl_groups=acl_groups,
         deadline_ms=deadline_ms,
         model=model,
+        helper_model=helper_model,
         filters=filters,
         run_id=run_id,
+        resume_token=resume_token,
+        answer=answer,
     )

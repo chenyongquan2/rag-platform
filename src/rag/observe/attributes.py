@@ -66,6 +66,25 @@ AGENT_VERDICT = "rag.agent.verdict"  # sufficient | insufficient
 AGENT_STOP_REASON = "rag.agent.stop_reason"  # deadline | recursion_limit | token_cap | max_rounds
 AGENT_TOKENS = "rag.agent.tokens_used"  # tokens spent on model calls by this request so far
 
+# Route, rewrite and clarify steps (design s13-3, s8-1, s8-2; spec P3-02). `NODE_*` are the
+# model calls of one step: tokens counted against the request's cap, ledger lines written,
+# their CNY and the reasoning tokens inside the output tokens.
+NODE_TOKENS = "rag.node.tokens"
+NODE_MODEL_CALLS = "rag.node.model_calls"
+NODE_COST_CNY = "rag.node.cost_cny"
+NODE_REASONING_TOKENS = "rag.node.reasoning_tokens"
+ROUTE_CLARITY = "rag.route.clarity"  # the rules' signal: clear | vague | undecided
+ROUTE_MULTI_HOP = "rag.route.multi_hop"  # the rules' signal: no | maybe | yes
+ROUTE_TWO_HOP = "rag.route.two_hop"  # the final decision
+ROUTE_CLARIFY = "rag.route.clarify"  # the run stops to ask the caller
+ROUTE_FALLBACK = "rag.route.fallback"  # why the small model was needed and failed
+REWRITE_MODEL_USED = "rag.rewrite.model_used"
+REWRITE_STANDALONE = "rag.rewrite.standalone_question"
+REWRITE_QUERIES = "rag.rewrite.queries"  # the search queries, one search each
+REWRITE_FALLBACK = "rag.rewrite.fallback"  # why the original question was searched
+CLARIFY_QUESTION = "rag.clarify.question"
+CLARIFY_RESUMED = "rag.clarify.resumed"  # the step ran again with the caller's answer
+
 # Value of ERROR_CATEGORY when an exception has no category (a bug, not a known failure).
 UNCLASSIFIED = "unclassified"
 OUTCOME_OK = "ok"

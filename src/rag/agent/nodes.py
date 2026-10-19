@@ -1,17 +1,20 @@
-"""The nodes of the ask_docs graph (design s13-3, s4-2; spec P3-01).
+"""The nodes of the ask_docs graph (design s13-3, s4-2; spec P3-01, P3-02).
 
-    route     rules: retrieve or not, which KB; clears the retrieval fields of the thread
-    clarify   hook (P3-02): a question to ask the caller instead of searching
-    rewrite   hook (P3-02, P3-03): standalone question, sub-questions, another wording
+    route     rules (and the small model for what rules cannot decide): retrieve or not, which
+              KB, ask the caller back, two-hop; clears the retrieval fields of the thread
+    clarify   the question to ask the caller (hook), then `interrupt`: the run stops here and
+              continues from here with the caller's answer
+    rewrite   hook: standalone question, declarative query, sub-questions (P3-02); another
+              wording of what was missing (P3-03)
     retrieve  the retrieval layer, once per sub-question (a blocking call, run in a thread)
     judge     hook (P3-03): enough found? plus the guards that end the loop
     answer    the answer layer (`rag.answer`) over the chunks of every round
     verify    builds the `AskResult`: retrieval flags, answer flags, stop reason
 
-Every node runs in its own step span and writes its time into `timings_ms`. The three hooks are
-stubs in P3-01 (`rag.agent.hooks`); the guards around them live here, so a hook that calls a
-model only has to say "insufficient" and the loop still ends at `max_rounds`, at the deadline
-(no round starts when less than the answer's time is left) and at the token cap.
+Every node runs in its own step span and writes its time into `timings_ms`. What each hook does
+is in `rag.agent.hooks`; the guards around them live here, so a hook that calls a model only has
+to say "insufficient" and the loop still ends at `max_rounds`, at the deadline (no round starts
+when less than the answer's time is left) and at the token cap.
 """
 
 import asyncio
@@ -20,13 +23,16 @@ import time
 from typing import Any
 
 from langgraph.runtime import Runtime
-from langgraph.types import Overwrite
+from langgraph.types import Overwrite, interrupt
 
 from rag.agent.budget import RequestTokenCapExceeded
 from rag.agent.context import AgentContext
 from rag.agent.result import compose_result, group_by_sub_question, smalltalk_answer
-from rag.agent.state import AgentState, RetrievalRound
+from rag.agent.routing import CLARIFY, TWO_HOP
+from rag.agent.rules import default_clarification
+from rag.agent.state import AgentState, RetrievalRound, working_question
 from rag.answer import build_context, generate_answer
+from rag.answer.prompts import answer_language
 from rag.observe import attributes as attr
 from rag.observe import layer_span
 from rag.retrieve.observe import observe_retrieval
@@ -40,51 +46,122 @@ def _ms(began: float) -> float:
 
 def _sub_questions(state: AgentState) -> list[str]:
     planned = [q for q in state.get("sub_questions") or [] if q.strip()]
-    return planned or [state.get("standalone_question") or state["question"]]
+    return planned or [state.get("standalone_question") or working_question(state)]
 
 
 async def route_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
-    """Rules only, no model. Overwrites everything a former run on this thread left behind."""
+    """Rules first, no model. Only for what the rules leave `undecided` or `maybe`, and only
+    when the knowledge base's `agent` settings allow it, the small model is asked
+    (`hooks.route_fallback`); a failure there keeps the rules' view and is noted in `fallbacks`.
+    Overwrites everything a former run on this thread left behind."""
     ctx = runtime.context
     began = time.perf_counter()
+    agent = ctx.cfg.agent
     with layer_span("route") as span:
         decision = ctx.hooks.decide_route(
             state["question"], kb=state["kb"], history=state.get("history") or []
         )
-        if inspect.isawaitable(decision):  # P3-02: the rules may fall back to a small model
+        if inspect.isawaitable(decision):  # the rules may be async
             decision = await decision
-        span.set_attribute(attr.ROUTE_RETRIEVE, decision.retrieve)
-        span.set_attribute(attr.ROUTE_REASON, decision.reason)
+        splitting = agent.rewrite and agent.max_sub_questions > 1
+        if decision.retrieve and agent.route_model:
+            wants = set()
+            if agent.clarify and decision.clarity == "undecided":
+                wants.add(CLARIFY)
+            if splitting and decision.multi_hop == "maybe":
+                wants.add(TWO_HOP)
+            if wants:
+                decision = await ctx.hooks.route_fallback(state, ctx, decision, frozenset(wants))
+        fallbacks = [f"route:{decision.fallback}"] if decision.fallback else []
+        clarify = decision.retrieve and (
+            decision.needs_clarification or (agent.clarify and decision.clarity == "vague")
+        )
+        two_hop = decision.retrieve and (
+            decision.two_hop or (splitting and decision.multi_hop == "yes")
+        )
+        ask = None
+        if clarify:
+            ask = decision.clarify_question or default_clarification(
+                answer_language(state["question"], ctx.cfg.answer.language)
+            )
+        span.set_attributes(
+            {
+                attr.ROUTE_RETRIEVE: decision.retrieve,
+                attr.ROUTE_REASON: decision.reason,
+                attr.ROUTE_CLARITY: decision.clarity,
+                attr.ROUTE_MULTI_HOP: decision.multi_hop,
+                attr.ROUTE_TWO_HOP: two_hop,
+                attr.ROUTE_CLARIFY: clarify,
+                attr.AGENT_TOKENS: ctx.budget.spent,
+            }
+        )
+        if decision.fallback:
+            span.set_attribute(attr.ROUTE_FALLBACK, decision.fallback)
     return {
         "rounds": Overwrite([]),
+        "fallbacks": Overwrite(fallbacks),
         "timings_ms": Overwrite({"route": _ms(began)}),
         "round": 0,
         "loop": False,
         "sub_questions": [],
         "standalone_question": None,
         "clarification": None,
+        "clarify_question": ask,
+        "clarification_answer": None,
+        "clarified": False,
+        "clarified_question": None,
         "stop_reason": None,
         "answer": None,
         "result": None,
+        "two_hop": two_hop,
+        "tokens_before_clarify": ctx.budget.spent,
         "kb": decision.kb or state["kb"],
         "needs_retrieval": decision.retrieve,
-        "needs_clarification": decision.needs_clarification,
+        "needs_clarification": clarify,
     }
 
 
 async def clarify_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
+    """Asks the caller back, once per request. The hook only names the question (the node runs
+    again when the caller answers, so the hook must be cheap and make no model call); the node
+    stops the run with `interrupt`. The first time it gets here the run ends with the
+    question; when the caller answers, the run continues from this node: `interrupt` returns
+    the answer, and the question and answer become the question the rest of the run works on
+    (the reply is cut to half of `search_max_query_chars`, so the two together stay near the
+    limit of a question)."""
     ctx = runtime.context
     began = time.perf_counter()
-    with layer_span("clarify"):
-        question = await ctx.hooks.clarify(state, ctx)
-    return {"clarification": question or None, "timings_ms": {"clarify": _ms(began)}}
+    with layer_span("clarify", attributes={attr.CLARIFY_RESUMED: ctx.resumed}) as span:
+        question = None if state.get("clarified") else await ctx.hooks.clarify(state, ctx)
+        if question:
+            span.set_attribute(attr.CLARIFY_QUESTION, question[:500])
+    if not question:
+        return {
+            "needs_clarification": False,
+            "clarification": None,
+            "timings_ms": {"clarify": _ms(began)},
+        }
+    # Outside the span: the first time, `interrupt` raises and the run stops here (the stop is
+    # not a failure of this step).
+    answer = str(interrupt(question)).strip()[: ctx.settings.search_max_query_chars // 2]
+    return {
+        "needs_clarification": False,
+        "clarification": None,
+        "clarified": True,
+        "clarification_answer": answer,
+        "clarified_question": f"{state['question'].strip()} ({answer})" if answer else None,
+        "timings_ms": {"clarify": _ms(began)},
+    }
 
 
 async def rewrite_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
+    """The rewrite hook (standalone question, declarative query, sub-questions). The hook falls
+    back to the original question itself when its model fails; the node records that in
+    `fallbacks` (the request is then `degraded`) and on the span."""
     ctx = runtime.context
     began = time.perf_counter()
     update: dict[str, Any] = {}
-    with layer_span("rewrite") as span:
+    with layer_span("rewrite", attributes={attr.AGENT_ROUND: state.get("round", 0) + 1}) as span:
         try:
             outcome = await ctx.hooks.rewrite(state, ctx)
         except RequestTokenCapExceeded:  # no tokens left for the rewrite: answer from what we have
@@ -95,6 +172,17 @@ async def rewrite_node(state: AgentState, runtime: Runtime[AgentContext]) -> dic
                 update["standalone_question"] = outcome.standalone_question
             if outcome.sub_questions:
                 update["sub_questions"] = list(outcome.sub_questions)
+            if outcome.fallback:
+                update["fallbacks"] = [f"rewrite:{outcome.fallback}"]
+                span.set_attribute(attr.REWRITE_FALLBACK, outcome.fallback)
+            span.set_attributes(
+                {
+                    attr.REWRITE_MODEL_USED: outcome.used_model,
+                    attr.REWRITE_QUERIES: [q[:300] for q in outcome.sub_questions],
+                    attr.REWRITE_STANDALONE: (outcome.standalone_question or "")[:500],
+                    attr.AGENT_TOKENS: ctx.budget.spent,
+                }
+            )
     update["timings_ms"] = {"rewrite": _ms(began)}
     return update
 
@@ -185,7 +273,7 @@ async def answer_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict
                 metadata_keys=cfg.metadata.llm,
             )
             answer = await generate_answer(
-                state.get("standalone_question") or state["question"],
+                state.get("standalone_question") or working_question(state),
                 context,
                 kb=cfg.kb,
                 config=cfg.answer,

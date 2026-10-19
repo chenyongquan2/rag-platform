@@ -280,7 +280,7 @@ def test_extension_points_are_wired() -> None:
     assert result.cache_allowed is False
     assert result.found and result.error_categories == []  # a limit of the KB, not a failure
 
-    # clarify: the route flags an unclear question, the run ends with the question to ask.
+    # clarify: the route flags an unclear question, the run stops with the question to ask.
     def vague(question: str, *, kb: str, history: Any) -> RouteDecision:
         return RouteDecision(retrieve=True, kb=kb, needs_clarification=question == "it?")
 
@@ -295,7 +295,9 @@ def test_extension_points_are_wired() -> None:
     result = _ask("it?", backend, fresh_model, runtime=runtime, session_id="s1", request_id="r1")
     assert result.status == AnswerStatus.NEED_CLARIFICATION
     assert result.answer == "Which library do you mean?"
-    assert result.resume_token == result.thread_id and result.thread_id.startswith("s1:")
+    # The token is opaque (P3-02): it is not the checkpoint thread, which stays server side.
+    assert result.resume_token and result.resume_token != result.thread_id
+    assert result.thread_id.startswith("s1:")
     assert backend.calls == [] and fresh_model.calls == []
     # A clarifying question is not an answer: it is not stored as a turn.
     assert asyncio.run(runtime.store.load(runtime.session_key("local", KB, "s1"))) == []
@@ -380,7 +382,9 @@ def test_interrupt_in_a_hook_returns_need_clarification() -> None:
     result = _ask("it?", backend, model, runtime=runtime, session_id="s1", request_id="r1")
     assert result.status == AnswerStatus.NEED_CLARIFICATION
     assert result.answer == "Which library do you mean?"
-    assert result.resume_token == result.thread_id and result.thread_id.startswith("s1:")
+    # The token is opaque (P3-02): it is not the checkpoint thread, which stays server side.
+    assert result.resume_token and result.resume_token != result.thread_id
+    assert result.thread_id.startswith("s1:")
     assert result.cache_allowed is False
     assert backend.calls == [] and model.calls == []
     assert asyncio.run(runtime.store.load(runtime.session_key("local", KB, "s1"))) == []

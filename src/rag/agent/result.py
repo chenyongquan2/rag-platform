@@ -87,6 +87,7 @@ def compose_result(
     stop_reason = stop_reason or values.get("stop_reason")
     question = values.get("question", "")
     last = rounds[-1] if rounds else None
+    fallbacks: list[str] = list(values.get("fallbacks") or [])
     meta: dict[str, Any] = {
         "request_id": ctx.request_id,
         "kb": ctx.cfg.kb,
@@ -95,21 +96,25 @@ def compose_result(
         "index_version": last.index_version if last else "",
         "data_generation": last.data_generation if last else 0,
         "config_version": last.config_version if last else "",
-        "degraded": any(r.degraded for r in rounds),
+        # A search that used one route, or a step that fell back to the original question.
+        "degraded": any(r.degraded for r in rounds) or bool(fallbacks),
         "rerank_timeout": any(r.rerank_timeout for r in rounds),
         "rounds": values.get("round") or 0,
         "timings_ms": dict(timings_ms),
         "tokens_used": ctx.budget.spent,
         "used_history": ctx.used_history,
+        "clarified": bool(values.get("clarified")),
+        "standalone_question": values.get("standalone_question"),
+        "search_queries": list(values.get("sub_questions") or []),
+        "fallbacks": fallbacks,
     }
 
     clarification = values.get("clarification")
-    if clarification:  # P3-02: the run ended with a question for the caller
-        return AskResult(
+    if clarification:  # the run stopped with a question for the caller (the runtime adds the
+        return AskResult(  # resume token: it is stored together with the thread it continues)
             **meta,
             status=AnswerStatus.NEED_CLARIFICATION,
             answer=clarification,
-            resume_token=ctx.thread_id,
             cache_allowed=False,
         )
 
@@ -146,6 +151,11 @@ def compose_result(
         notice=notice,
     )
     # The exact cache (P5) takes only complete answers to a question asked on its own: not one
-    # that used history, stopped at a limit or carries a flag (s12-1).
-    complete = not (ctx.used_history or result.coverage_unconfirmed or result.error_categories)
+    # that used history or a clarification, stopped at a limit or carries a flag (s12-1).
+    complete = not (
+        ctx.used_history
+        or result.clarified
+        or result.coverage_unconfirmed
+        or result.error_categories
+    )
     return result.model_copy(update={"cache_allowed": complete})

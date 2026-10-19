@@ -1,55 +1,53 @@
-"""Rules of the `route` node and the extension points P3-02 and P3-03 fill in (spec P3-01).
+"""The route rules and the list of hooks behind the graph's nodes (spec P3-01, P3-02).
 
-The graph (`rag.agent.graph`) is complete: it has a `clarify`, a `rewrite` and a `judge` node,
-the edges between them and the guards around them (maximum rounds, deadline, token cap). What
-those nodes decide is a function in `AgentHooks`; here the three are stubs with no behaviour:
+The graph (`rag.agent.graph`) has a `clarify`, a `rewrite` and a `judge` node, the edges between
+them and the guards around them (maximum rounds, deadline, token cap). What those nodes decide
+is a function in `AgentHooks`:
 
-    hook      | stub does                      | filled in by
-    ----------+--------------------------------+---------------------------------------------
-    clarify   | no question to ask             | P3-02: `interrupt` with a question, resume
-    rewrite   | no rewriting, one sub-question | P3-02: standalone question, sub-questions;
-              |                                | P3-03: another wording for the next round
-    judge     | the results are enough         | P3-03: sufficient / insufficient per sub-question
+    hook           | default does                                  | where
+    ---------------+-----------------------------------------------+-------------------------
+    decide_route   | rules: smalltalk, clear / vague / undecided,   | here, `rag.agent.rules`
+                   | two-hop hint (no model)                        |
+    route_fallback | asks the small model about what the rules      | `rag.agent.routing`
+                   | left undecided (only then)                     |
+    clarify        | the question to ask the caller (the node        | here
+                   | stops the run with `interrupt`)                |
+    rewrite        | standalone question, declarative query,        | `rag.agent.rewrite`
+                   | sub-questions; round 2 is P3-03's              |
+    judge          | the results are enough (stub)                  | P3-03
 
-so adding one is a change of this table's function (and, for `clarify`, of the rule that sends
-the run there), not of the graph. `decide_route` is the `route` node's rule set: rules only,
-no model (design s8-1, s13-3); P3-02 adds the small-model fallback for what rules cannot decide.
+so adding behaviour is a change of one function, not of the graph. `decide_route` is the `route`
+node's rule set: rules only, no model (design s8-1, s13-3). It returns signals; the node reads
+them with the knowledge base's `agent` settings and asks `route_fallback` when it must.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
+from rag.agent.decisions import RewriteOutcome, RouteDecision, Verdict
+from rag.agent.rewrite import QueryRewriter
+from rag.agent.routing import route_with_model
+from rag.agent.rules import clarity, default_clarification, multi_hop_hint
 from rag.agent.session import HistoryTurn
+from rag.answer.prompts import answer_language
 
 if TYPE_CHECKING:
     from rag.agent.context import AgentContext
     from rag.agent.state import AgentState
 
-Verdict = Literal["sufficient", "insufficient"]
-
-
-@dataclass(frozen=True)
-class RouteDecision:
-    """What the rules decided: whether to retrieve at all, which knowledge base, whether the
-    question must be clarified first (P3-02), and which rule decided."""
-
-    retrieve: bool = True
-    kb: str = ""
-    needs_clarification: bool = False
-    reason: str = "rules"
-
-
-@dataclass(frozen=True)
-class RewriteOutcome:
-    """What a rewrite changed: the question made standalone (P3-02) and the sub-questions to
-    search, one search each. Empty means "keep what the state has"."""
-
-    standalone_question: str | None = None
-    sub_questions: tuple[str, ...] = ()
+__all__ = [
+    "AgentHooks",
+    "RewriteOutcome",
+    "RouteDecision",
+    "Verdict",
+    "clarification_question",
+    "decide_route",
+    "stub_judge",
+]
 
 
 # A message that is only a greeting or thanks is not a question about the documents: nothing to
@@ -63,29 +61,35 @@ _SMALLTALK = re.compile(
 def decide_route(question: str, *, kb: str, history: Sequence[HistoryTurn]) -> RouteDecision:
     """Rules of the `route` node. The knowledge base is the one the caller chose (picking one
     for a caller that names none is s8-3, not done here); retrieval is skipped for an empty
-    message and for plain greetings and thanks."""
+    message and for plain greetings and thanks. Otherwise the rules' signals: whether the
+    question can be searched as it stands (`clarity`) and whether it may need two searches
+    (`multi_hop`); what to do with them is the node's, with the knowledge base's settings."""
     text = question.strip()
     if not text:
         return RouteDecision(retrieve=False, kb=kb, reason="empty")
     if _SMALLTALK.match(text):
         return RouteDecision(retrieve=False, kb=kb, reason="smalltalk")
-    return RouteDecision(retrieve=True, kb=kb, reason="rules")
+    return RouteDecision(
+        retrieve=True,
+        kb=kb,
+        reason="rules",
+        clarity=clarity(text, has_history=bool(history)),
+        multi_hop=multi_hop_hint(text),
+    )
 
 
-# ---- stubs: extension points for P3-02 and P3-03 (no behaviour) -----------------------------
+# ---- the clarify hook and the stubs ----------------------------------------------------------
 
 
-async def stub_clarify(state: AgentState, ctx: AgentContext) -> str | None:
-    """P3-02: return the question to ask the caller when the question is unclear. The stub
-    asks nothing, so the run goes on to `rewrite`."""
-    return None
-
-
-async def stub_rewrite(state: AgentState, ctx: AgentContext) -> RewriteOutcome:
-    """P3-02 / P3-03: the standalone question and sub-questions (first round), or another
-    wording of what is still missing (later rounds). The stub changes nothing: the question
-    is searched as asked."""
-    return RewriteOutcome()
+async def clarification_question(state: AgentState, ctx: AgentContext) -> str | None:
+    """The question to ask the caller, when the route flagged the question as unclear: the
+    one the small model wrote, else a fixed one in the question's language. No model call:
+    the clarify node runs again when the caller answers, and must not spend tokens twice."""
+    if not state.get("needs_clarification"):
+        return None
+    return state.get("clarify_question") or default_clarification(
+        answer_language(state["question"], ctx.cfg.answer.language)
+    )
 
 
 async def stub_judge(state: AgentState, ctx: AgentContext) -> Verdict:
@@ -99,6 +103,11 @@ class AgentHooks:
     """The functions behind the nodes `route`, `clarify`, `rewrite` and `judge`."""
 
     decide_route: Callable[..., RouteDecision | Awaitable[RouteDecision]] = decide_route
-    clarify: Callable[[AgentState, AgentContext], Awaitable[str | None]] = stub_clarify
-    rewrite: Callable[[AgentState, AgentContext], Awaitable[RewriteOutcome]] = stub_rewrite
+    route_fallback: Callable[
+        [AgentState, AgentContext, RouteDecision, frozenset[str]], Awaitable[RouteDecision]
+    ] = route_with_model
+    clarify: Callable[[AgentState, AgentContext], Awaitable[str | None]] = clarification_question
+    rewrite: Callable[[AgentState, AgentContext], Awaitable[RewriteOutcome]] = field(
+        default_factory=QueryRewriter
+    )
     judge: Callable[[AgentState, AgentContext], Awaitable[str]] = stub_judge

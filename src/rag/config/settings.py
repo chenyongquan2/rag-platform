@@ -348,12 +348,26 @@ class ServiceSettings(BaseSettings):
     # checkpoint thread per request. `session_store_url`: the turns of each session;
     # `session_lock_url`: `memory://` serialises one session's requests inside this process,
     # `file://<dir>` also across processes on this machine (design s16-7).
+    #
+    # Route fallback and rewrite (spec P3-02, design s8-2, s11-1): `agent_rewrite_profile` is the
+    # chat profile of the small model that rewrites the question and decides what the rules
+    # cannot (the `cheap` profile: short timeouts, 1,024 output tokens, reasoning included);
+    # `agent_rewrite_timeout_ms` is the longest one such call may take (it never uses the time
+    # kept for the answer, whatever this says); `agent_rewrite_history_turns` and
+    # `agent_rewrite_history_chars` bound the earlier turns shown to it (0 turns: no history
+    # for rewriting). `agent_resume_ttl_s`: how long a question asked back waits for its answer
+    # (the `resume_token` is valid that long, once).
     agent_deadline_ms: int = Field(default=30_000, gt=0)
     agent_answer_reserve_ms: int = Field(default=12_000, ge=0)
     agent_recursion_limit: int = Field(default=25, gt=0)
     agent_token_cap: int = Field(default=20_000, gt=0)
     agent_answer_reserve_tokens: int = Field(default=6_000, ge=0)
     agent_history_turns: int = Field(default=6, ge=0)
+    agent_rewrite_profile: ChatProfileName = "cheap"
+    agent_rewrite_timeout_ms: int = Field(default=6_000, gt=0)
+    agent_rewrite_history_turns: int = Field(default=3, ge=0)
+    agent_rewrite_history_chars: int = Field(default=400, gt=0)
+    agent_resume_ttl_s: int = Field(default=1_800, gt=0)
     session_store_url: str = "sqlite://data/sessions/sessions.db"
     session_lock_url: str = "memory://"
 

@@ -12,13 +12,13 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any
 
-from langchain_core.callbacks import AsyncCallbackManagerForLLMRun
-from langchain_core.messages import BaseMessage
-from langchain_core.outputs import ChatGenerationChunk
+from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from pydantic import PrivateAttr
 
 from rag.config import AccessConfig, AgentConfig, KnowledgeBaseConfig, ServiceSettings
-from rag.testing.fakes import StreamingFakeChatModel
+from rag.testing.fakes import FakeChatModel, StreamingFakeChatModel
 from rag.testing.observe import observe_settings
 from rag.testing.serve import FakeSearchPipeline, fake_chunk
 from rag.types import RetrievalResult, RouteHit, ThresholdDecision
@@ -163,12 +163,64 @@ def agent_settings(**overrides: Any) -> ServiceSettings:
     return observe_settings(**{**defaults, **overrides})
 
 
-def kb_config(kb: str = "hf_docs", *, max_rounds: int = 3) -> KnowledgeBaseConfig:
-    """An English KB open to every caller with `agent.max_rounds` set."""
+def kb_config(kb: str = "hf_docs", *, max_rounds: int = 3, **agent: Any) -> KnowledgeBaseConfig:
+    """An English KB open to every caller with `agent.max_rounds` set. The rewrite, clarify and
+    route-model switches are off unless a test passes them (`rewrite=True`, ...), so a test
+    that is not about them sees the P3-01 behaviour and calls no small model."""
     return KnowledgeBaseConfig(
         kb=kb,
         description=f"{kb} pages",
         language="en",
         access=AccessConfig(callers=["*"]),
-        agent=AgentConfig(max_rounds=max_rounds),
+        agent=AgentConfig(max_rounds=max_rounds, **agent),
     )
+
+
+def structured_reply(schema: str, usage: tuple[int, int] | None = None, **fields: Any) -> AIMessage:
+    """What a model answers when asked for structured output with function calling: a tool call
+    named after the schema class (`RewritePlan`, `RouteJudgement`) with `fields` as arguments.
+    `usage` is (input tokens, output tokens) as the gateway would report them."""
+    usage_metadata = (
+        {"input_tokens": usage[0], "output_tokens": usage[1], "total_tokens": sum(usage)}
+        if usage
+        else None
+    )
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": schema, "args": fields, "id": f"call-{schema}", "type": "tool_call"}],
+        usage_metadata=usage_metadata,  # type: ignore[arg-type]
+    )
+
+
+class RaisingChatModel(FakeChatModel):
+    """A chat model whose every call raises `error` (a gateway that is down)."""
+
+    error: Any = None
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        self._calls.append(list(messages))
+        raise self.error
+
+
+class SlowChatModel(FakeChatModel):
+    """A chat model that waits `delay_s` seconds (a gateway that is slow) and then answers its
+    scripted reply. The wait is a cancellable `asyncio.sleep`, so a timeout around the call
+    ends it."""
+
+    delay_s: float = 30.0
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        await asyncio.sleep(self.delay_s)
+        return self._generate(messages, stop, None, **kwargs)

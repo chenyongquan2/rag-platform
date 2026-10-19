@@ -109,12 +109,32 @@ class AgentState(TypedDict, total=False):
     kb: str
     question: str
     history: list[HistoryTurn]
-    # Set by route (rules) and the rewrite hook (P3-02).
+    # Set by route (rules, and the small model when the rules cannot decide), clarify and the
+    # rewrite hook (P3-02).
     needs_retrieval: bool
     needs_clarification: bool
+    two_hop: bool
+    clarify_question: str | None
+    """The question to ask the caller (set by route, read by clarify)."""
     clarification: str | None
+    """Set only on the way out of a run that stopped at the interrupt (the question asked)."""
+    clarification_answer: str | None
+    clarified: bool
+    """The caller was asked and answered: at most once per request."""
+    clarified_question: str | None
+    """The question and the caller's answer as one text, searched and answered instead of the
+    question alone."""
+    tokens_before_clarify: int
+    """Model tokens spent before the run stopped, so the resumed call keeps counting."""
     standalone_question: str | None
     sub_questions: list[str]
+    """The search queries of the first round (rewrite) or of the next one (P3-03)."""
+    missing: list[str]
+    """What the last round did not find, per sub-question (set by the P3-03 judge, read by the
+    rewrite hook of round two)."""
+    fallbacks: Annotated[list[str], accumulate]
+    """Steps that fell back to the rules or the original question: `route:timeout`,
+    `rewrite:parse_failed` ... (any entry sets the result's `degraded`)."""
     # Retrieval rounds of this request (reducers; cleared by route).
     round: int
     rounds: Annotated[list[RetrievalRound], accumulate]
@@ -123,6 +143,13 @@ class AgentState(TypedDict, total=False):
     stop_reason: str | None
     answer: Answer | None
     result: AskResult | None
+
+
+def working_question(state: AgentState) -> str:
+    """The question the later steps work on: the one the caller asked, with the clarification
+    added when the caller was asked back. (The standalone question of the rewrite, when there
+    is one, is what the answer layer gets.)"""
+    return state.get("clarified_question") or state["question"]
 
 
 # Types the state (and so a checkpoint) may hold. The serializer refuses a type that is not

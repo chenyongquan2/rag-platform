@@ -48,6 +48,9 @@ class AgentContext:
     model: Any
     """The chat model that writes the answer (`BaseChatModel`), or a function that makes it
     (called only when there is a fragment to answer from); guarded by `budget` when used."""
+    helper_model: Any
+    """The small model for the route and rewrite steps (P3-02): a `BaseChatModel`, or a function
+    that makes it (called when a step needs it; a failure there is that step's fallback)."""
     hooks: AgentHooks
     request_id: str
     session_id: str | None
@@ -56,6 +59,8 @@ class AgentContext:
     filters: Mapping[str, Any] | None = None
     used_history: bool = False
     """Earlier turns of the session were loaded into this run (set by the runtime)."""
+    resumed: bool = False
+    """This call continues a run that stopped to ask the caller (set by the runtime)."""
 
     @property
     def reserve_ms(self) -> int:
@@ -74,8 +79,14 @@ class AgentContext:
         model = self.model if hasattr(self.model, "astream") else self.model()
         return guard_model(model, self.budget)
 
+    def helper_model_instance(self) -> Any:
+        """The small model (not yet counted against the cap: `guard` does that)."""
+        model = self.helper_model
+        return model if hasattr(model, "with_structured_output") else model()
+
     def guard(self, model: Any, *, auxiliary: bool = True) -> Any:
-        """`model` counted against the token cap. A call before the answer (`auxiliary`) leaves
-        the answer's tokens (`agent_answer_reserve_tokens`) untouched."""
+        """`model` (a chat model, or a runnable built on one) counted against the token cap. A
+        call before the answer (`auxiliary`) leaves the answer's tokens
+        (`agent_answer_reserve_tokens`) untouched."""
         reserve = self.settings.agent_answer_reserve_tokens if auxiliary else 0
         return guard_model(model, self.budget, reserve=reserve)

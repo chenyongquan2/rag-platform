@@ -47,4 +47,50 @@ def test_hf_docs_sets_agent_keys() -> None:
     raw = yaml.safe_load(path.read_text("utf-8"))
     assert set(raw["agent"]) == set(AgentConfig.model_fields)
     cfg = load_kb_config(path, kb_root=Path(REPO_ROOT) / "kb")
-    assert cfg.agent == AgentConfig(max_rounds=3)
+    assert cfg.agent == AgentConfig(
+        max_rounds=3,
+        rewrite=True,
+        declarative=True,
+        max_sub_questions=3,
+        clarify=True,
+        route_model=True,
+    )
+
+
+def test_rewrite_and_clarify_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spec P3-02 AC19: every new parameter is a named key with a checked range."""
+    s = observe_settings()
+    assert s.agent_rewrite_profile == "cheap"  # the small, short-timeout chat profile
+    assert s.agent_rewrite_timeout_ms == 6_000
+    assert (s.agent_rewrite_history_turns, s.agent_rewrite_history_chars) == (3, 400)
+    assert s.agent_resume_ttl_s == 1_800
+    assert observe_settings(agent_rewrite_profile="online").agent_rewrite_profile == "online"
+    assert observe_settings(agent_rewrite_history_turns=0).agent_rewrite_history_turns == 0
+    for bad in (
+        {"agent_rewrite_profile": "huge"},
+        {"agent_rewrite_timeout_ms": 0},
+        {"agent_rewrite_history_turns": -1},
+        {"agent_rewrite_history_chars": 0},
+        {"agent_resume_ttl_s": 0},
+    ):
+        with pytest.raises(ValueError):
+            observe_settings(**bad)
+    monkeypatch.setenv("AGENT_REWRITE_TIMEOUT_MS", "2500")
+    monkeypatch.setenv("AGENT_RESUME_TTL_S", "60")
+    from rag.config import ServiceSettings
+
+    env = ServiceSettings(_env_file=None)  # type: ignore[call-arg]
+    assert (env.agent_rewrite_timeout_ms, env.agent_resume_ttl_s) == (2_500, 60)
+
+    # Per knowledge base: off unless the KB's file switches them on (hf_docs.yaml does), so a
+    # config that says nothing keeps the P3-01 behaviour and calls no model before the answer.
+    default = AgentConfig()
+    assert (default.rewrite, default.clarify, default.route_model) == (False, False, False)
+    assert (default.declarative, default.max_sub_questions) == (True, 3)
+    on = AgentConfig(rewrite=True, clarify=True, route_model=True, max_sub_questions=1)
+    assert on.max_sub_questions == 1
+    for bad_kb in ({"max_sub_questions": 0}, {"max_sub_questions": 9}, {"rewrite": "maybe"}):
+        with pytest.raises(ValidationError):
+            AgentConfig.model_validate(bad_kb)
+    with pytest.raises(ValidationError):
+        AgentConfig.model_validate({"clarifiy": True})  # a typo is an error, not a no-op

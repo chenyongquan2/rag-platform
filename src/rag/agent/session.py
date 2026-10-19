@@ -29,6 +29,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
+from rag.agent.sqlite_db import init_agent_db
 from rag.factories import LockProvider, LockTimeoutError, init_sqlite_once
 
 # Longest question or answer text kept per stored turn: history is context for rewriting, not an
@@ -106,19 +107,8 @@ class SqliteSessionStore:
         self.path = path
         self.keep_turns = keep_turns
 
-    @staticmethod
-    def _init_db(conn: sqlite3.Connection) -> None:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS turns ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, "
-            "request_id TEXT NOT NULL, question TEXT NOT NULL, answer TEXT NOT NULL, "
-            "at TEXT NOT NULL)"
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS turns_session ON turns (session_id, id)")
-
     def prepare(self) -> None:
-        init_sqlite_once(self.path, self._init_db)
+        init_sqlite_once(self.path, init_agent_db)
 
     def _connect(self) -> sqlite3.Connection:
         self.prepare()  # once per file and process; concurrent first requests wait for it

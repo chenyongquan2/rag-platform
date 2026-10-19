@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.serde.base import SerializerProtocol
     from redis import Redis
 
+    from rag.agent.resume import ResumeStore
     from rag.agent.session import SessionLocks, SessionStore
 
 _SCHEME_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*)://(.*)$")
@@ -396,6 +397,20 @@ def make_session_store(url: str, *, keep_turns: int) -> SessionStore:
     if scheme == "memory":
         return MemorySessionStore(keep_turns)
     raise _unsupported("session store", scheme, "sqlite, memory")
+
+
+def make_resume_store(url: str, *, ttl_s: float) -> ResumeStore:
+    """Resume tokens of questions asked back, from the same connection string as the session
+    history: `sqlite://<path>` -> a table in that file, `memory://` -> process memory; a token
+    is valid for `ttl_s` seconds (spec P3-02)."""
+    from rag.agent.resume import MemoryResumeStore, SqliteResumeStore
+
+    scheme, _ = split_url(url)
+    if scheme == "sqlite":
+        return SqliteResumeStore(url_path(url), ttl_s)
+    if scheme == "memory":
+        return MemoryResumeStore(ttl_s)
+    raise _unsupported("resume store", scheme, "sqlite, memory")
 
 
 def make_session_locks(url: str) -> SessionLocks:

@@ -213,14 +213,29 @@ class AnswerConfig(_Strict):
 
 
 class AgentConfig(_Strict):
-    """The `ask_docs` graph for this knowledge base (design s13-3, s15-3; spec P3-01).
+    """The `ask_docs` graph for this knowledge base (design s13-3, s15-3; spec P3-01, P3-02).
 
     - `max_rounds`: retrieval rounds of one request at most (the sufficiency judge of P3-03 asks
       for another round while this many have not been used). Deadline, recursion limit and
       token cap are service settings (`agent_*`), they bound a request whatever the KB.
+    - `rewrite`: the rewrite step may call the small model (standalone question from the
+      history, declarative query, sub-questions). Off: the question is searched as asked and no
+      model is called before the answer. Where the rules settle the question (a statement with
+      no history) no model is called either way.
+    - `declarative`: write the search query as a statement, not a question (s8-2).
+    - `max_sub_questions`: most searches a split question may make (1: never split).
+    - `clarify`: ask the caller back when the question is too unclear to search
+      (`need_clarification`, at most once per request). Off: such a question is searched as is.
+    - `route_model`: the route step may ask the small model about what the rules cannot decide
+      (only questions the rules call undecided, and only for the features switched on above).
     """
 
     max_rounds: int = Field(default=3, ge=1)
+    rewrite: bool = False
+    declarative: bool = True
+    max_sub_questions: int = Field(default=3, ge=1, le=8)
+    clarify: bool = False
+    route_model: bool = False
 
 
 class KnowledgeBaseConfig(_Strict):
