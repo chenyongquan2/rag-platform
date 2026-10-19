@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from rag.agent import AgentRuntime, ask_docs
-from rag.agent.rules import protected_tokens
+from rag.agent.rules import missing_tokens, protected_tokens
 from rag.config import ServiceSettings
 from rag.cost import BudgetExceeded, CostLedger
 from rag.observe import shutdown_observability
@@ -147,6 +147,9 @@ def test_real_cheap_model_rewrites_and_routes(settings: ServiceSettings) -> None
                 f"completion={[r.get('completion_tokens') for r in rows]}, "
                 f"cny={sum(float(r.get('cny') or 0) for r in rows):.5f}"
             )
+            tokens = protected_tokens(question)
+            lost = missing_tokens(tokens, *result.search_queries)
+            print(f"[{label}] protected={tokens}, lost={lost}")
             results.append(label)
             # Whatever the model did, the request was served and says what happened.
             assert result.status in {"answered", "need_clarification"}
@@ -155,8 +158,7 @@ def test_real_cheap_model_rewrites_and_routes(settings: ServiceSettings) -> None
                 assert queries, "something was searched"
                 if not result.fallbacks:
                     # A rewrite that was used kept every identifier of the question.
-                    tokens = protected_tokens(question)
-                    assert all(t in " ".join(queries) for t in tokens), (tokens, queries)
+                    assert not lost, (tokens, queries)
             for row in rows:
                 assert row["usage_estimated"] is False
 

@@ -57,7 +57,7 @@ def test_token_is_claimed_once_by_its_owner(store_and_clock: tuple[Any, Clock]) 
     )
     with pytest.raises(ResumeTokenInvalid, match="in use"):  # a call is running the thread
         _claim(store, token)
-    asyncio.run(store.finish(token))
+    asyncio.run(store.finish(token, record.claim_id))
     with pytest.raises(ResumeTokenInvalid, match="already used"):
         _claim(store, token)
     assert ResumeTokenInvalid.error_category == ErrorCategory.INVALID_RESUME_TOKEN
@@ -153,13 +153,14 @@ def test_a_claimed_token_is_in_flight_until_it_is_finished_or_released(
 ) -> None:
     store, _clock = leased
     token = _create(store)
-    _claim(store, token)
+    first = _claim(store, token)
     with pytest.raises(ResumeTokenInvalid, match="in use"):
         _claim(store, token)
-    asyncio.run(store.release(token))  # the run failed: the token can be used again
-    _claim(store, token)
-    asyncio.run(store.finish(token))  # the run ended: used up for good
-    asyncio.run(store.release(token))  # (a late release changes nothing)
+    asyncio.run(store.release(token, first.claim_id))  # the run failed: usable again
+    second = _claim(store, token)
+    assert second.claim_id != first.claim_id
+    asyncio.run(store.finish(token, second.claim_id))  # the run ended: used up for good
+    asyncio.run(store.release(token, second.claim_id))  # (a late release changes nothing)
     with pytest.raises(ResumeTokenInvalid, match="already used"):
         _claim(store, token)
 
@@ -185,8 +186,7 @@ def test_purge_keeps_the_thread_of_a_run_in_flight(leased: tuple[Any, Clock]) ->
     done = _create(store, thread_id="s1:done")
     clock.now += 30
     _claim(store, flying)
-    _claim(store, done)
-    asyncio.run(store.finish(done))
+    asyncio.run(store.finish(done, _claim(store, done).claim_id))
     clock.now += 31  # 61 s: all three tokens have expired (60 s), the flying run's lease has not
     assert sorted(asyncio.run(store.purge_expired())) == ["s1:done", "s1:idle"]
     clock.now += 10  # the lease (40 s from the claim) has lapsed: nobody is running it
@@ -206,3 +206,37 @@ def test_an_old_sqlite_file_without_the_lease_column_is_upgraded(tmp_path: Path)
     store = SqliteResumeStore(path, 60)
     token = _create(store)
     assert _claim(store, token).thread_id == "s1:run1"
+
+
+# ---- review round 2: only the call that holds the claim can end it ------------------------------
+
+
+def test_a_late_release_or_finish_of_a_lapsed_claim_changes_nothing(
+    leased: tuple[Any, Clock],
+) -> None:
+    store, clock = leased
+    token = _create(store)
+    first = _claim(store, token)
+    clock.now += 21  # the first call is slow: its lease lapsed
+    second = _claim(store, token)  # another call took the token over
+    assert second.claim_id != first.claim_id
+    asyncio.run(store.release(token, first.claim_id))  # the first call fails late ...
+    with pytest.raises(ResumeTokenInvalid, match="in use"):  # ... the second still holds it
+        _claim(store, token)
+    asyncio.run(store.finish(token, first.claim_id))  # ... or ends late: not its claim any more
+    with pytest.raises(ResumeTokenInvalid, match="in use"):
+        _claim(store, token)
+    asyncio.run(store.finish(token, second.claim_id))  # the holder ends it
+    with pytest.raises(ResumeTokenInvalid, match="already used"):
+        _claim(store, token)
+
+
+def test_tokens_spent_by_a_failed_attempt_come_back_with_the_next_claim(
+    leased: tuple[Any, Clock],
+) -> None:
+    store, _clock = leased
+    token = _create(store)
+    first = _claim(store, token)
+    assert first.tokens == 0
+    asyncio.run(store.release(token, first.claim_id, tokens=14_000))
+    assert _claim(store, token).tokens == 14_000

@@ -240,14 +240,14 @@ class AgentRuntime:
                 await self._hold_session(stack, key, deadline)
                 if not resuming:
                     history = await self.store.load(key)
-            claimed: str | None = None
+            claimed: tuple[str, str] | None = None  # the token and the id of our claim
             try:
                 inputs: Mapping[str, Any] | Command | None
                 if resume_token is not None:
-                    history, inputs = await self._take_token(
+                    history, inputs, claim_id = await self._take_token(
                         resume_token, answer or "", ctx, caller_id=caller_id, session_id=session_id
                     )
-                    claimed = resume_token
+                    claimed = (resume_token, claim_id)
                 else:
                     inputs = {
                         "request_id": request_id,
@@ -259,7 +259,7 @@ class AgentRuntime:
                 ctx.used_history = bool(history)
                 result, values = await self._run(inputs, ctx)
                 if claimed is not None:  # the run ended, whatever it ended with: used up
-                    await self.resumes.finish(claimed)
+                    await self.resumes.finish(*claimed)
                     claimed = None
                 result = result.model_copy(
                     update={
@@ -279,15 +279,41 @@ class AgentRuntime:
                     )
                     result = result.model_copy(update={"resume_token": token})
                 elif session_id is not None and (result.answer or values.get("clarified")):
-                    for turn in self._turns(values, question, request_id, result):
-                        await self.store.append(key, turn)
+                    result = await self._remember(key, values, question, request_id, result)
             except BaseException:
                 # The call raised or was cancelled before the run ended: the caller's reply is
                 # not lost, the token can be used again and the thread goes on where it stopped.
                 if claimed is not None:
                     with contextlib.suppress(Exception):
-                        await asyncio.shield(self.resumes.release(claimed))
+                        spent = ctx.budget.spent  # what this request has used so far
+                        await asyncio.shield(self.resumes.release(*claimed, tokens=spent))
                 raise
+        return result
+
+    async def _remember(
+        self,
+        key: str,
+        values: Mapping[str, Any],
+        question: str,
+        request_id: str,
+        result: AskResult,
+    ) -> AskResult:
+        """Write the turns of a finished run to the session's history. The answer is already
+        made (and a resume token used up), so a store that fails must not take it away: the
+        failure is logged and the result says so (`history:write_failed`, `degraded`, not for
+        the exact cache)."""
+        try:
+            for turn in self._turns(values, question, request_id, result):
+                await self.store.append(key, turn)
+        except Exception:
+            logger.warning("could not write the session history", exc_info=True)
+            return result.model_copy(
+                update={
+                    "degraded": True,
+                    "fallbacks": [*result.fallbacks, "history:write_failed"],
+                    "cache_allowed": False,
+                }
+            )
         return result
 
     async def _drop_abandoned_questions(self) -> None:
@@ -330,36 +356,43 @@ class AgentRuntime:
 
     async def _take_token(
         self, token: str, answer: str, ctx: AgentContext, *, caller_id: str, session_id: str | None
-    ) -> tuple[list[HistoryTurn], Command | None]:
+    ) -> tuple[list[HistoryTurn], Command | None, str]:
         """Use the resume token for this call and point the call at its thread. Checks that
         the token is this caller's, for this knowledge base and session (`claim`), and that the
         thread belongs to this session and either waits for the answer (the input is
         `Command(resume=answer)`) or is a resumed run that failed after the question was
         answered (no input: the run goes on from the step that failed, with the first answer).
         Anything else is refused and the token is used up. Returns the history the run
-        started with (kept in its checkpoint) and carries over the tokens it had spent, so the
-        request's cap counts both calls."""
+        started with (kept in its checkpoint), the input for the graph and the id of our claim;
+        carries over the tokens the request had spent (before the question was asked back and
+        in failed attempts), so the request's cap counts them all."""
         record = await self.resumes.claim(
             token, caller_id=caller_id, kb=ctx.cfg.kb, session_id=session_id
         )
         ctx.thread_id = record.thread_id
         ctx.resumed = True
-        async with self.checkpointers.open() as saver:
-            snapshot = await build_graph(saver).aget_state(self.run_config(record.thread_id))
-        values = dict(snapshot.values)
-        waiting = bool(snapshot.next) and any(task.interrupts for task in snapshot.tasks)
-        failed_after_answer = bool(snapshot.next) and bool(values.get("clarified"))
-        problem = None
-        if not (waiting or failed_after_answer):
-            problem = "the run is not waiting for an answer"
-        elif values.get("session_id") != session_id:
-            problem = "the thread belongs to another session"
+        try:
+            async with self.checkpointers.open() as saver:
+                snapshot = await build_graph(saver).aget_state(self.run_config(record.thread_id))
+            values = dict(snapshot.values)
+            waiting = bool(snapshot.next) and any(task.interrupts for task in snapshot.tasks)
+            failed_after_answer = bool(snapshot.next) and bool(values.get("clarified"))
+            problem = None
+            if not (waiting or failed_after_answer):
+                problem = "the run is not waiting for an answer"
+            elif values.get("session_id") != session_id:
+                problem = "the thread belongs to another session"
+        except BaseException:  # could not even look: the claim goes back
+            with contextlib.suppress(Exception):
+                await asyncio.shield(self.resumes.release(token, record.claim_id))
+            raise
         if problem is not None:
-            await self.resumes.finish(token)  # a token that cannot be used is used up
+            # A token that cannot be used is used up: asking again says so.
+            await self.resumes.finish(token, record.claim_id)
             raise ResumeTokenInvalid(problem)
-        ctx.budget.add(int(values.get("tokens_before_clarify") or 0))
+        ctx.budget.add(max(int(values.get("tokens_before_clarify") or 0), record.tokens))
         inputs = Command(resume=answer) if waiting else None
-        return list(values.get("history") or []), inputs
+        return list(values.get("history") or []), inputs, record.claim_id
 
     async def _hold_session(self, stack: AsyncExitStack, key: str, deadline: Deadline) -> None:
         """Take the session's lock within the request's deadline."""

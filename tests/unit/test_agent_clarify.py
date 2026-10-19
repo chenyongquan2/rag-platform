@@ -120,7 +120,7 @@ def test_clarification_with_rewrite_uses_the_answer_in_the_standalone_question()
     assert rig.backend.calls[0]["question"].startswith("Fix KeyError 'llama'")
     prompt = "\n".join(str(m.content) for m in rig.helper.calls[0])
     assert VAGUE in prompt and ANSWER in prompt  # the model sees both
-    assert "Keep exactly as written: KeyError" in prompt  # the identifier of the answer
+    assert '"KeyError"' in prompt  # the identifier of the answer is on the list to keep
 
 
 def test_second_clarification_is_not_asked() -> None:
@@ -220,17 +220,21 @@ def test_token_of_a_finished_thread_is_rejected() -> None:
         )
 
     # The registry itself says yes (caller, KB and session match), the thread is not waiting.
-    token = asyncio.run(forge(finished.thread_id, "s1"))
+    token = finished_token = asyncio.run(forge(finished.thread_id, "s1"))
     with pytest.raises(ResumeTokenInvalid, match="not waiting"):
         rig.resume(token)
     # A thread that waits but belongs to another session is refused as well.
-    token = asyncio.run(forge(waiting_elsewhere.thread_id, "s1"))
+    token = wrong_session_token = asyncio.run(forge(waiting_elsewhere.thread_id, "s1"))
     with pytest.raises(ResumeTokenInvalid, match="another session"):
         rig.resume(token)
     # And a thread that does not exist.
     token = asyncio.run(forge("s1:nothing", "s1"))
     with pytest.raises(ResumeTokenInvalid):
         rig.resume(token)
+    # A refused token is used up, not left in flight: asking again says so, now and later.
+    for stale in (finished_token, wrong_session_token):
+        with pytest.raises(ResumeTokenInvalid, match="already used"):
+            rig.resume(stale)
     assert len(rig.answers.calls) == answered_before
 
 
@@ -467,3 +471,59 @@ def test_a_finished_resume_stays_used_even_after_its_lease_would_lapse() -> None
     rig.runtime.resumes._now = lambda: time.time() + 1_000  # type: ignore[attr-defined]
     with pytest.raises(ResumeTokenInvalid, match="already used"):
         rig.resume(token)
+
+
+# ---- review round 2 ----------------------------------------------------------------------------
+
+
+def test_tokens_spent_by_a_failed_resume_count_on_the_retry() -> None:
+    # The first attempt spends 14,000 tokens on its rewrite and then fails in the search. The
+    # retry goes on from there: the request's cap (20,000) has already lost those 14,000.
+    rig = Rig(rewrite=True)
+    rig.helper = FakeChatModel(
+        responses=[
+            structured_reply(
+                "RewritePlan",
+                usage=(13_000, 1_000),
+                standalone_question="How do I fix the KeyError 'llama' in transformers?",
+                search_queries=["Fix KeyError 'llama' in transformers"],
+            )
+        ]
+    )
+    token = rig.ask(session_id="s1").resume_token or ""
+    rig.backend.raises = RuntimeError("search backend down")
+    with pytest.raises(RuntimeError):
+        rig.resume(token)
+    rig.backend.raises = None
+    done = rig.resume(token)
+    assert done.status == "answered" and done.tokens_used >= 14_000
+
+
+class _FailingStore:
+    """A session store whose writes fail (a full disk)."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    def prepare(self) -> None:
+        self.inner.prepare()
+
+    async def load(self, key: str) -> Any:
+        return await self.inner.load(key)
+
+    async def append(self, key: str, turn: Any) -> None:
+        raise OSError("disk full")
+
+
+def test_a_failed_history_write_does_not_lose_the_answer_or_the_token() -> None:
+    rig = Rig()
+    rig.runtime.store = _FailingStore(rig.runtime.store)  # type: ignore[assignment]
+    token = rig.ask(session_id="s1").resume_token or ""
+    done = rig.resume(token)
+    assert done.status == "answered" and done.found and done.answer
+    assert done.fallbacks == ["history:write_failed"] and done.degraded
+    assert "degraded" in done.error_categories and done.cache_allowed is False
+    with pytest.raises(ResumeTokenInvalid, match="already used"):  # the run did end
+        rig.resume(token)
+    plain = rig.ask("push_to_hub parameters", session_id="s2")  # an ordinary call as well
+    assert plain.status == "answered" and plain.fallbacks == ["history:write_failed"]

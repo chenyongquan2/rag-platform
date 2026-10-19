@@ -13,8 +13,11 @@ and until when. `ask_docs(..., resume_token=..., answer=...)` takes the token wi
 A token is `pending` (can be claimed), `resuming` (a call is running the thread) or `used`. The
 call that claimed it ends the claim: `finish` (the run ended, with an answer or cut off: used
 for good) or `release` (the run raised or was cancelled: the caller may try again, the thread
-goes on from where it stopped). A call that dies without either (the process is killed) leaves
-`resuming`; after `lease_s` seconds the claim lapses and the token can be claimed again.
+goes on from where it stopped, and the tokens the attempt spent come back with the next claim).
+Every claim has its own id, and only the call holding the current claim can end it: a call that
+is slow past its lease and ends late does not touch the claim of the call that took over.
+A call that dies without either (the process is killed) leaves `resuming`; after `lease_s`
+seconds the claim lapses and the token can be claimed again.
 
 Anything else is `ResumeTokenInvalid` (category `invalid_resume_token`), one category and one
 fixed message for every reason, so a caller cannot find out which tokens exist; the reason is
@@ -35,7 +38,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -59,6 +62,10 @@ class ResumeRecord:
     session_id: str | None
     thread_id: str
     expires_at: float
+    claim_id: str = ""
+    """Who holds the claim (set by `claim`)."""
+    tokens: int = 0
+    """Model tokens spent by earlier, failed attempts (set by `claim`)."""
 
 
 def hash_token(token: str) -> str:
@@ -68,6 +75,10 @@ def hash_token(token: str) -> str:
 def new_token() -> str:
     """A URL-safe token with 192 random bits: it cannot be guessed."""
     return secrets.token_urlsafe(24)
+
+
+def new_claim_id() -> str:
+    return secrets.token_hex(8)
 
 
 def in_flight(status: str, claimed_at: float | None, lease_s: float, now: float) -> bool:
@@ -124,12 +135,13 @@ class ResumeStore(Protocol):
         """Take the token for one running call. `ResumeTokenInvalid` when this call cannot."""
         ...
 
-    async def finish(self, token: str) -> None:
-        """The call ended the run: the token is used up."""
+    async def finish(self, token: str, claim_id: str) -> None:
+        """The call that holds claim `claim_id` ended the run: the token is used up."""
         ...
 
-    async def release(self, token: str) -> None:
-        """The call failed or was cancelled: the token can be claimed again."""
+    async def release(self, token: str, claim_id: str, tokens: int = 0) -> None:
+        """The call that holds claim `claim_id` failed or was cancelled, after spending `tokens`
+        in all on this request: the token can be claimed again."""
         ...
 
 
@@ -138,6 +150,8 @@ class _Row:
     record: ResumeRecord
     status: str = "pending"
     claimed_at: float | None = None
+    claim_id: str = ""
+    tokens: int = 0
 
 
 class MemoryResumeStore:
@@ -197,20 +211,20 @@ class MemoryResumeStore:
             )
             if problem is not None or row is None:
                 raise ResumeTokenInvalid(problem or "unknown token")
-            row.status, row.claimed_at = "resuming", now
-            return row.record
+            row.status, row.claimed_at, row.claim_id = "resuming", now, new_claim_id()
+            return replace(row.record, claim_id=row.claim_id, tokens=row.tokens)
 
-    async def finish(self, token: str) -> None:
+    async def finish(self, token: str, claim_id: str) -> None:
         with self._lock:
             row = self._rows.get(hash_token(token))
-            if row is not None:
+            if row is not None and row.status == "resuming" and row.claim_id == claim_id:
                 row.status = "used"
 
-    async def release(self, token: str) -> None:
+    async def release(self, token: str, claim_id: str, tokens: int = 0) -> None:
         with self._lock:
             row = self._rows.get(hash_token(token))
-            if row is not None and row.status == "resuming":
-                row.status, row.claimed_at = "pending", None
+            if row is not None and row.status == "resuming" and row.claim_id == claim_id:
+                row.status, row.claimed_at, row.tokens = "pending", None, max(row.tokens, tokens)
 
 
 class SqliteResumeStore:
@@ -266,8 +280,8 @@ class SqliteResumeStore:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 found = conn.execute(
-                    "SELECT caller_id, kb, session_id, thread_id, expires_at, status, claimed_at "
-                    "FROM resumes WHERE token_hash = ?",
+                    "SELECT caller_id, kb, session_id, thread_id, expires_at, status, claimed_at, "
+                    "tokens FROM resumes WHERE token_hash = ?",
                     (hash_token(token),),
                 ).fetchone()
                 record = ResumeRecord(*found[:5]) if found else None
@@ -284,20 +298,22 @@ class SqliteResumeStore:
                 )
                 if problem is not None or record is None:
                     raise ResumeTokenInvalid(problem or "unknown token")
+                claim_id = new_claim_id()
                 conn.execute(
-                    "UPDATE resumes SET status = 'resuming', claimed_at = ? WHERE token_hash = ?",
-                    (now, hash_token(token)),
+                    "UPDATE resumes SET status = 'resuming', claimed_at = ?, claim_id = ? "
+                    "WHERE token_hash = ?",
+                    (now, claim_id, hash_token(token)),
                 )
                 conn.execute("COMMIT")
             except BaseException:
                 if conn.in_transaction:
                     conn.execute("ROLLBACK")
                 raise
-        return record
+        return replace(record, claim_id=claim_id, tokens=int(found[7] or 0))
 
-    def _set(self, token: str, sql: str) -> None:
+    def _end(self, sql: str, args: tuple[object, ...]) -> None:
         with closing(self._connect()) as conn, conn:
-            conn.execute(sql, (hash_token(token),))
+            conn.execute(sql, args)
 
     async def create(
         self, *, caller_id: str, kb: str, session_id: str | None, thread_id: str
@@ -314,15 +330,19 @@ class SqliteResumeStore:
     ) -> ResumeRecord:
         return await asyncio.to_thread(self._claim, token, caller_id, kb, session_id)
 
-    async def finish(self, token: str) -> None:
+    async def finish(self, token: str, claim_id: str) -> None:
         await asyncio.to_thread(
-            self._set, token, "UPDATE resumes SET status = 'used' WHERE token_hash = ?"
+            self._end,
+            "UPDATE resumes SET status = 'used' "
+            "WHERE token_hash = ? AND status = 'resuming' AND claim_id = ?",
+            (hash_token(token), claim_id),
         )
 
-    async def release(self, token: str) -> None:
+    async def release(self, token: str, claim_id: str, tokens: int = 0) -> None:
         await asyncio.to_thread(
-            self._set,
-            token,
-            "UPDATE resumes SET status = 'pending', claimed_at = NULL "
-            "WHERE token_hash = ? AND status = 'resuming'",
+            self._end,
+            "UPDATE resumes SET status = 'pending', claimed_at = NULL, "
+            "tokens = MAX(COALESCE(tokens, 0), ?) "
+            "WHERE token_hash = ? AND status = 'resuming' AND claim_id = ?",
+            (tokens, hash_token(token), claim_id),
         )
