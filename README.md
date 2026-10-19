@@ -31,6 +31,8 @@ that raises when called. The gitleaks hook is built from source and needs a Go t
 scripts/dev_up.sh                                   # docker compose up -d, then wait until healthy
 uv run python -m rag.index.cli init --kb hf_docs    # create kb_hf_docs_v1 and the kb_hf_docs alias
 uv run python -m rag.index.cli status --kb hf_docs  # alias, versions, document counts, data generation
+uv run python -m rag.index.cli rebuild --kb hf_docs   # new index version, gate, alias switch (new model or chunking)
+uv run python -m rag.index.cli rollback --kb hf_docs  # alias back to the previous version, nothing deleted
 docker compose down                                 # stop (Elasticsearch data stays in the es-data volume)
 ```
 

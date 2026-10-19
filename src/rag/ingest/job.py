@@ -336,6 +336,8 @@ class IngestJob:
     between them (`run()` is the only caller that holds the lock). Pass `index` to write a given
     version instead of the alias's (the rebuild of s7-5). With a `RunCostLedger`, the run is
     checked against the budget before any embedding call; without one, no budget check (fakes).
+    A rebuild (`rag.index.rebuild`) also passes `lock_name` (its own lock, so the old index keeps
+    taking incremental runs) and `raise_generation=False` (the alias switch raises it, once).
     """
 
     def __init__(
@@ -354,6 +356,8 @@ class IngestJob:
         lock_provider: LockProvider | None = None,
         ledger: RunCostLedger | None = None,
         run_id: str | None = None,
+        lock_name: str | None = None,
+        raise_generation: bool = True,
     ) -> None:
         if ledger is not None and run_id is not None and ledger.run_id != run_id:
             raise ValueError(f"run_id {run_id!r} differs from the ledger's {ledger.run_id!r}")
@@ -372,6 +376,8 @@ class IngestJob:
         self.lock_provider = lock_provider
         self.ledger = ledger
         self.run_id = ledger.run_id if ledger is not None else (run_id or new_run_id())
+        self.lock_name = lock_name or f"ingest:{self.names.alias}"
+        self.raise_generation = raise_generation
         self.generation_prefix = f"{DEFAULT_KEY_PREFIX}{self.names.prefix}"
         self.index: str | None = index
         self._started = 0.0
@@ -385,10 +391,11 @@ class IngestJob:
 
     def run(self) -> IngestReport:
         locks = self.lock_provider or make_lock_provider(self.settings.lock_url)
-        name = f"ingest:{self.names.alias}"
         with ExitStack() as stack:
             try:
-                stack.enter_context(locks.lock(name, timeout=self.settings.ingest_lock_timeout_s))
+                stack.enter_context(
+                    locks.lock(self.lock_name, timeout=self.settings.ingest_lock_timeout_s)
+                )
             except LockTimeoutError as exc:
                 raise IngestError(
                     f"another ingest of {self.names.alias} is running ({exc})"
@@ -588,7 +595,9 @@ class IngestJob:
         finalized = store.finalize(also_clean=plan.added)
         swept = store.sweep(plan.orphans)
         changed = bool(plan.added or plan.updated or plan.deleted or plan.orphans)
-        if changed:
+        # A rebuild writes a version no query reads yet; its alias switch raises the generation.
+        raised = changed and self.raise_generation
+        if raised:
             generation = incr_data_generation(
                 self.redis, self.cfg.kb, key_prefix=self.generation_prefix
             )
@@ -614,7 +623,7 @@ class IngestJob:
             chunks_written=sum(store.written_docs.values()),
             chunks_deleted=finalized.deleted_chunks + swept,
             data_generation=generation,
-            generation_raised=changed,
+            generation_raised=raised,
             cost_cny=self.ledger.run_cny if self.ledger is not None else 0.0,
             docstore=docstore.path.as_posix(),
             read_failures=plan.read_failures,
@@ -665,7 +674,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _close(embed: BaseEmbedding | None) -> None:
+def close_embedding(embed: BaseEmbedding | None) -> None:
     inner = getattr(embed, "inner", embed)
     close = getattr(inner, "close", None)
     if callable(close):
@@ -753,7 +762,7 @@ def main(
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     finally:
-        _close(embed)
+        close_embedding(embed)
         if own_es and es is not None:
             es.close()
     for line in report.summary_lines():

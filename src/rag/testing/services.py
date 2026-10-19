@@ -178,6 +178,28 @@ class _FakeIndices:
         self._es.refreshes.append(index)
         return {"_shards": {"failed": 0}}
 
+    def forcemerge(
+        self, *, index: str, max_num_segments: int | None = None, **_: Any
+    ) -> dict[str, Any]:
+        """Records the call with the number of bulk requests so far (tests check that nothing
+        is written after it); deleted documents are never kept, so there is nothing to drop."""
+        self._es.require(index)
+        self._es.merges.append(
+            {
+                "index": index,
+                "max_num_segments": max_num_segments,
+                "bulk_calls": len(self._es.bulk_calls),
+            }
+        )
+        return {"_shards": {"failed": 0}}
+
+    def stats(self, *, index: str, **_: Any) -> dict[str, Any]:
+        self._es.require(index)
+        count = len(self._es.docs[index])
+        docs = {"count": count, "deleted": 0}
+        segments = {"count": 1 if count else 0}
+        return {"_all": {"primaries": {"docs": docs, "segments": segments}}}
+
 
 class FakeElasticsearch:
     """`docs[index][_id] = _source`; `mappings[index]` as created. See the module doc."""
@@ -192,6 +214,8 @@ class FakeElasticsearch:
         self.bulk_calls: list[int] = []
         """Number of operations (documents) in each bulk request."""
         self.refreshes: list[str] = []
+        self.merges: list[dict[str, Any]] = []
+        """Force merge requests: index, max_num_segments, bulk requests sent before it."""
         self.fail_ids: set[str] = set()
         self.delete_failures: list[dict[str, Any]] = []
         self.delete_queries: list[dict[str, Any]] = []

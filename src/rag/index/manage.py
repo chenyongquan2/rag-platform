@@ -9,6 +9,7 @@ was decided on a stale read fail as a whole instead of half-applying.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from elasticsearch import BadRequestError, NotFoundError
@@ -216,3 +217,54 @@ def set_index_embed_model(es: Elasticsearch, index: str, model_id: str) -> None:
     meta = dict(es.indices.get_mapping(index=index)[index]["mappings"].get("_meta") or {})
     meta["embed_model"] = model_id
     es.indices.put_mapping(index=index, meta=meta)
+
+
+def index_meta(es: Elasticsearch, index: str) -> dict[str, Any]:
+    """The index's whole `_meta` object (empty when it has none)."""
+    meta = es.indices.get_mapping(index=index)[index]["mappings"].get("_meta") or {}
+    return dict(meta)
+
+
+def update_index_meta(es: Elasticsearch, index: str, **values: Any) -> dict[str, Any]:
+    """Merge `values` into the index's `_meta` (a `None` value removes that key); return it.
+
+    `_meta` is replaced as a whole by Elasticsearch, so the other keys (`embed_model`, the switch
+    record of `rag.index.rebuild`) are read and written back with it.
+    """
+    meta = index_meta(es, index)
+    for key, value in values.items():
+        if value is None:
+            meta.pop(key, None)
+        else:
+            meta[key] = value
+    es.indices.put_mapping(index=index, meta=meta)
+    return meta
+
+
+@dataclass(frozen=True)
+class MergeResult:
+    deleted_docs_before: int
+    """Documents marked deleted but still counted in the index (they distort BM25's IDF, s7-4)."""
+    deleted_docs_after: int
+    segments_after: int
+
+
+def _docs_and_segments(es: Elasticsearch, index: str) -> tuple[int, int]:
+    stats = es.indices.stats(index=index, metric="docs,segments")["_all"]["primaries"]
+    return int(stats["docs"]["deleted"]), int(stats["segments"]["count"])
+
+
+def force_merge_index(
+    es: Elasticsearch, index: str, *, max_num_segments: int = 1, timeout_s: float = 3600.0
+) -> MergeResult:
+    """Merge the index down to `max_num_segments`, which drops deleted documents (design s7-5).
+
+    Only for an index that nothing writes to any more: merging a live index makes segments larger
+    than 5 GB that later merges leave alone (s7-4). Blocks until the merge is done.
+    """
+    deleted_before, _ = _docs_and_segments(es, index)
+    es.options(request_timeout=timeout_s).indices.forcemerge(
+        index=index, max_num_segments=max_num_segments, flush=True
+    )
+    deleted_after, segments = _docs_and_segments(es, index)
+    return MergeResult(deleted_before, deleted_after, segments)

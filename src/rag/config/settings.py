@@ -302,6 +302,12 @@ class ServiceSettings(BaseSettings):
     ingest_lock_timeout_s: float = Field(default=5.0, ge=0)
     ingest_report_dir: str = "data/reports"
 
+    # New index version (spec P2-01, design s7-5). The force merge of the finished new index may
+    # take minutes on a full corpus; `rebuild_min_chunk_ratio` is the floor of the built-in
+    # sanity gate (the new index must hold at least this share of the old index's chunks).
+    rebuild_force_merge_timeout_s: float = Field(default=3600.0, gt=0)
+    rebuild_min_chunk_ratio: float = Field(default=0.5, ge=0, le=1)
+
     # Query path (spec P0-07, design s16-1, s16-2). `search_deadline_ms`: total time of one
     # search when the caller passes no deadline_ms. While waiting for the question vector from
     # the gateway the retriever keeps min(`search_es_reserve_ms`, `search_es_reserve_ratio` x
