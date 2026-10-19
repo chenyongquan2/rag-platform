@@ -184,3 +184,11 @@ def test_answering_pages_by_exact_text() -> None:
         )
         == []
     )
+
+
+def test_non_english_share() -> None:
+    from rag.eval.synthetic.filters import non_english_share
+
+    assert non_english_share("Use gr.Interface to build a demo.") == 0.0
+    assert non_english_share("使用 Gradio 和 LLM 代理构建 `gr.ChatInterface` 应用") > 0.2
+    assert non_english_share("") == 0.0

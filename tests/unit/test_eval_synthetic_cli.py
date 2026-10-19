@@ -59,6 +59,8 @@ def _pages() -> list[Page]:
     for i in range(60):
         repo = "huggingface/transformers" if i % 3 else "gradio-app/gradio"
         text = f"Page number {i}.\n" + "".join(SENTENCE.format(w=f"w{i}_{k}") for k in range(8))
+        if i == 5:  # a Chinese page whose language metadata says English
+            text += "这个页面是中文的介绍缓存目录在哪里 " * 20
         pages.append(
             Page(
                 doc_id=f"hf_docs:{repo}/blob/main/p{i}.md",
@@ -169,7 +171,11 @@ def test_cli_end_to_end_with_fakes(env: dict[str, Any], capsys: pytest.CaptureFi
     dev = load_question_set(out / "synthetic_dev.jsonl", kb="hf_docs")
     holdout = load_question_set(out / "synthetic_holdout.jsonl", kb="hf_docs")
     rejected = sum(1 for g in gens if re.search(r"library w\d*7a ", g["question"]))
-    assert len(dev.questions) + len(holdout.questions) == 50 - rejected
+    # the Chinese page's question is dropped after the split and listed in the manifest
+    chinese = [f"synthetic:{g['span_id']}" for g in gens if "w5a " in g["question"]]
+    meta = json.loads((out / "synthetic_manifest.json").read_text(encoding="utf-8"))
+    assert meta["dropped_after_split"]["non_english_span"] == chinese
+    assert len(dev.questions) + len(holdout.questions) == 50 - rejected - len(chinese)
     assert {q.qid for q in dev.questions}.isdisjoint({q.qid for q in holdout.questions})
     q = dev.questions[0]
     assert q.relevant_pages[0].startswith("hf_docs:") and q.answer

@@ -83,6 +83,16 @@ def redact_secrets(text: str) -> tuple[str, int]:
     return text, count
 
 
+_CJK = re.compile("[぀-ヿ㐀-䶿一-鿿가-힯]")  # kana, CJK, hangul
+_LETTER = re.compile(r"[^\W\d_]")
+
+
+def non_english_share(text: str) -> float:
+    """Share of CJK characters among the letters of `text` (0 for English)."""
+    letters = _LETTER.findall(text)
+    return sum(bool(_CJK.match(c)) for c in letters) / len(letters) if letters else 0.0
+
+
 def rejection_reasons(
     *,
     question: str | None,
