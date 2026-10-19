@@ -1,6 +1,6 @@
 # P2-02 Rerank threshold sweep and full-read timing
 
-Status: in review
+Status: done
 Phase: P2
 Depends on: P0-08 (rerank scores, threshold), P0-10 (Wilson interval), P0-13 / P0-13b (threshold 0.3, dev-set confirmation), P1-05 (dev and holdout sets)
 Design sections: s10-2, s14-4, s15-3, s19 (P2 row)
@@ -40,7 +40,7 @@ Each line maps to one test in `tests/unit/test_threshold_sweep.py` (S) or `tests
 - [x] AC8 `sweep` prints the table, the recommendation and the rule it used; the check and no-answer sets are reported but never change the recommendation — `C::test_sweep_prints_table_and_recommendation`, `C::test_check_and_no_answer_sets_do_not_move_the_recommendation`; with `--baseline T` it adds a paired table (questions newly refused or accepted against T, exact McNemar) — `S::test_paired_change_against_a_baseline_threshold`, `C::test_sweep_baseline_adds_a_paired_table`
 - [x] AC9 Bad arguments exit with code 2 and one line on stderr — `C::test_sweep_usage_errors_exit_2`
 - [x] AC10 The 20 extra no-answer questions load without labels, are typed near_miss (12) or off_topic (8), repeat nothing of the original 10, and each records what was checked against the corpus — `tests/unit/test_threshold_data.py::test_no_answer_extra_set_is_new_unlabelled_and_typed`
-- [x] AC11 (by running) dev, public-65, 10 + 20 no-answer sets scored; holdout scored once at the chosen threshold; read timing measured; report section 「P2-02 阈值和读取耗时」 in `docs/reports/P2-report.md`.
+- [x] AC11 (by running) dev, public-65, 10 + 20 no-answer sets scored; holdout scored once in P2, at the chosen threshold (it was also scored in P0-13b for retrieval hit rates; nothing was chosen from it); read timing measured; report section 「P2-02 阈值和读取耗时」 in `docs/reports/P2-report.md`.
 
 ## Out of scope
 Changing the reranker or the fusion settings (P0-13b); the answer-step refusal (`found=false`, P1-02); a gateway
@@ -49,7 +49,7 @@ P2 row (alias switch, five change types, ablations: P2-01, P2-03, P2-04).
 
 ## Handoff (filled at the end)
 - Files: `src/rag/eval/threshold/{__init__,__main__,records,sweep,cli}.py`, `tests/unit/test_threshold_{sweep,cli,data}.py` (20 tests), `evals/datasets/hf_docs/no_answer_extra.jsonl`, `scripts/p2_02/{collect_scores.sh,read_timing.py}`, `docs/reports/P2-report.md` (new, section 1), `docs/decisions.md`, `docs/plan.md` (status). Raw score files, sweep tables and the read timing record are in git-ignored `data/reports/p2-02/` of this worktree.
-- Results: dev false refusal 0/99 up to 0.40, 4/99 at 0.85, 7/99 at 0.90 (p 0.016 against 0.3); public 65 zero up to 0.85; 30 no-answer questions wrong-accepted 14/30 at 0.3, 9/30 at 0.5, 7/30 at 0.85. Rules give 0.85 (5% observed), 0.70 (2%), 0.40 (Wilson upper 5%). Holdout once at 0.3: 1/100. Full read 0.12 s + clean 32 s (about 33 s, 3 repeats), chunking 125 s more: no file-level skip needed.
+- Results: dev false refusal 0/99 up to 0.40, 4/99 at 0.85, 7/99 at 0.90 (p 0.016 against 0.3); public 65 zero up to 0.85; 30 no-answer questions wrong-accepted 14/30 at 0.3, 9/30 at 0.5, 7/30 at 0.85. Rules give 0.85 (5% observed), 0.70 (2%), 0.40 (Wilson upper 5%). Holdout at 0.3, first time in P2 (after 0.3 was kept; also scored in P0-13b for retrieval hit rates; nothing chosen from it): 1/100. Full read 0.12 s + clean 32 s (about 33 s, 3 repeats), chunking 125 s more: no file-level skip needed.
 - Decisions: threshold stays 0.3 (no reliable gain below 0.75, and the reliable gains cost 2-4% dev false refusals); 20 extra no-answer questions hand-written by the author after grepping the corpus (not reviewed by the owner); recorded in `docs/decisions.md`. `docs/progress.md` not edited (the merge step adds its row).
 - Open issues: 30 no-answer questions cannot separate 0.3 from 0.5 (p 0.062); the refusal rate of the answer step on the 17 near-miss questions is not measured (needs the chat model, under 0.1 CNY); the 20 new questions are unreviewed and skew hard; read timing is for one parquet file only (re-measure with file-tree sources in P4); a few dev synthetic questions score low (top 0.40 and 0.71) and were not inspected.
-- Review rounds:
+- Review rounds: 1 (APPROVE with six wording notes, all fixed: `found=false` as a hypothesis not a reason, holdout wording, first-pass timing 37 s, three false-premise no-answer questions tagged, lowest public top score 0.8825, CPU spelled out).

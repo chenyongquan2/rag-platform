@@ -21,3 +21,11 @@ def test_no_answer_extra_set_is_new_unlabelled_and_typed() -> None:
     assert not {q.question for q in original.questions} & {q.question for q in extra.questions}
     # Each question says what was checked against the corpus before it was labelled no-answer.
     assert all(q.meta.get("checked_absent") for q in extra.questions)
+
+
+def test_false_premise_questions_are_tagged() -> None:
+    """Three questions turned out (in review) to rest on a premise the docs touch: they are not
+    clean near-miss questions and must stay marked so the report can say so."""
+    extra = load_question_set(EXTRA, kb="hf_docs")
+    tagged = sorted(q.qid for q in extra.questions if q.meta.get("false_premise"))
+    assert tagged == [f"hf_docs_no_answer:{n}" for n in (12, 13, 30)]
