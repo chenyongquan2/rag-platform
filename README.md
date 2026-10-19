@@ -223,13 +223,14 @@ authentication until P8, so keep `SERVICE_HOST` on 127.0.0.1.
 
 ## Answering with the ask_docs graph
 
-`ask_docs` is our own LangGraph `StateGraph` (`rag.agent`): `route` (rules only, no model) ->
-`rewrite` -> `retrieve` -> `judge` -> `answer` (the `rag.answer` layer) -> `verify`. Rewrite,
-clarify and the sufficiency judge are stubs in `rag.agent.hooks` (`AgentHooks`) that P3-02 and
-P3-03 fill in; the edges, the loop guards and the state already exist. It is exposed as the MCP
-tool `ask_docs(kb, question, session_id, deadline_ms)` and `POST /v1/ask_docs` (JSON body
-`{kb, question, session_id?, deadline_ms?}`), non-streaming, with the caller, ACL, error
-categories, spans and business record line of `search_docs`.
+`ask_docs` is our own LangGraph `StateGraph` (`rag.agent`): `route` (rules first, the small model
+only for what rules cannot decide) -> `clarify` (ask the caller back) -> `rewrite` -> `retrieve`
+-> `judge` -> `answer` (the `rag.answer` layer) -> `verify`. What each step does is a function
+in `AgentHooks` (`rag.agent.hooks`); the sufficiency judge is still a stub that P3-03 fills in,
+the edges, the loop guards and the state exist. It is exposed as the MCP tool
+`ask_docs(kb, question, session_id, deadline_ms, resume_token, answer)` and `POST /v1/ask_docs`
+(JSON body `{kb, question, session_id?, deadline_ms?, resume_token?, answer?}`), non-streaming,
+with the caller, ACL, error categories, spans and business record line of `search_docs`.
 
 ```python
 runtime = AgentRuntime.from_settings(settings)  # one per process: it owns the session locks
@@ -243,6 +244,7 @@ result = await ask_docs(
 )
 result.answer, result.sentences, result.sources, result.rounds, result.timings_ms
 result.status, result.coverage_unconfirmed, result.stop_reason, result.cache_allowed
+result.standalone_question, result.search_queries, result.fallbacks  # what the rewrite did
 ```
 
 - One run is one checkpoint thread `"{session_id}:{run_id}"` (SQLite file `CHECKPOINT_URL`); the
@@ -263,6 +265,39 @@ result.status, result.coverage_unconfirmed, result.stop_reason, result.cache_all
   stopped at a limit says so: `coverage_unconfirmed`, `stop_reason`, `notice`, and the
   categories `agent_deadline` / `token_cap_reached`.
 
+### Rewrite, route and clarify (P3-02)
+
+Rules run first and make no model call (`rag.agent.rules`): whitespace and Unicode are
+normalised, identifiers, code spans, versions, flags, paths and quoted messages are found, and
+the question is classified as clear, vague or undecided and as one lookup or possibly two. The
+small model (`AGENT_REWRITE_PROFILE`, default `cheap`, structured output by function calling)
+is called only where it can change something, and only if the KB's `agent` section allows it:
+
+- `rewrite` (`agent.rewrite`): a follow-up becomes a standalone question using the session's
+  history (this goes to the answer step); the search query is written as a declarative
+  statement (`agent.declarative`; this goes to retrieval); a two-hop question becomes at most
+  `agent.max_sub_questions` queries, one search each. A statement-form question with no history
+  is only normalised: no model call. Every identifier of the question must survive in the
+  queries and the language must stay the question's, else the original question is searched.
+  A model failure, timeout, unparsable answer or refused call (token cap) does the same. The
+  request is never failed: it is answered, `degraded` is set and `fallbacks` names the step and
+  reason (`rewrite:timeout`, `rewrite:identifiers_lost`, `route:parse_failed`, ...).
+- `route` (`agent.route_model`): when the rules call a question undecided (it points at "this
+  model" with some topic words) or possibly two-hop, the small model decides; if it fails, the
+  rules' view stands.
+- `clarify` (`agent.clarify`): a question that names nothing to search ("How do I fix this
+  error?") stops the run with LangGraph `interrupt`. `ask_docs` returns `status:
+  need_clarification`, `answer` is the question to ask the user, `resume_token` is an opaque
+  token. The session lock is released at that point and the history is not written.
+  Call again with the same `kb` and `session_id`, `resume_token` and `answer` (the user's
+  reply; `question` is required as always but not used) to continue the same checkpoint thread:
+  the reply is added to the question and the run goes on (at most one clarification per
+  request; a vague reply is searched as it is). A token works once, only for the caller, KB and
+  session it was issued for, only while the run waits, for `AGENT_RESUME_TTL_S`; anything else
+  is `invalid_resume_token` (HTTP 400), the same answer for every reason. When the run
+  completes, the session history gets the question, the question asked back, the reply and the
+  answer as two turns. The request's token cap counts both calls.
+
 | Setting (env var) | Default | Meaning |
 |---|---|---|
 | `AGENT_DEADLINE_MS` | 30000 | Total time of one request; at most `SEARCH_MAX_DEADLINE_MS` |
@@ -271,10 +306,20 @@ result.status, result.coverage_unconfirmed, result.stop_reason, result.cache_all
 | `AGENT_TOKEN_CAP` | 20000 | Model tokens of one request |
 | `AGENT_ANSWER_RESERVE_TOKENS` | 6000 | Tokens calls before the answer must leave (below the cap) |
 | `AGENT_HISTORY_TURNS` | 6 | Past turns of a session given to the graph; 0 = none |
+| `AGENT_REWRITE_PROFILE` | `cheap` | Chat profile of the small model (route and rewrite) |
+| `AGENT_REWRITE_TIMEOUT_MS` | 6000 | Longest one such call may take (never into the answer's time) |
+| `AGENT_REWRITE_HISTORY_TURNS` | 3 | Earlier turns shown to the small model; 0 = none |
+| `AGENT_REWRITE_HISTORY_CHARS` | 400 | Characters of each question or answer shown to it |
+| `AGENT_RESUME_TTL_S` | 1800 | How long a question asked back waits for its answer |
 | `CHECKPOINT_URL` | `sqlite://data/checkpoints/langgraph.db` | Checkpoints (`memory://` for tests) |
-| `SESSION_STORE_URL` | `sqlite://data/sessions/sessions.db` | Session history (`memory://` for tests) |
+| `SESSION_STORE_URL` | `sqlite://data/sessions/sessions.db` | Session history and resume tokens (`memory://` for tests) |
 | `SESSION_LOCK_URL` | `memory://` | Session locks (`file://data/locks` for several processes) |
 | KB config `agent.max_rounds` | 3 | Retrieval rounds of one request at most |
+| KB config `agent.rewrite` | false (`hf_docs`: true) | The rewrite step may call the small model |
+| KB config `agent.declarative` | true | Write the search query as a statement |
+| KB config `agent.max_sub_questions` | 3 | Most searches of a split question (1: never split) |
+| KB config `agent.clarify` | false (`hf_docs`: true) | Ask the caller back when the question is too vague |
+| KB config `agent.route_model` | false (`hf_docs`: true) | The route may ask the small model about what rules leave open |
 
 ## Retrieval evaluation
 
