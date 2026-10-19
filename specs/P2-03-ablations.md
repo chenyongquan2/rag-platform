@@ -1,6 +1,6 @@
 # P2-03 Ablation experiments on the dev set
 
-Status: in review
+Status: done
 Phase: P2
 Depends on: P2-01 (rebuild flow), P2-02 (threshold 0.3), P0-13b (`compare`), P1-05 (dev and holdout sets)
 Design sections: s14-4, s7-3, s7-5, s9-3, s10-1, s19 (P2 row)
@@ -40,6 +40,6 @@ Analyzer, fusion weights, `rerank_n`, threshold; `bbq_disk` (Enterprise); the an
 
 ## Handoff (filled at the end)
 - Files: config, mapping, rerank and pipeline code, `ablation.py`, `cli.py` (`ablate`), four unit-test files (7 new tests), `scripts/p2_03/`, `docs/reports/P2-report.md` (section 2), `docs/decisions.md`, `docs/plan.md`. Raw records are in git-ignored `data/reports/p2-03/`.
-- Decisions: no default changed (no reliable dev win; with 24 tests on Hit@1 and MRR@8 only rerank-off Hit@1, p 0.0005, clearly holds; vector-only and BM25-only are direction only and must not be cited for dropping BM25). Chunk size 200 chosen by the reasons above; recorded in `docs/decisions.md`.
-- Open issues: 99 questions cannot show differences under 6 points; the first chunk-200 rebuild was killed mid-embedding, most likely by my own cleanup command (time fits; no direct record), see report 2.12; all rebuilds ran with `--no-gate`, a real rebuild adds about 7 minutes of dev evaluation; chunk 200 and the quantization variants were not run on public 65 or holdout; one other chunk size only; `progress.md` row is added by the merge step.
-- Review rounds: 1 (CHANGES, ten notes: multiple-test wording, rebuild-kill facts, `pipefail`, gate and throughput disclosure, table columns, docstring AC numbers, `ChunkReranker` note, spec length, 512-token sentence). Fixed; waiting for round 2.
+- Decisions: no default changed (no reliable dev win; with 32 tests on Hit@1 and MRR@8 (24 dev, 8 public 65) only rerank-off Hit@1, p 0.0005, and vector-only no-rerank nDCG@8, p 0.0003 (secondary metric), pass the about 0.0016 threshold; vector-only and BM25-only are direction only and must not be cited for dropping BM25). Chunk size 200 chosen by the reasons above; recorded in `docs/decisions.md`.
+- Open issues: 99 questions cannot show differences under 6 points; the first chunk-200 rebuild was killed mid-embedding by my own psutil kill (command lines containing `p203c200_`, about 10:14:30 to 10:14:46 UTC) followed by `drop_variant.py p203c200_` (ES deletion 10:15:09); I meant to stop the slow rebuild and refill the cache faster; established from the transcript and the ES log, see report 2.12; all rebuilds ran with `--no-gate`, the current `rebuild` gate only compares chunk counts (seconds), so a setting-only rebuild is about 5 minutes; an evaluation gate (design s7-5) does not exist yet and would add about 7 minutes, listed in `docs/plan.md` as a P2 follow-up; chunk 200 and the quantization variants were not run on public 65 or holdout; one other chunk size only; `progress.md` row is added by the merge step.
+- Review rounds: 2. Round 1 CHANGES (ten notes: multiple-test wording, rebuild-kill facts, `pipefail`, gate and throughput disclosure, table columns, docstring AC numbers, `ChunkReranker` note, spec length, 512-token sentence); round 2 CHANGES (three wording fixes: default gate is a chunk-count floor, kill cause stated as fact, consistent multiple-test count); both fixed after each round; merged.
