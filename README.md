@@ -221,6 +221,60 @@ For the HTTP server, register `http://127.0.0.1:28080/mcp` as a streamable-http 
 (`claude mcp add --transport http rag-docs http://127.0.0.1:28080/mcp`). It has no
 authentication until P8, so keep `SERVICE_HOST` on 127.0.0.1.
 
+## Answering with the ask_docs graph
+
+`ask_docs` is our own LangGraph `StateGraph` (`rag.agent`): `route` (rules only, no model) ->
+`rewrite` -> `retrieve` -> `judge` -> `answer` (the `rag.answer` layer) -> `verify`. Rewrite,
+clarify and the sufficiency judge are stubs in `rag.agent.hooks` (`AgentHooks`) that P3-02 and
+P3-03 fill in; the edges, the loop guards and the state already exist. It is exposed as the MCP
+tool `ask_docs(kb, question, session_id, deadline_ms)` and `POST /v1/ask_docs` (JSON body
+`{kb, question, session_id?, deadline_ms?}`), non-streaming, with the caller, ACL, error
+categories, spans and business record line of `search_docs`.
+
+```python
+runtime = AgentRuntime.from_settings(settings)  # one per process: it owns the session locks
+result = await ask_docs(
+    "How do I push a model?",
+    cfg=cfg,
+    retriever=pipeline,
+    settings=settings,
+    runtime=runtime,
+    session_id="s1",
+)
+result.answer, result.sentences, result.sources, result.rounds, result.timings_ms
+result.status, result.coverage_unconfirmed, result.stop_reason, result.cache_allowed
+```
+
+- One request is one checkpoint thread `"{session_id}:{request_id}"` (SQLite file `CHECKPOINT_URL`).
+  The retrieval fields of the state are appended per round and cleared by `route`, so a request
+  never sees the chunks of another one in the same session.
+- The turns of a session (question and answer text only) are stored per session id
+  (`SESSION_STORE_URL`, last `AGENT_HISTORY_TURNS` kept) and passed in as input. A call that
+  carried history has `cache_allowed=false`: the exact cache of P5 must not read or write it.
+- Requests with the same `session_id` run one after another (`SESSION_LOCK_URL`: `memory://`
+  inside this process, `file://<dir>` also across processes); different sessions run in
+  parallel. The wait counts against the deadline (`agent_deadline` error when it runs out).
+- Limits of one request: total deadline `AGENT_DEADLINE_MS` (a caller's `deadline_ms` replaces
+  it; no further round starts when less than `AGENT_ANSWER_RESERVE_MS` is left, and a run
+  cut off mid-node returns the chunks found so far), `AGENT_RECURSION_LIMIT` graph steps,
+  `AGENT_TOKEN_CAP` model tokens (gateway usage, else an estimate; calls before the answer
+  keep `AGENT_ANSWER_RESERVE_TOKENS` free for it), and the KB's `agent.max_rounds`. A run that
+  stopped at a limit says so: `coverage_unconfirmed`, `stop_reason`, `notice`, and the
+  categories `agent_deadline` / `token_cap_reached`.
+
+| Setting (env var) | Default | Meaning |
+|---|---|---|
+| `AGENT_DEADLINE_MS` | 30000 | Total time of one request; at most `SEARCH_MAX_DEADLINE_MS` |
+| `AGENT_ANSWER_RESERVE_MS` | 12000 | Time kept for writing the answer (below the deadline) |
+| `AGENT_RECURSION_LIMIT` | 25 | LangGraph steps of one run (6 for one round, 3 more per further round) |
+| `AGENT_TOKEN_CAP` | 20000 | Model tokens of one request |
+| `AGENT_ANSWER_RESERVE_TOKENS` | 6000 | Tokens calls before the answer must leave (below the cap) |
+| `AGENT_HISTORY_TURNS` | 6 | Past turns of a session given to the graph; 0 = none |
+| `CHECKPOINT_URL` | `sqlite://data/checkpoints/langgraph.db` | Checkpoints (`memory://` for tests) |
+| `SESSION_STORE_URL` | `sqlite://data/sessions/sessions.db` | Session history (`memory://` for tests) |
+| `SESSION_LOCK_URL` | `memory://` | Session locks (`file://data/locks` for several processes) |
+| KB config `agent.max_rounds` | 3 | Retrieval rounds of one request at most |
+
 ## Retrieval evaluation
 
 Any retriever with `retrieve(question, kb, top_k) -> RetrievalResult` can be evaluated
