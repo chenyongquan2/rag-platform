@@ -212,7 +212,10 @@ class AgentRuntime:
             running = asyncio.timeout(ctx.deadline.remaining_s())
             try:
                 async with running:
-                    final = await graph.ainvoke(inputs, config, context=ctx)
+                    # "sync": each step's checkpoint is written before the next step starts, so
+                    # a run cut off by the deadline leaves every finished step (and its chunks)
+                    # in the checkpoint that `_salvage` reads. LangGraph's default is "async".
+                    final = await graph.ainvoke(inputs, config, context=ctx, durability="sync")
             except TimeoutError:
                 if not running.expired():
                     raise
