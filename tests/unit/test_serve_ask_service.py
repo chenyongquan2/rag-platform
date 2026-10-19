@@ -49,6 +49,7 @@ def _service(
     *,
     backends: dict[str, ScriptedSearchBackend] | None = None,
     model: Any = None,
+    agent: Any = None,
     load: bool = True,
     **settings: Any,
 ) -> SearchService:
@@ -59,6 +60,7 @@ def _service(
         configs=configs,
         builder=FakePipelineBuilder(backends),
         answer_model=model or StreamingFakeChatModel(default_response=REPLY),
+        agent=agent,
     )
     if load:
         service.load()
@@ -142,7 +144,7 @@ def test_ask_docs_errors_map_to_categories(caplog: pytest.LogCaptureFixture) -> 
     service = _service()
 
     async def main() -> float:
-        async with service.agent.locks.hold("s1"):
+        async with service.agent.locks.hold(service.agent.session_key("local", "hf_docs", "s1")):
             began = time.monotonic()
             with pytest.raises(ServiceError) as info:
                 await service.ask_docs(
@@ -210,7 +212,7 @@ def test_ask_docs_spans_and_business_record(tmp_path: Path) -> None:
     assert extra["session_id"] == "s-1" and extra["question"] == "How do I push a model?"
     assert (extra["status"], extra["rounds"], extra["used_history"]) == ("answered", 1, False)
     assert extra["tokens_used"] > 0 and extra["coverage_unconfirmed"] is False
-    assert extra["thread_id"] == "s-1:req-a"
+    assert extra["thread_id"] == first.thread_id and first.thread_id.startswith("s-1:")
     assert {"route", "retrieve", "answer", "verify", "request"} <= set(ok_a["timings_ms"])
     assert ok_b["extra"]["used_history"] is True
     assert (failed["tool"], failed["flags"], failed["request_id"]) == (
@@ -218,3 +220,16 @@ def test_ask_docs_spans_and_business_record(tmp_path: Path) -> None:
         ["kb_not_found"],
         "req-c",
     )
+
+
+def test_history_is_kept_per_caller_and_knowledge_base() -> None:
+    # Two services share one runtime (as two callers of one process would); the callers use
+    # the same session id.
+    from rag.agent import AgentRuntime
+
+    runtime = AgentRuntime.from_settings(agent_settings())
+    alice = _service(agent=runtime, service_caller="alice")
+    bob = _service(agent=runtime, service_caller="bob")
+    assert _ask(alice, session_id="s1").used_history is False
+    assert _ask(alice, session_id="s1").used_history is True
+    assert _ask(bob, session_id="s1").used_history is False

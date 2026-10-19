@@ -54,6 +54,8 @@ class AgentContext:
     thread_id: str
     acl_groups: tuple[str, ...] = ("public",)
     filters: Mapping[str, Any] | None = None
+    used_history: bool = False
+    """Earlier turns of the session were loaded into this run (set by the runtime)."""
 
     @property
     def reserve_ms(self) -> int:

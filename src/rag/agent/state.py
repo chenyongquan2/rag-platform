@@ -5,14 +5,15 @@ No `from __future__ import annotations` here: LangGraph reads the `Annotated[...
 
 Rules that keep one request from seeing another's retrieved chunks:
 
-- `thread_id(session_id, request_id)` is `"{session_id}:{request_id}"`: every request is its own
-  checkpoint thread. The session id has no colon, so two different pairs never give one id.
+- `thread_id(session_id, run_id)` is `"{session_id}:{run_id}"` with a run id made by the server:
+  every run is its own checkpoint thread, whatever request id the caller sent. The session id
+  has no colon, so two different pairs never give one id.
 - Retrieval fields use a reducer that appends (`accumulate`): the answer can use the results of
   every round of this request. The `route` node starts every run by overwriting them with empty
   values (`Overwrite`), so a run on a thread that already has state (a resumed thread, P3-02,
-  or a caller that reuses a request id) accumulates only its own results.
+  or a caller that passes a run id twice) accumulates only its own results.
 - The conversation does not live in the state's checkpoint: the turns of the session are stored
-  per session id (`rag.agent.session`) and given to the graph as `history` input.
+  per session key (`rag.agent.session`) and given to the graph as `history` input.
 """
 
 import re
@@ -39,16 +40,17 @@ NO_SESSION = "-"
 
 
 def valid_session_id(value: object) -> bool:
-    return isinstance(value, str) and SESSION_ID.match(value) is not None
+    """`-` is the no-session name in a thread id, so a real session may not use it."""
+    return isinstance(value, str) and value != NO_SESSION and SESSION_ID.match(value) is not None
 
 
-def thread_id(session_id: str | None, request_id: str) -> str:
-    """The checkpoint thread of one request; `-` stands for a call without a session."""
+def thread_id(session_id: str | None, run_id: str) -> str:
+    """The checkpoint thread of one run; `-` stands for a call without a session."""
     if session_id is None:
-        return f"{NO_SESSION}:{request_id}"
+        return f"{NO_SESSION}:{run_id}"
     if not valid_session_id(session_id):
         raise ValueError("session_id must be 1 to 64 letters, digits, dot, dash or underscore")
-    return f"{session_id}:{request_id}"
+    return f"{session_id}:{run_id}"
 
 
 class RetrievalRound(BaseModel):

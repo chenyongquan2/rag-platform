@@ -81,7 +81,9 @@ def test_ask_docs_happy_path() -> None:
         "hf_docs:p2.md#0",
     ]
     assert _page_ids(result)[:2] == ["hf_docs:p1.md#0", "hf_docs:p2.md#0"]
-    assert (result.request_id, result.session_id, result.thread_id) == ("req-1", "s1", "s1:req-1")
+    assert (result.request_id, result.session_id) == ("req-1", "s1")
+    # The checkpoint thread is the session plus a server-made run id, not the caller's request id.
+    assert result.thread_id.startswith("s1:") and "req-1" not in result.thread_id
     assert (result.kb, result.rounds, result.resume_token) == (KB, 1, None)
     assert (result.index_version, result.data_generation) == ("kb_hf_docs_v1", 7)
     assert result.config_version == "cfg-fake"
@@ -108,6 +110,7 @@ def test_verify_propagates_retrieval_flags() -> None:
     result = _ask("How do I push a model?", backend, model)
     assert result.found and result.degraded and result.rerank_timeout
     assert result.error_categories == ["degraded", "rerank_timeout"]
+    assert result.cache_allowed is False  # an incomplete result is never cached (s12-1)
 
     # The answer layer's own failure travels too: no citation twice -> chunks only.
     model = StreamingFakeChatModel(responses=["no citation here", "still none"])
@@ -115,6 +118,7 @@ def test_verify_propagates_retrieval_flags() -> None:
     assert (result.status, result.found, result.answer) == (AnswerStatus.NOT_FOUND, False, "")
     assert result.answer_parse_failed and "answer_parse_failed" in result.error_categories
     assert result.citation_check.parse_attempts == 2
+    assert result.cache_allowed is False
     assert len(result.sources) == 3  # the caller still gets the retrieved chunks
 
 
@@ -187,7 +191,7 @@ def test_rounds_accumulate_and_route_clears_them() -> None:
     runtime = AgentRuntime.from_settings(settings, hooks=_stepwise_hooks())
     model = StreamingFakeChatModel(default_response="Answer [1].")
 
-    first = _ask("q-a", backend, model, runtime=runtime, session_id="s1", request_id="same")
+    first = _ask("q-a", backend, model, runtime=runtime, session_id="s1", run_id="same-run")
     # Both rounds' chunks are in the context of the one answer (reducer: append across rounds).
     assert first.rounds == 2
     assert sorted(_page_ids(first)) == ["hf_docs:p1.md#0", "hf_docs:p2.md#0", "hf_docs:p3.md#0"]
@@ -195,8 +199,8 @@ def test_rounds_accumulate_and_route_clears_them() -> None:
 
     # The same thread run again (a resumed or misused thread): route clears what the first run
     # left in the state, so only this run's chunks are in the answer.
-    second = _ask("q-c", backend, model, runtime=runtime, session_id="s1", request_id="same")
-    assert second.thread_id == first.thread_id
+    second = _ask("q-c", backend, model, runtime=runtime, session_id="s1", run_id="same-run")
+    assert second.thread_id == first.thread_id == "s1:same-run"
     assert second.rounds == 1
     assert _page_ids(second) == ["hf_docs:p9.md#0"]
     values = asyncio.run(runtime.state_values(second.thread_id))
@@ -213,16 +217,19 @@ def test_same_session_requests_do_not_share_chunks() -> None:
     r1 = _ask("q1", backend, model, runtime=runtime, session_id="s1", request_id="r1")
     r2 = _ask("q2", backend, model, runtime=runtime, session_id="s1", request_id="r2")
 
-    assert (r1.thread_id, r2.thread_id) == ("s1:r1", "s1:r2")
+    assert r1.thread_id != r2.thread_id and r2.thread_id.startswith("s1:")
     assert _page_ids(r1) == ["hf_docs:p1.md#0", "hf_docs:p2.md#0"]
     assert _page_ids(r2) == ["hf_docs:p5.md#0"]  # nothing of request 1
-    state_2 = asyncio.run(runtime.state_values("s1:r2"))
+    state_2 = asyncio.run(runtime.state_values(r2.thread_id))
     assert [c.chunk_id for r in state_2["rounds"] for c in r.chunks] == ["hf_docs:p5.md#0"]
     # What the second request does carry over is the text of the first turn, nothing else.
     (turn,) = state_2["history"]
     assert (turn.request_id, turn.question) == ("r1", "q1")
     assert "hf_docs" not in turn.model_dump_json()
-    assert [t.request_id for t in asyncio.run(runtime.store.load("s1"))] == ["r1", "r2"]
+    assert [
+        t.request_id
+        for t in asyncio.run(runtime.store.load(runtime.session_key("local", KB, "s1")))
+    ] == ["r1", "r2"]
 
 
 def test_call_with_history_is_not_cache_eligible() -> None:
@@ -236,10 +243,13 @@ def test_call_with_history_is_not_cache_eligible() -> None:
     other = _ask("q3", backend, model, runtime=runtime, session_id="s2", request_id="r3")
     assert (other.used_history, other.cache_allowed) == (False, True)
     nosession = _ask("q4", backend, model, runtime=runtime, request_id="r4")
-    assert (nosession.session_id, nosession.thread_id) == (None, "-:r4")
+    assert nosession.session_id is None and nosession.thread_id.startswith("-:")
     assert (nosession.used_history, nosession.cache_allowed) == (False, True)
     # No session, no stored turn.
-    assert [t.request_id for t in asyncio.run(runtime.store.load("s2"))] == ["r3"]
+    assert [
+        t.request_id
+        for t in asyncio.run(runtime.store.load(runtime.session_key("local", KB, "s2")))
+    ] == ["r3"]
 
 
 def test_extension_points_are_wired() -> None:
@@ -267,6 +277,7 @@ def test_extension_points_are_wired() -> None:
     result = _ask("q", backend, model, runtime=runtime, max_rounds=2)
     assert result.rounds == 2 and len(backend.calls) == 2
     assert (result.coverage_unconfirmed, result.stop_reason) == (True, "max_rounds")
+    assert result.cache_allowed is False
     assert result.found and result.error_categories == []  # a limit of the KB, not a failure
 
     # clarify: the route flags an unclear question, the run ends with the question to ask.
@@ -283,10 +294,11 @@ def test_extension_points_are_wired() -> None:
     )
     result = _ask("it?", backend, fresh_model, runtime=runtime, session_id="s1", request_id="r1")
     assert result.status == AnswerStatus.NEED_CLARIFICATION
-    assert (result.answer, result.resume_token) == ("Which library do you mean?", "s1:r1")
+    assert result.answer == "Which library do you mean?"
+    assert result.resume_token == result.thread_id and result.thread_id.startswith("s1:")
     assert backend.calls == [] and fresh_model.calls == []
     # A clarifying question is not an answer: it is not stored as a turn.
-    assert asyncio.run(runtime.store.load("s1")) == []
+    assert asyncio.run(runtime.store.load(runtime.session_key("local", KB, "s1"))) == []
 
 
 def test_sqlite_checkpointer_persists_state_per_thread(
@@ -298,12 +310,12 @@ def test_sqlite_checkpointer_persists_state_per_thread(
     )
     model = StreamingFakeChatModel(default_response="Answer [1].")
     with caplog.at_level(logging.WARNING):
-        _ask("q1", backend, model, settings=settings, session_id="s1", request_id="r1")
-        _ask("q2", backend, model, settings=settings, session_id="s1", request_id="r2")
+        r1 = _ask("q1", backend, model, settings=settings, session_id="s1", request_id="r1")
+        r2 = _ask("q2", backend, model, settings=settings, session_id="s1", request_id="r2")
         # A new runtime object (a restarted process) reads both threads from the file.
         runtime = AgentRuntime.from_settings(settings)
-        s1 = asyncio.run(runtime.state_values("s1:r1"))
-        s2 = asyncio.run(runtime.state_values("s1:r2"))
+        s1 = asyncio.run(runtime.state_values(r1.thread_id))
+        s2 = asyncio.run(runtime.state_values(r2.thread_id))
         missing = asyncio.run(runtime.state_values("s1:nope"))
     assert [c.chunk_id for r in s1["rounds"] for c in r.chunks] == ["hf_docs:p1.md#0"]
     assert [c.chunk_id for r in s2["rounds"] for c in r.chunks] == ["hf_docs:p2.md#0"]
@@ -335,3 +347,40 @@ def test_default_model_is_not_built_when_no_call_is_needed() -> None:
         )
         assert result.sources == [] and result.error_categories == []
     assert runtime._chat is None
+
+
+def test_route_hook_may_be_async() -> None:
+    # P3-02 puts a small model into the route decision: the node awaits an awaitable result.
+    async def decide(question: str, *, kb: str, history: Any) -> RouteDecision:
+        await asyncio.sleep(0)
+        return RouteDecision(retrieve=False, kb=kb, reason="async")
+
+    backend = ScriptedSearchBackend(KB)
+    runtime = AgentRuntime.from_settings(agent_settings(), hooks=AgentHooks(decide_route=decide))
+    result = _ask("How do I log in?", backend, FakeChatModel(responses=[]), runtime=runtime)
+    assert result.rounds == 0 and backend.calls == []
+
+
+def test_interrupt_in_a_hook_returns_need_clarification() -> None:
+    # The design's clarify node stops the graph with `interrupt` (P3-02). Such a run ends
+    # without a `result` in the state: the runtime must still answer need_clarification.
+    from langgraph.types import interrupt
+
+    def vague(question: str, *, kb: str, history: Any) -> RouteDecision:
+        return RouteDecision(retrieve=True, kb=kb, needs_clarification=True)
+
+    async def clarify(state: Any, ctx: Any) -> str | None:
+        return str(interrupt("Which library do you mean?"))
+
+    backend = ScriptedSearchBackend(KB)
+    model = FakeChatModel(responses=[])
+    runtime = AgentRuntime.from_settings(
+        agent_settings(), hooks=AgentHooks(decide_route=vague, clarify=clarify)
+    )
+    result = _ask("it?", backend, model, runtime=runtime, session_id="s1", request_id="r1")
+    assert result.status == AnswerStatus.NEED_CLARIFICATION
+    assert result.answer == "Which library do you mean?"
+    assert result.resume_token == result.thread_id and result.thread_id.startswith("s1:")
+    assert result.cache_allowed is False
+    assert backend.calls == [] and model.calls == []
+    assert asyncio.run(runtime.store.load(runtime.session_key("local", KB, "s1"))) == []

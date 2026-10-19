@@ -85,7 +85,6 @@ def compose_result(
     rounds: list[RetrievalRound] = list(values.get("rounds") or [])
     answer: Answer | None = values.get("answer")
     stop_reason = stop_reason or values.get("stop_reason")
-    history = values.get("history") or []
     question = values.get("question", "")
     last = rounds[-1] if rounds else None
     meta: dict[str, Any] = {
@@ -101,8 +100,7 @@ def compose_result(
         "rounds": values.get("round") or 0,
         "timings_ms": dict(timings_ms),
         "tokens_used": ctx.budget.spent,
-        "used_history": bool(history),
-        "cache_allowed": not history,
+        "used_history": ctx.used_history,
     }
 
     clarification = values.get("clarification")
@@ -112,6 +110,7 @@ def compose_result(
             status=AnswerStatus.NEED_CLARIFICATION,
             answer=clarification,
             resume_token=ctx.thread_id,
+            cache_allowed=False,
         )
 
     if ctx.budget.cap_hit and stop_reason is None:
@@ -139,10 +138,14 @@ def compose_result(
     notice = None
     if stop_reason is not None:
         notice = NOTICE[answer_language(question, ctx.cfg.answer.language)]
-    return AskResult(
+    result = AskResult(
         **meta,
         **fields,
         stop_reason=stop_reason,
         coverage_unconfirmed=stop_reason is not None,
         notice=notice,
     )
+    # The exact cache (P5) takes only complete answers to a question asked on its own: not one
+    # that used history, stopped at a limit or carries a flag (s12-1).
+    complete = not (ctx.used_history or result.coverage_unconfirmed or result.error_categories)
+    return result.model_copy(update={"cache_allowed": complete})

@@ -530,6 +530,7 @@ class SearchService:
                 retriever=pipeline,
                 session_id=session_id,
                 request_id=request_id,
+                caller_id=caller.caller_id,
                 acl_groups=caller.acl_groups,
                 # What is left of the call's time after waiting for the load.
                 deadline_ms=max(1, int(deadline.remaining_ms())),

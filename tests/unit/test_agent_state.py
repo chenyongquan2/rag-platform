@@ -15,6 +15,7 @@ def test_thread_id_format() -> None:
     # Without a session the thread is still one per request.
     assert thread_id(None, "req-9") == "-:req-9"
     # A colon in the session id would make "a:b" + "c" and "a" + "b:c" the same thread.
-    for bad in ("a:b", "", "a b", "x" * 65, "é"):
+    # "-" is the no-session namespace: a real session may not use it.
+    for bad in ("a:b", "", "a b", "x" * 65, "é", "-"):
         with pytest.raises(ValueError):
             thread_id(bad, "req-9")

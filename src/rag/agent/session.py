@@ -29,7 +29,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
-from rag.factories import LockProvider, LockTimeoutError
+from rag.factories import LockProvider, LockTimeoutError, init_sqlite_once
 
 # Longest question or answer text kept per stored turn: history is context for rewriting, not an
 # archive (the business record and the trace keep the details).
@@ -52,6 +52,10 @@ class HistoryTurn(BaseModel):
 
 
 class SessionStore(Protocol):
+    def prepare(self) -> None:
+        """Create the storage before the first request (idempotent)."""
+        ...
+
     async def load(self, session_id: str) -> list[HistoryTurn]:
         """The session's last turns, oldest first (empty for an unknown session)."""
         ...
@@ -77,6 +81,9 @@ class MemorySessionStore:
         self.keep_turns = keep_turns
         self._turns: dict[str, list[HistoryTurn]] = {}
 
+    def prepare(self) -> None:
+        pass
+
     async def load(self, session_id: str) -> list[HistoryTurn]:
         if self.keep_turns <= 0:
             return []
@@ -99,9 +106,8 @@ class SqliteSessionStore:
         self.path = path
         self.keep_turns = keep_turns
 
-    def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path, timeout=5.0)
+    @staticmethod
+    def _init_db(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS turns ("
@@ -110,7 +116,13 @@ class SqliteSessionStore:
             "at TEXT NOT NULL)"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS turns_session ON turns (session_id, id)")
-        return conn
+
+    def prepare(self) -> None:
+        init_sqlite_once(self.path, self._init_db)
+
+    def _connect(self) -> sqlite3.Connection:
+        self.prepare()  # once per file and process; concurrent first requests wait for it
+        return sqlite3.connect(self.path, timeout=5.0)
 
     def _load(self, session_id: str) -> list[HistoryTurn]:
         with closing(self._connect()) as conn:

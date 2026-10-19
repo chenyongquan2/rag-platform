@@ -7,11 +7,14 @@ the working directory unless absolute (`file://data/docstore/hf_docs.json`, `fil
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import re
+import sqlite3
 import threading
-from collections.abc import AsyncIterator, Iterator
+import time
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import (
     AbstractAsyncContextManager,
     AbstractContextManager,
@@ -277,7 +280,51 @@ def make_lock_provider(url: str) -> LockProvider:
 # ---- ask_docs: async checkpointer, session history, session locks (spec P3-01) --------------
 
 
+_SQLITE_INIT_LOCK = threading.Lock()
+_SQLITE_READY: set[str] = set()
+_SQLITE_INIT_ATTEMPTS = 40
+_SQLITE_INIT_WAIT_S = 0.25
+
+
+def init_sqlite_once(path: Path, init: Callable[[sqlite3.Connection], None]) -> None:
+    """Run `init(connection)` (journal mode, tables) once per database file in this process,
+    under one lock. Switching to WAL needs the database to itself and the busy timeout does not
+    wait for it: requests that all open a brand-new file at once failed with "database is
+    locked". Here the first caller does it, the others wait for the lock and find it done; a
+    second process doing the same is covered by retrying while the database is locked."""
+    key = str(path.resolve())
+    if key in _SQLITE_READY and path.exists():
+        return
+    with _SQLITE_INIT_LOCK:
+        if key in _SQLITE_READY and path.exists():
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for attempt in range(_SQLITE_INIT_ATTEMPTS):
+            conn = sqlite3.connect(path, timeout=5.0)
+            try:
+                init(conn)
+                conn.commit()
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) or attempt == _SQLITE_INIT_ATTEMPTS - 1:
+                    raise
+                time.sleep(_SQLITE_INIT_WAIT_S)
+            finally:
+                conn.close()
+        _SQLITE_READY.add(key)
+
+
+def _init_checkpoint_db(conn: sqlite3.Connection) -> None:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    SqliteSaver(conn).setup()  # WAL mode and the tables, the same schema as the async saver
+
+
 class CheckpointerSource(Protocol):
+    def prepare(self) -> None:
+        """Create the database before the first request (idempotent)."""
+        ...
+
     def open(self) -> AbstractAsyncContextManager[BaseCheckpointSaver]:
         """A saver for the `async with` block (the ask_docs graph is async)."""
         ...
@@ -292,17 +339,21 @@ class _SqliteCheckpointerSource:
         self.path = path
         self.serde = serde
 
+    def prepare(self) -> None:
+        init_sqlite_once(self.path, _init_checkpoint_db)
+
     @asynccontextmanager
     async def open(self) -> AsyncIterator[BaseCheckpointSaver]:
         import aiosqlite
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(self.prepare)  # a no-op after the first request
         async with aiosqlite.connect(self.path) as conn:
-            await conn.execute("PRAGMA journal_mode=WAL")
             await conn.execute("PRAGMA busy_timeout=5000")
             saver = AsyncSqliteSaver(conn, serde=self.serde)
-            await saver.setup()
+            # Tables and WAL mode exist (`prepare`); the saver's own setup would run its DDL
+            # and an ALTER TABLE again on every request.
+            saver.is_setup = True
             yield saver
 
 
@@ -311,6 +362,9 @@ class _MemoryCheckpointerSource:
         from langgraph.checkpoint.memory import InMemorySaver
 
         self._saver = InMemorySaver(serde=serde)
+
+    def prepare(self) -> None:
+        pass
 
     @asynccontextmanager
     async def open(self) -> AsyncIterator[BaseCheckpointSaver]:

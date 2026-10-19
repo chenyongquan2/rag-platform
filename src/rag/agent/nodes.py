@@ -15,6 +15,7 @@ model only has to say "insufficient" and the loop still ends at `max_rounds`, at
 """
 
 import asyncio
+import inspect
 import time
 from typing import Any
 
@@ -50,6 +51,8 @@ async def route_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[
         decision = ctx.hooks.decide_route(
             state["question"], kb=state["kb"], history=state.get("history") or []
         )
+        if inspect.isawaitable(decision):  # P3-02: the rules may fall back to a small model
+            decision = await decision
         span.set_attribute(attr.ROUTE_RETRIEVE, decision.retrieve)
         span.set_attribute(attr.ROUTE_REASON, decision.reason)
     return {

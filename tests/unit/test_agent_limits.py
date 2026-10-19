@@ -78,6 +78,7 @@ def test_deadline_answers_from_collected_chunks() -> None:
     assert (result.coverage_unconfirmed, result.stop_reason) == (True, "deadline")
     assert result.notice and "Not confirmed" in result.notice
     assert "agent_deadline" in result.error_categories
+    assert result.cache_allowed is False  # incomplete: never cached
     # The search was given the total time minus the time kept for the answer.
     assert backend.calls[0]["deadline_ms"] == 6000
 
@@ -111,6 +112,7 @@ def test_hard_deadline_returns_collected_chunks() -> None:
     assert (result.coverage_unconfirmed, result.stop_reason) == (True, "deadline")
     assert result.notice and "agent_deadline" in result.error_categories
     assert result.timings_ms["total"] >= 400
+    assert result.cache_allowed is False
 
 
 def test_waiting_for_the_lock_counts_against_the_deadline() -> None:
@@ -118,7 +120,9 @@ def test_waiting_for_the_lock_counts_against_the_deadline() -> None:
     runtime = AgentRuntime.from_settings(agent_settings())
 
     async def main() -> float:
-        async with runtime.locks.hold("s1"):  # another request of this session is running
+        async with runtime.locks.hold(
+            runtime.session_key("local", KB, "s1")
+        ):  # another request of this session is running
             began = time.monotonic()
             with pytest.raises(AgentDeadlineExceeded) as info:
                 await ask_docs(
@@ -263,3 +267,67 @@ def test_gateway_usage_is_counted_against_the_cap(
     )
     assert result.found and result.tokens_used == 1020  # the gateway's count, not an estimate
     assert not result.coverage_unconfirmed  # the cap was passed by the last call, not blocked
+
+
+def test_cut_run_reports_the_history_it_was_given() -> None:
+    backend = ScriptedSearchBackend(KB)
+    runtime = AgentRuntime.from_settings(agent_settings())
+    model = StreamingFakeChatModel(default_response="Answer [1].")
+
+    async def main() -> Any:
+        await ask_docs(
+            "q1", cfg=kb_config(KB), retriever=backend, settings=agent_settings(),
+            runtime=runtime, model=model, session_id="s1",
+        )  # fmt: skip
+        # Cut before the first checkpoint exists: the flags come from the loaded history.
+        return await ask_docs(
+            "q2", cfg=kb_config(KB), retriever=backend, settings=agent_settings(),
+            runtime=runtime, model=model, session_id="s1", deadline_ms=1,
+        )  # fmt: skip
+
+    result = asyncio.run(main())
+    assert result.stop_reason == "deadline"
+    assert (result.used_history, result.cache_allowed) == (True, False)
+
+
+def test_checkpoint_is_written_before_the_next_step_starts() -> None:
+    """A saver that is slow to write: with `durability="sync"` every step's checkpoint is
+    complete before the next step starts, so a run cut off later can be rebuilt from it."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    class SlowSaver(InMemorySaver):
+        completed = 0
+
+        async def aput(self, *args: Any, **kwargs: Any) -> Any:
+            await asyncio.sleep(0.1)
+            result = await super().aput(*args, **kwargs)
+            self.completed += 1
+            return result
+
+    class Source:
+        def __init__(self, saver: SlowSaver) -> None:
+            self.saver = saver
+
+        def open(self) -> Any:
+            from contextlib import asynccontextmanager
+
+            @asynccontextmanager
+            async def opened() -> Any:
+                yield self.saver
+
+            return opened()
+
+    saver = SlowSaver()
+    seen: list[int] = []
+    backend = ScriptedSearchBackend(KB, on_call=lambda q: seen.append(saver.completed))
+    runtime = AgentRuntime.from_settings(agent_settings())
+    runtime.checkpointers = Source(saver)  # type: ignore[assignment]
+    asyncio.run(
+        ask_docs(
+            "q", cfg=kb_config(KB), retriever=backend, settings=agent_settings(),
+            runtime=runtime, model=StreamingFakeChatModel(default_response="Answer [1]."),
+        )
+    )  # fmt: skip
+    # Before the search starts every earlier checkpoint is written (four for this graph; with
+    # LangGraph's default, durability "async", none is written yet at that point).
+    assert seen == [4]

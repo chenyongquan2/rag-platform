@@ -98,7 +98,7 @@ async def stub_judge(state: AgentState, ctx: AgentContext) -> Verdict:
 class AgentHooks:
     """The functions behind the nodes `route`, `clarify`, `rewrite` and `judge`."""
 
-    decide_route: Callable[..., RouteDecision] = decide_route
+    decide_route: Callable[..., RouteDecision | Awaitable[RouteDecision]] = decide_route
     clarify: Callable[[AgentState, AgentContext], Awaitable[str | None]] = stub_clarify
     rewrite: Callable[[AgentState, AgentContext], Awaitable[RewriteOutcome]] = stub_rewrite
     judge: Callable[[AgentState, AgentContext], Awaitable[str]] = stub_judge

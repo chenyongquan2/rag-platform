@@ -84,6 +84,7 @@ def test_mcp_ask_docs() -> None:
     assert set(tool.input_schema["required"]) == {"kb", "question"}
     assert "hf_docs" in tool.description and "secret_kb" not in tool.description
     assert "untrusted" in tool.description.lower()
+    assert "no answer was written" in tool.description  # not_found with a flag or a category
     assert {"answer", "sources", "status", "rounds", "coverage_unconfirmed"} <= set(
         tool.output_schema["properties"]
     )
@@ -115,7 +116,7 @@ def test_http_ask_docs() -> None:
         assert response.request_id == "abc-1" and r.headers["x-request-id"] == "abc-1"
         assert response.answer == "Use push_to_hub. Or upload_folder."
         assert [c.untrusted for c in response.sources] == [True, True, True]
-        assert response.thread_id == "s1:abc-1" and response.cache_allowed
+        assert response.thread_id.startswith("s1:") and response.cache_allowed
         assert "routes" not in r.json() and "chunks" not in r.json()
         r2 = client.post(
             "/v1/ask_docs",

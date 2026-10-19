@@ -6,7 +6,8 @@
 
 One call:
 
-1. takes the session's lock (requests of one session run one after another; the wait counts
+1. takes the lock of the session (the caller's, in that knowledge base: `session_key`;
+   requests of one session run one after another; the wait counts
    against the deadline: `AgentDeadlineExceeded` when it does not end in time) and loads the
    session's last turns;
 2. runs the graph on the checkpoint thread `session_id:request_id` with `recursion_limit` set,
@@ -16,6 +17,10 @@ One call:
    less than the answer's time is left) is inside the graph (`plan_next`);
 3. stores the turn (question and answer text) in the session's history.
 
+The checkpoint thread is `session_id:run_id`, with a `run_id` the server makes for each call:
+the caller's request id (an `X-Request-Id` header, which anyone can repeat) is only for
+correlation, so two runs never write to, or get rebuilt from, one thread.
+
 A call that carried history is flagged `cache_allowed=False` (the exact cache of P5 neither
 reads nor writes it, s12-1).
 """
@@ -23,6 +28,8 @@ reads nor writes it, s12-1).
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AsyncExitStack
@@ -89,16 +96,31 @@ class AgentRuntime:
     ) -> AgentRuntime:
         """Stores and locks from the connection strings in `settings` (design s16-7)."""
         serde = JsonPlusSerializer(allowed_msgpack_modules=list(MSGPACK_ALLOWED))
+        store = make_session_store(
+            settings.session_store_url, keep_turns=settings.agent_history_turns
+        )
+        checkpointers = make_checkpointer_source(settings.checkpoint_url, serde=serde)
+        # Create both databases now, once, before any request: concurrent first requests that
+        # each created them failed with "database is locked".
+        store.prepare()
+        checkpointers.prepare()
         return cls(
             settings,
-            store=make_session_store(
-                settings.session_store_url, keep_turns=settings.agent_history_turns
-            ),
+            store=store,
             locks=make_session_locks(settings.session_lock_url),
-            checkpointers=make_checkpointer_source(settings.checkpoint_url, serde=serde),
+            checkpointers=checkpointers,
             hooks=hooks,
             clock=clock,
         )
+
+    @staticmethod
+    def session_key(caller_id: str, kb: str, session_id: str) -> str:
+        """The key of a session's history and lock: the caller, the knowledge base and the
+        session id the caller chose. Two callers (or one caller in two knowledge bases) that
+        pick the same session id get separate histories and do not wait for each other. A hash,
+        so no part can run into another and the key is safe in a file name."""
+        raw = json.dumps([caller_id, kb, session_id], ensure_ascii=False)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
 
     def run_config(self, thread: str) -> dict[str, Any]:
         """The LangGraph run config: this request's thread and an explicit recursion limit."""
@@ -130,15 +152,19 @@ class AgentRuntime:
         retriever: AgentRetriever,
         session_id: str | None = None,
         request_id: str | None = None,
+        caller_id: str = "local",
         acl_groups: tuple[str, ...] = ("public",),
         deadline_ms: int | None = None,
         model: Any = None,
         filters: Mapping[str, Any] | None = None,
+        run_id: str | None = None,
     ) -> AskResult:
         """Run one request; see the module doc. `ValueError` for a session id that is not
-        1 to 64 letters, digits, dot, dash or underscore."""
+        1 to 64 letters, digits, dot, dash or underscore (and not `-`). `run_id` names the
+        checkpoint thread (default: a new one); only a caller that deliberately continues a
+        thread passes it (P3-02 resumes with the run id of its `resume_token`)."""
         request_id = request_id or new_request_id()
-        thread = thread_id(session_id, request_id)
+        thread = thread_id(session_id, run_id or new_request_id())
         settings = self.settings
         total_ms = deadline_ms if deadline_ms is not None else settings.agent_deadline_ms
         began = time.perf_counter()
@@ -160,9 +186,12 @@ class AgentRuntime:
         )
         async with AsyncExitStack() as stack:
             history: list[HistoryTurn] = []
+            key = ""
             if session_id is not None:
-                await self._hold_session(stack, session_id, deadline)
-                history = await self.store.load(session_id)
+                key = self.session_key(caller_id, cfg.kb, session_id)
+                await self._hold_session(stack, key, deadline)
+                history = await self.store.load(key)
+            ctx.used_history = bool(history)
             result = await self._run(question, history, ctx)
             result = result.model_copy(
                 update={
@@ -178,24 +207,22 @@ class AgentRuntime:
                 and result.status != AnswerStatus.NEED_CLARIFICATION
             ):
                 await self.store.append(
-                    session_id,
+                    key,
                     HistoryTurn(request_id=request_id, question=question, answer=result.answer),
                 )
         return result
 
-    async def _hold_session(
-        self, stack: AsyncExitStack, session_id: str, deadline: Deadline
-    ) -> None:
+    async def _hold_session(self, stack: AsyncExitStack, key: str, deadline: Deadline) -> None:
         """Take the session's lock within the request's deadline."""
         waiting = asyncio.timeout(deadline.remaining_s())
         try:
             async with waiting:
-                await stack.enter_async_context(self.locks.hold(session_id))
+                await stack.enter_async_context(self.locks.hold(key))
         except TimeoutError:
             if not waiting.expired():
                 raise
             raise AgentDeadlineExceeded(
-                f"waited for session {session_id!r} until the deadline"
+                "waited for the session's lock until the deadline"
             ) from None
 
     async def _run(self, question: str, history: list[HistoryTurn], ctx: AgentContext) -> AskResult:
@@ -222,7 +249,17 @@ class AgentRuntime:
                 return await self._salvage(graph, config, ctx, "deadline")
             except GraphRecursionError:
                 return await self._salvage(graph, config, ctx, "recursion_limit")
-        result: AskResult = final["result"]
+        result: AskResult | None = final.get("result")
+        if result is None:
+            # No `result` in the state: the run stopped at an `interrupt` (the clarify hook,
+            # P3-02). The question to ask is the interrupt's value; resuming is P3-02.
+            interrupts = final.get("__interrupt__") or []
+            if not interrupts:
+                raise RuntimeError("the graph ended without a result and without an interrupt")
+            values = {**final, "clarification": str(interrupts[0].value)}
+            result = compose_result(
+                values, ctx, timings_ms=dict(final.get("timings_ms") or {}), stop_reason=None
+            )
         return result
 
     async def _salvage(
@@ -245,10 +282,12 @@ async def ask_docs(
     runtime: AgentRuntime | None = None,
     session_id: str | None = None,
     request_id: str | None = None,
+    caller_id: str = "local",
     acl_groups: tuple[str, ...] = ("public",),
     deadline_ms: int | None = None,
     model: Any = None,
     filters: Mapping[str, Any] | None = None,
+    run_id: str | None = None,
 ) -> AskResult:
     """Answer `question` from knowledge base `cfg` with the ask_docs graph (see the module doc).
 
@@ -262,8 +301,10 @@ async def ask_docs(
         retriever=retriever,
         session_id=session_id,
         request_id=request_id,
+        caller_id=caller_id,
         acl_groups=acl_groups,
         deadline_ms=deadline_ms,
         model=model,
         filters=filters,
+        run_id=run_id,
     )
