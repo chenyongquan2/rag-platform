@@ -27,7 +27,12 @@ from typing import Any
 from rag.config import KnowledgeBaseConfig, ServiceSettings, repo_path
 from rag.config.kb import is_public_kb_file, load_kb_config
 from rag.data.hf import load_eval_questions, load_manifest
-from rag.eval.questions import labels_from_hf_eval, load_question_set, save_question_set
+from rag.eval.questions import (
+    display_path,
+    labels_from_hf_eval,
+    load_question_set,
+    save_question_set,
+)
 from rag.eval.retrieval.compare import compare_runs, render_comparison
 from rag.eval.retrieval.protocol import Retriever
 from rag.eval.retrieval.record import FINAL, RunRecord
@@ -155,6 +160,19 @@ def _question_file(cfg: KnowledgeBaseConfig, given: str | None) -> Path:
     return files[0]
 
 
+def _with_question_file(cfg: KnowledgeBaseConfig, question_file: Path) -> KnowledgeBaseConfig:
+    """`cfg` with `eval.questions` set to the file this run asks (spec P0-13b): the run record
+    serializes the config, and `--questions` used to leave the KB's default set name in it. A
+    file inside `eval.dir` keeps its name there, any other file its display path."""
+    eval_dir = repo_path(cfg.eval.dir or f"evals/datasets/{cfg.kb}").resolve()
+    path = repo_path(question_file).resolve()
+    try:
+        name = path.relative_to(eval_dir).as_posix()
+    except ValueError:
+        name = display_path(path)
+    return cfg.model_copy(update={"eval": cfg.eval.model_copy(update={"questions": name})})
+
+
 def _routes(text: str | None) -> tuple[str, ...]:
     if not text:
         return ROUTES
@@ -223,7 +241,9 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
     cfg, public, settings, routes = _setup(args, settings)
     if args.top_k is not None and args.top_k < 1:
         raise UsageError("--top-k must be a positive integer")
-    questions = load_question_set(_question_file(cfg, args.questions), kb=cfg.kb)
+    question_file = _question_file(cfg, args.questions)
+    questions = load_question_set(question_file, kb=cfg.kb)
+    cfg = _with_question_file(cfg, question_file)
     label = _run_label(args, cfg, routes)
     retriever = build_retriever(
         cfg, settings, rerank=not args.no_rerank, routes=routes, index_prefix=args.index_prefix

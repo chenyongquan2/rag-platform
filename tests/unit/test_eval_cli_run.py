@@ -233,3 +233,23 @@ def test_run_uses_the_configured_question_file(env: dict[str, Any], tmp_path: Pa
     )
     assert cli.main(["run", *base], settings=env["settings"]) == 0
     assert _only_run(env["reports"])["counts"]["questions"] == 2
+
+
+def test_run_records_the_question_file_it_used(env: dict[str, Any], tmp_path: Path) -> None:
+    """Spec P0-13b: with --questions, the recorded kb_config names that file, not the KB's
+    default set (synthetic runs used to show huggingface_doc_qa_eval.jsonl)."""
+    eval_dir = tmp_path / "evals"
+    eval_dir.mkdir()
+    save_question_set(QUESTIONS, eval_dir / "main.jsonl")
+    save_question_set(QUESTIONS, eval_dir / "synthetic_dev.jsonl")
+    kb_yaml = env["settings"].kb_dir + "/public/hf_docs.yaml"
+    Path(kb_yaml).write_text(
+        KB_YAML + f"eval: {{dir: '{eval_dir.as_posix()}', questions: main.jsonl}}\n", "utf-8"
+    )
+    base = [a for a in env["base"] if a not in ("--questions",)]
+    base = [base[0], base[1], *base[3:]]
+    argv = ["run", *base, "--questions", str(eval_dir / "synthetic_dev.jsonl")]
+    assert cli.main(argv, settings=env["settings"]) == 0
+    run = _only_run(env["reports"])["run"]
+    assert run["kb_config"]["eval"]["questions"] == "synthetic_dev.jsonl"
+    assert run["question_set"]["path"].endswith("synthetic_dev.jsonl")
