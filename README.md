@@ -283,10 +283,18 @@ is called only where it can change something, and only if the KB's `agent` secti
   is only normalised: no model call. The model's output is untrusted (it read the question
   and earlier answers made from documents, which are given to it in marked untrusted blocks).
   Every identifier of the question must survive in the queries as a whole token (`3.1` is not
-  `3.12`, `--lr` is not `--lr-scheduler`), the language must stay the question's, and the
-  rewrite must stay about the question: at least half of its topic words occur in the question
-  and the history shown, and it shares a topic word with the question itself. Otherwise the
-  original question is searched. A model failure, timeout (never into the answer's time),
+  `3.12`, `--lr` is not `--lr-scheduler`; identifiers and code spans are always whole, only a
+  long quoted message is matched by its first 40 characters; sizes and precisions such as
+  `8-bit`, `int8`, `fp16` are not required literally), the language must stay the question's,
+  and the rewrite must not be off the topic. That last check is deliberately weak: lexical
+  overlap cannot tell a vocabulary bridge ("make my model smaller" to "reduce model size with
+  quantization") from a hijack, so it rejects only an output with an instruction-like phrase
+  ("reveal the system prompt", "ignore the previous instructions") or with almost none of its
+  topic words in the question (minus its instruction-like sentences) and the history. The
+  defences that do not depend on it: the prompt carries the question, the history and the list
+  of strings to keep in marked untrusted blocks (forged tags, full-width or with invisible
+  characters, are neutralised), and the answer step is given the user's original question.
+  Otherwise the original question is searched. A model failure, timeout (never into the answer's time),
   unparsable answer or refused call (token cap) does the same. The request is never failed:
   it is answered, `degraded` is set and `fallbacks` names the step and reason
   (`rewrite:timeout`, `rewrite:identifiers_lost`, `rewrite:ungrounded`, `route:parse_failed`,
@@ -308,9 +316,12 @@ is called only where it can change something, and only if the KB's `agent` secti
   is cancelled while running the thread gives the token back: the same token and call can be
   retried and the run goes on from the step that failed (with the first reply). A call that
   dies without ending leaves the token in use until a lease (twice `SEARCH_MAX_DEADLINE_MS`)
-  lapses. When the run ends, the session history gets the question, the question asked back,
+  lapses; only the call that holds the current claim can end it, and the tokens a failed
+  attempt spent count on the retry. When the run ends, the session history gets the question, the question asked back,
   the reply and the answer as two turns (also when it was cut off and has no answer text: the
-  reply is then stored with the notice). The request's token cap counts both calls.
+  reply is then stored with the notice; if the history store fails, the answer is still
+  returned, with `degraded` and `history:write_failed`). The request's token cap counts both
+  calls.
 
 | Setting (env var) | Default | Meaning |
 |---|---|---|
