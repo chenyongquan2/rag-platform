@@ -169,7 +169,7 @@ def test_route_decides_two_hop_with_the_model_when_rules_say_maybe() -> None:
             structured_reply(
                 "RewritePlan",
                 standalone_question="What is the difference between A and B?",
-                search_queries=["A is one", "B is another"],
+                search_queries=["A difference", "B difference"],
             )
         ]
     )
@@ -216,3 +216,12 @@ def test_a_hook_decision_is_honoured_and_the_rules_are_a_default() -> None:
         hooks=AgentHooks(decide_route=decide),
     )
     assert result.status == "need_clarification" and backend.calls == []
+
+
+def test_the_question_asked_back_by_the_model_is_capped() -> None:
+    # It goes to the caller, the checkpoint and the history: never a page of text.
+    long_question = "Which model do you mean? " * 100
+    helper = FakeChatModel(responses=[judgement(clarify=True, question=long_question)])
+    result = _ask("How do I save this model to the hub?", ScriptedSearchBackend(KB), helper)
+    assert result.status == "need_clarification"
+    assert 0 < len(result.answer) <= 300 and result.answer.startswith("Which model do you mean?")

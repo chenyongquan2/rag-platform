@@ -25,6 +25,9 @@ if TYPE_CHECKING:
     from rag.agent.state import AgentState
 
 CLARIFY = "clarify"
+# The longest question asked back that the model may write: it goes to the caller, the
+# checkpoint and the history.
+CLARIFY_QUESTION_CHARS = 300
 TWO_HOP = "two_hop"
 
 
@@ -83,7 +86,7 @@ async def route_with_model(
     if CLARIFY in wants:
         ask = judgement.needs_clarification
         update["needs_clarification"] = ask
-        question = judgement.clarifying_question.strip()
+        question = judgement.clarifying_question.strip()[:CLARIFY_QUESTION_CHARS]
         update["clarify_question"] = (question or None) if ask else None
     if TWO_HOP in wants:
         update["two_hop"] = judgement.two_hop

@@ -42,6 +42,24 @@ SMALLTALK: dict[AnswerLanguage, str] = {
 }
 
 
+# ruff: noqa: RUF001 (the Chinese labels use full-width colons)
+# The question the answer model gets when the rewrite made a standalone version: both, labelled,
+# so a rewrite that drifted (a hijacked or misled model) cannot replace what the user asked.
+QUESTION_LABELS: dict[AnswerLanguage, str] = {
+    "en": "Original question: {original}\nStandalone version: {standalone}",
+    "zh": "原始问题：{original}\n补全后的问题：{standalone}",
+}
+
+
+def answer_question(original: str, standalone: str | None, language_setting: Any) -> str:
+    """The text the answer step is asked: the question as the user asked it (with the caller's
+    reply to a clarification), and, when the rewrite made one, the standalone version too."""
+    if not standalone or standalone.strip() == original.strip():
+        return original
+    language = answer_language(original, language_setting)
+    return QUESTION_LABELS[language].format(original=original.strip(), standalone=standalone)
+
+
 def smalltalk_answer(question: str, language_setting: Any) -> Answer:
     language = answer_language(question, language_setting)
     return Answer(
@@ -104,6 +122,7 @@ def compose_result(
         "tokens_used": ctx.budget.spent,
         "used_history": ctx.used_history,
         "clarified": bool(values.get("clarified")),
+        "question": question,
         "standalone_question": values.get("standalone_question"),
         "search_queries": list(values.get("sub_questions") or []),
         "fallbacks": fallbacks,

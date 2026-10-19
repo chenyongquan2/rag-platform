@@ -517,7 +517,11 @@ class SearchService:
         caller, cfg = self._resolve(credentials, kb, request_id)
         pipeline = self._pipelines.get(cfg.kb) if cfg is not None else None
         extra: dict[str, Any] = {
-            "question": _clip(question, self.settings.search_max_query_chars),
+            # A resumed call carries only the caller's reply (and a question it need not repeat
+            # right): the record gets the original question from the result.
+            "question": None
+            if resume_token is not None
+            else _clip(question, self.settings.search_max_query_chars),
             "session_id": _clip(session_id, RECORD_TEXT_CHARS) if session_id is not None else None,
             "deadline_ms": deadline_ms if _is_int(deadline_ms) else None,
             "resumed": resume_token is not None,
@@ -568,6 +572,9 @@ class SearchService:
                 timings_ms=response.timings_ms,
                 extra={
                     **extra,
+                    "question": _clip(result.question, self.settings.search_max_query_chars)
+                    if resume_token is not None
+                    else extra["question"],
                     "deadline_ms": deadline_ms,
                     "thread_id": result.thread_id,
                     "status": str(result.status),

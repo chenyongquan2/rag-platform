@@ -5,10 +5,16 @@ gets an opaque `resume_token`, not the thread id, and the server keeps, per toke
 who it was issued to (caller id), for which knowledge base and session, which thread it opens
 and until when. `ask_docs(..., resume_token=..., answer=...)` takes the token with `claim`:
 
-- it must exist, be unused and not expired;
+- it must exist, be unused, not in use by another call and not expired;
 - the caller, the knowledge base and the session id must be the ones it was issued for;
-- it is used once: `claim` marks it used in the same step that checks it, so two calls with
-  one token cannot both continue the run.
+- it can continue the run once at a time: `claim` marks it `resuming` in the same step that
+  checks it, so two calls with one token cannot both continue the run.
+
+A token is `pending` (can be claimed), `resuming` (a call is running the thread) or `used`. The
+call that claimed it ends the claim: `finish` (the run ended, with an answer or cut off: used
+for good) or `release` (the run raised or was cancelled: the caller may try again, the thread
+goes on from where it stopped). A call that dies without either (the process is killed) leaves
+`resuming`; after `lease_s` seconds the claim lapses and the token can be claimed again.
 
 Anything else is `ResumeTokenInvalid` (category `invalid_resume_token`), one category and one
 fixed message for every reason, so a caller cannot find out which tokens exist; the reason is
@@ -37,6 +43,8 @@ from rag.agent.sqlite_db import init_agent_db
 from rag.factories import init_sqlite_once
 from rag.types import ErrorCategory
 
+DEFAULT_LEASE_S = 120.0
+
 
 class ResumeTokenInvalid(Exception):  # noqa: N818 - named after its category
     """The token cannot continue a run; `str(exc)` is the reason, for the log only."""
@@ -62,28 +70,39 @@ def new_token() -> str:
     return secrets.token_urlsafe(24)
 
 
+def in_flight(status: str, claimed_at: float | None, lease_s: float, now: float) -> bool:
+    """A call is running the thread: it claimed the token and its lease has not lapsed."""
+    return status == "resuming" and (claimed_at or 0.0) + lease_s > now
+
+
 def _problem(
     record: ResumeRecord | None,
     status: str,
+    claimed_at: float | None,
     *,
     caller_id: str,
     kb: str,
     session_id: str | None,
     now: float,
+    lease_s: float,
 ) -> str | None:
     """Why the token cannot be used by this call, or None."""
     if record is None:
         return "unknown token"
     if (record.caller_id, record.kb, record.session_id) != (caller_id, kb, session_id):
         return "token was issued to another caller, knowledge base or session"
-    if status != "pending":
+    if status == "used":
         return "token already used"
+    if in_flight(status, claimed_at, lease_s, now):
+        return "token in use by a running call"
     if record.expires_at <= now:
         return "token expired"
     return None
 
 
 class ResumeStore(Protocol):
+    lease_s: float
+
     def prepare(self) -> None:
         """Create the storage before the first request (idempotent)."""
         ...
@@ -96,13 +115,21 @@ class ResumeStore(Protocol):
 
     async def purge_expired(self) -> list[str]:
         """Drop the tokens that expired and return their checkpoint threads, which nobody can
-        resume any more (the caller deletes them)."""
+        resume any more (the caller deletes them). A token whose run is in flight stays."""
         ...
 
     async def claim(
         self, token: str, *, caller_id: str, kb: str, session_id: str | None
     ) -> ResumeRecord:
-        """Use the token (once). `ResumeTokenInvalid` when it cannot be used by this call."""
+        """Take the token for one running call. `ResumeTokenInvalid` when this call cannot."""
+        ...
+
+    async def finish(self, token: str) -> None:
+        """The call ended the run: the token is used up."""
+        ...
+
+    async def release(self, token: str) -> None:
+        """The call failed or was cancelled: the token can be claimed again."""
         ...
 
 
@@ -110,13 +137,20 @@ class ResumeStore(Protocol):
 class _Row:
     record: ResumeRecord
     status: str = "pending"
+    claimed_at: float | None = None
 
 
 class MemoryResumeStore:
     """Tokens in process memory (tests, single run scripts)."""
 
-    def __init__(self, ttl_s: float, now: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        ttl_s: float,
+        now: Callable[[], float] = time.time,
+        lease_s: float = DEFAULT_LEASE_S,
+    ) -> None:
         self.ttl_s = ttl_s
+        self.lease_s = lease_s
         self._now = now
         self._rows: dict[str, _Row] = {}
         self._lock = threading.Lock()
@@ -137,35 +171,62 @@ class MemoryResumeStore:
     async def purge_expired(self) -> list[str]:
         now = self._now()
         with self._lock:
-            stale = [k for k, row in self._rows.items() if row.record.expires_at <= now]
-            return [self._rows.pop(k).record.thread_id for k in stale]
+            stale = [
+                key
+                for key, row in self._rows.items()
+                if row.record.expires_at <= now
+                and not in_flight(row.status, row.claimed_at, self.lease_s, now)
+            ]
+            return [self._rows.pop(key).record.thread_id for key in stale]
 
     async def claim(
         self, token: str, *, caller_id: str, kb: str, session_id: str | None
     ) -> ResumeRecord:
         with self._lock:
             row = self._rows.get(hash_token(token))
+            now = self._now()
             problem = _problem(
                 row.record if row else None,
                 row.status if row else "",
+                row.claimed_at if row else None,
                 caller_id=caller_id,
                 kb=kb,
                 session_id=session_id,
-                now=self._now(),
+                now=now,
+                lease_s=self.lease_s,
             )
             if problem is not None or row is None:
                 raise ResumeTokenInvalid(problem or "unknown token")
-            row.status = "used"
+            row.status, row.claimed_at = "resuming", now
             return row.record
+
+    async def finish(self, token: str) -> None:
+        with self._lock:
+            row = self._rows.get(hash_token(token))
+            if row is not None:
+                row.status = "used"
+
+    async def release(self, token: str) -> None:
+        with self._lock:
+            row = self._rows.get(hash_token(token))
+            if row is not None and row.status == "resuming":
+                row.status, row.claimed_at = "pending", None
 
 
 class SqliteResumeStore:
     """Tokens in the session SQLite file. A connection per operation in a worker thread;
     `claim` checks and marks the token in one write transaction."""
 
-    def __init__(self, path: Path, ttl_s: float, now: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        path: Path,
+        ttl_s: float,
+        now: Callable[[], float] = time.time,
+        lease_s: float = DEFAULT_LEASE_S,
+    ) -> None:
         self.path = path
         self.ttl_s = ttl_s
+        self.lease_s = lease_s
         self._now = now
 
     def prepare(self) -> None:
@@ -188,12 +249,16 @@ class SqliteResumeStore:
 
     def _purge(self) -> list[str]:
         now = self._now()
+        in_flight_since = now - self.lease_s
+        where = (
+            "expires_at <= ? AND NOT (status = 'resuming' AND COALESCE(claimed_at, 0) > ?)",
+            (now, in_flight_since),
+        )
         with closing(self._connect()) as conn, conn:
-            rows = conn.execute(
-                "SELECT thread_id FROM resumes WHERE expires_at <= ?", (now,)
-            ).fetchall()
-            conn.execute("DELETE FROM resumes WHERE expires_at <= ?", (now,))
-        return [r[0] for r in rows]
+            rows = conn.execute(f"SELECT thread_id FROM resumes WHERE {where[0]}", where[1])
+            threads = [r[0] for r in rows.fetchall()]
+            conn.execute(f"DELETE FROM resumes WHERE {where[0]}", where[1])
+        return threads
 
     def _claim(self, token: str, caller_id: str, kb: str, session_id: str | None) -> ResumeRecord:
         with closing(self._connect()) as conn:
@@ -201,23 +266,27 @@ class SqliteResumeStore:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 found = conn.execute(
-                    "SELECT caller_id, kb, session_id, thread_id, expires_at, status FROM resumes "
-                    "WHERE token_hash = ?",
+                    "SELECT caller_id, kb, session_id, thread_id, expires_at, status, claimed_at "
+                    "FROM resumes WHERE token_hash = ?",
                     (hash_token(token),),
                 ).fetchone()
                 record = ResumeRecord(*found[:5]) if found else None
+                now = self._now()
                 problem = _problem(
                     record,
                     found[5] if found else "",
+                    found[6] if found else None,
                     caller_id=caller_id,
                     kb=kb,
                     session_id=session_id,
-                    now=self._now(),
+                    now=now,
+                    lease_s=self.lease_s,
                 )
                 if problem is not None or record is None:
                     raise ResumeTokenInvalid(problem or "unknown token")
                 conn.execute(
-                    "UPDATE resumes SET status = 'used' WHERE token_hash = ?", (hash_token(token),)
+                    "UPDATE resumes SET status = 'resuming', claimed_at = ? WHERE token_hash = ?",
+                    (now, hash_token(token)),
                 )
                 conn.execute("COMMIT")
             except BaseException:
@@ -225,6 +294,10 @@ class SqliteResumeStore:
                     conn.execute("ROLLBACK")
                 raise
         return record
+
+    def _set(self, token: str, sql: str) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute(sql, (hash_token(token),))
 
     async def create(
         self, *, caller_id: str, kb: str, session_id: str | None, thread_id: str
@@ -240,3 +313,16 @@ class SqliteResumeStore:
         self, token: str, *, caller_id: str, kb: str, session_id: str | None
     ) -> ResumeRecord:
         return await asyncio.to_thread(self._claim, token, caller_id, kb, session_id)
+
+    async def finish(self, token: str) -> None:
+        await asyncio.to_thread(
+            self._set, token, "UPDATE resumes SET status = 'used' WHERE token_hash = ?"
+        )
+
+    async def release(self, token: str) -> None:
+        await asyncio.to_thread(
+            self._set,
+            token,
+            "UPDATE resumes SET status = 'pending', claimed_at = NULL "
+            "WHERE token_hash = ? AND status = 'resuming'",
+        )

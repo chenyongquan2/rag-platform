@@ -318,7 +318,7 @@ def test_resume_arguments_and_errors(tmp_path: Path) -> None:
 
         done = _ask(
             service,
-            question=VAGUE,
+            question="(the question need not be repeated right)",
             session_id="s1",
             resume_token=token,
             answer="transformers raises KeyError 'llama'",
@@ -334,10 +334,15 @@ def test_resume_arguments_and_errors(tmp_path: Path) -> None:
     by_id = {r["request_id"]: r for r in records}
     assert by_id["req-1"]["extra"]["status"] == "need_clarification"
     assert by_id["req-2"]["extra"]["resumed"] is True and by_id["req-2"]["extra"]["clarified"]
+    # The record of the resumed call names the question that was asked, not what the caller sent
+    # along with its reply; a refused resume has no question to name.
+    assert by_id["req-2"]["extra"]["question"] == VAGUE
+    assert by_id["req-1"]["extra"]["question"] == VAGUE
     # No record or log line carries the token itself.
     assert token not in path.read_text("utf-8")
     refused_records = [r for r in records if r["flags"] == ["invalid_resume_token"]]
     assert refused_records and all(token not in json.dumps(r) for r in refused_records)
+    assert all(r["extra"]["question"] is None for r in refused_records)
 
 
 def test_rewrite_in_the_business_record(tmp_path: Path) -> None:
@@ -360,12 +365,12 @@ def test_rewrite_in_the_business_record(tmp_path: Path) -> None:
         helper.responses.append("not a tool call")
         failed = _ask(service, question="How do I load a model?", request_id="req-f")
 
-    assert response.search_queries == [statement] and response.standalone_question == question
+    assert response.search_queries == [statement] and response.standalone_question is None
     assert response.fallbacks == [] and response.degraded is False
     assert failed.fallbacks == ["rewrite:parse_failed"] and failed.degraded is True
     assert "degraded" in failed.error_categories
     ok, bad = _records(path)
     assert ok["extra"]["search_queries"] == [statement]
-    assert ok["extra"]["standalone_question"] == question and ok["extra"]["fallbacks"] == []
+    assert ok["extra"]["standalone_question"] is None and ok["extra"]["fallbacks"] == []
     assert ok["extra"]["tokens_used"] > 0
     assert bad["extra"]["fallbacks"] == ["rewrite:parse_failed"] and bad["flags"] == ["degraded"]

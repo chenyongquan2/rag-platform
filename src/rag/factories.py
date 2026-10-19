@@ -399,17 +399,18 @@ def make_session_store(url: str, *, keep_turns: int) -> SessionStore:
     raise _unsupported("session store", scheme, "sqlite, memory")
 
 
-def make_resume_store(url: str, *, ttl_s: float) -> ResumeStore:
+def make_resume_store(url: str, *, ttl_s: float, lease_s: float = 120.0) -> ResumeStore:
     """Resume tokens of questions asked back, from the same connection string as the session
     history: `sqlite://<path>` -> a table in that file, `memory://` -> process memory; a token
-    is valid for `ttl_s` seconds (spec P3-02)."""
+    is valid for `ttl_s` seconds; the claim of a call that never ended lapses after `lease_s`
+    (spec P3-02)."""
     from rag.agent.resume import MemoryResumeStore, SqliteResumeStore
 
     scheme, _ = split_url(url)
     if scheme == "sqlite":
-        return SqliteResumeStore(url_path(url), ttl_s)
+        return SqliteResumeStore(url_path(url), ttl_s, lease_s=lease_s)
     if scheme == "memory":
-        return MemoryResumeStore(ttl_s)
+        return MemoryResumeStore(ttl_s, lease_s=lease_s)
     raise _unsupported("resume store", scheme, "sqlite, memory")
 
 

@@ -365,3 +365,105 @@ def test_token_budget_spans_both_calls() -> None:
     assert len(rig.helper.calls) == 1  # the rewrite call was refused before it was sent
     assert done.fallbacks == ["rewrite:token_cap"] and done.tokens_used >= 1_100
     assert done.status == "answered"
+
+
+# ---- review round 1: a resume that fails must not lose the token or the reply -------------------
+
+
+def test_a_resume_that_fails_can_be_retried_with_the_same_token() -> None:
+    rig = Rig()
+    token = rig.ask(session_id="s1").resume_token or ""
+    rig.backend.raises = RuntimeError("search backend down")
+    with pytest.raises(RuntimeError, match="backend down"):
+        rig.resume(token)
+    assert rig.history() == []  # nothing was written for the failed run
+    rig.backend.raises = None
+    done = rig.resume(token, answer="a different reply that is ignored on a retry")
+    # The run went on from where it stopped: the first reply is the one it keeps.
+    assert done.status == "answered" and done.clarified
+    assert [c["question"] for c in rig.backend.calls][-1] == f"{VAGUE} ({ANSWER})"
+    assert [t.question for t in rig.history()] == [VAGUE, ANSWER]
+    with pytest.raises(ResumeTokenInvalid):  # and now it is used up
+        rig.resume(token)
+
+
+def test_a_cancelled_resume_can_be_retried() -> None:
+    import threading
+
+    rig = Rig()
+    token = rig.ask(session_id="s1").resume_token or ""
+    entered, release = threading.Event(), threading.Event()
+
+    def hold(question: str) -> None:
+        entered.set()
+        release.wait(5)
+
+    rig.backend.on_call = hold
+
+    async def scenario() -> AskResult:
+        task = asyncio.create_task(rig.aresume(token))
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()  # the client went away while the search ran
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        rig.backend.on_call = None
+        return await rig.aresume(token)
+
+    assert asyncio.run(scenario()).status == "answered"
+    assert len(rig.runtime.locks) == 0
+
+
+def test_a_token_in_flight_cannot_be_taken_but_a_lapsed_lease_can() -> None:
+    rig = Rig()
+    token = rig.ask(session_id="s1").resume_token or ""
+    store = rig.runtime.resumes
+
+    async def claim() -> Any:
+        return await store.claim(token, caller_id="local", kb=KB, session_id="s1")
+
+    asyncio.run(claim())  # a resume is running (it never finished: the process died)
+    with pytest.raises(ResumeTokenInvalid, match="in use"):
+        asyncio.run(claim())
+    store._now = lambda: time.time() + 1_000  # type: ignore[attr-defined]  # past the lease
+    done = rig.resume(token)
+    assert done.status == "answered"
+
+
+def test_an_expired_ttl_does_not_delete_the_thread_of_a_resume_in_flight() -> None:
+    rig = Rig()
+    flying = rig.ask(session_id="s1")
+    store = rig.runtime.resumes
+    asyncio.run(store.claim(flying.resume_token or "", caller_id="local", kb=KB, session_id="s1"))
+    store._now = lambda: time.time() + 1_800 + 5  # type: ignore[attr-defined]  # TTL lapsed
+    store.lease_s = 10_000  # type: ignore[attr-defined]  # the run is still within its lease
+    rig.ask(session_id="s2")  # asking back purges what expired
+    assert asyncio.run(rig.runtime.state_values(flying.thread_id))  # still there
+
+
+# ---- review round 1: history of a resumed run that was cut off, and the record ------------------
+
+
+def test_a_resumed_run_cut_off_by_the_deadline_still_writes_the_exchange() -> None:
+    import time as _time
+
+    rig = Rig()
+    first = rig.ask(session_id="s1", request_id="r1")
+    rig.backend.on_call = lambda question: _time.sleep(1.0)  # the search outlasts the deadline
+    done = rig.resume(first.resume_token or "", request_id="r2", deadline_ms=300)
+    assert done.stop_reason == "deadline" and done.answer == ""  # chunks only, no text
+    turns = rig.history()
+    assert [(t.question, t.answer) for t in turns] == [
+        (VAGUE, first.answer),
+        (ANSWER, done.notice),  # the reply is kept, with what was said of the cut
+    ]
+
+
+def test_a_finished_resume_stays_used_even_after_its_lease_would_lapse() -> None:
+    rig = Rig()
+    token = rig.ask(session_id="s1").resume_token or ""
+    assert rig.resume(token).status == "answered"
+    rig.runtime.resumes._now = lambda: time.time() + 1_000  # type: ignore[attr-defined]
+    with pytest.raises(ResumeTokenInvalid, match="already used"):
+        rig.resume(token)

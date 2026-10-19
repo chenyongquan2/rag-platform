@@ -39,6 +39,7 @@ reads nor writes it, s12-1).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -124,7 +125,11 @@ class AgentRuntime:
         # each created them failed with "database is locked".
         store.prepare()
         checkpointers.prepare()
-        resumes = make_resume_store(settings.session_store_url, ttl_s=settings.agent_resume_ttl_s)
+        resumes = make_resume_store(
+            settings.session_store_url,
+            ttl_s=settings.agent_resume_ttl_s,
+            lease_s=2.0 * settings.search_max_deadline_ms / 1000.0,
+        )
         resumes.prepare()
         return cls(
             settings,
@@ -235,39 +240,54 @@ class AgentRuntime:
                 await self._hold_session(stack, key, deadline)
                 if not resuming:
                     history = await self.store.load(key)
-            inputs: Mapping[str, Any] | Command
-            if resume_token is not None:
-                inputs = Command(resume=answer)
-                history = await self._take_token(
-                    resume_token, ctx, caller_id=caller_id, session_id=session_id
-                )
-            else:
-                inputs = {
-                    "request_id": request_id,
-                    "session_id": session_id,
-                    "kb": cfg.kb,
-                    "question": question,
-                    "history": history,
-                }
-            ctx.used_history = bool(history)
-            result, values = await self._run(inputs, ctx)
-            result = result.model_copy(
-                update={
-                    "timings_ms": {
-                        **result.timings_ms,
-                        "total": round((time.perf_counter() - began) * 1000.0, 3),
+            claimed: str | None = None
+            try:
+                inputs: Mapping[str, Any] | Command | None
+                if resume_token is not None:
+                    history, inputs = await self._take_token(
+                        resume_token, answer or "", ctx, caller_id=caller_id, session_id=session_id
+                    )
+                    claimed = resume_token
+                else:
+                    inputs = {
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "kb": cfg.kb,
+                        "question": question,
+                        "history": history,
                     }
-                }
-            )
-            if result.status == AnswerStatus.NEED_CLARIFICATION:
-                await self._drop_abandoned_questions()
-                token = await self.resumes.create(
-                    caller_id=caller_id, kb=cfg.kb, session_id=session_id, thread_id=ctx.thread_id
+                ctx.used_history = bool(history)
+                result, values = await self._run(inputs, ctx)
+                if claimed is not None:  # the run ended, whatever it ended with: used up
+                    await self.resumes.finish(claimed)
+                    claimed = None
+                result = result.model_copy(
+                    update={
+                        "timings_ms": {
+                            **result.timings_ms,
+                            "total": round((time.perf_counter() - began) * 1000.0, 3),
+                        }
+                    }
                 )
-                result = result.model_copy(update={"resume_token": token})
-            elif session_id is not None and result.answer:
-                for turn in self._turns(values, question, request_id, result):
-                    await self.store.append(key, turn)
+                if result.status == AnswerStatus.NEED_CLARIFICATION:
+                    await self._drop_abandoned_questions()
+                    token = await self.resumes.create(
+                        caller_id=caller_id,
+                        kb=cfg.kb,
+                        session_id=session_id,
+                        thread_id=ctx.thread_id,
+                    )
+                    result = result.model_copy(update={"resume_token": token})
+                elif session_id is not None and (result.answer or values.get("clarified")):
+                    for turn in self._turns(values, question, request_id, result):
+                        await self.store.append(key, turn)
+            except BaseException:
+                # The call raised or was cancelled before the run ended: the caller's reply is
+                # not lost, the token can be used again and the thread goes on where it stopped.
+                if claimed is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.shield(self.resumes.release(claimed))
+                raise
         return result
 
     async def _drop_abandoned_questions(self) -> None:
@@ -290,7 +310,8 @@ class AgentRuntime:
         """What the session remembers of a finished run: question and answer; after a
         clarification, the question with the question asked back as its answer, then the
         caller's answer with the real answer (so a later follow-up reads the conversation as
-        it happened)."""
+        it happened). A resumed run that was cut off has no answer text: the exchange is still
+        written, the reply with the notice that the run stopped."""
         asked = values.get("question") or question
         if values.get("clarified") and values.get("clarify_question"):
             return [
@@ -302,19 +323,22 @@ class AgentRuntime:
                 HistoryTurn(
                     request_id=request_id,
                     question=values.get("clarification_answer") or "",
-                    answer=result.answer,
+                    answer=result.answer or result.notice or "",
                 ),
             ]
         return [HistoryTurn(request_id=request_id, question=asked, answer=result.answer)]
 
     async def _take_token(
-        self, token: str, ctx: AgentContext, *, caller_id: str, session_id: str | None
-    ) -> list[HistoryTurn]:
+        self, token: str, answer: str, ctx: AgentContext, *, caller_id: str, session_id: str | None
+    ) -> tuple[list[HistoryTurn], Command | None]:
         """Use the resume token for this call and point the call at its thread. Checks that
         the token is this caller's, for this knowledge base and session (`claim`), and that the
-        thread really waits for an answer and belongs to this session. Returns
-        the history the run started with (kept in its checkpoint) and carries over the tokens
-        it had spent, so the request's cap counts both calls."""
+        thread belongs to this session and either waits for the answer (the input is
+        `Command(resume=answer)`) or is a resumed run that failed after the question was
+        answered (no input: the run goes on from the step that failed, with the first answer).
+        Anything else is refused and the token is used up. Returns the history the run
+        started with (kept in its checkpoint) and carries over the tokens it had spent, so the
+        request's cap counts both calls."""
         record = await self.resumes.claim(
             token, caller_id=caller_id, kb=ctx.cfg.kb, session_id=session_id
         )
@@ -322,14 +346,20 @@ class AgentRuntime:
         ctx.resumed = True
         async with self.checkpointers.open() as saver:
             snapshot = await build_graph(saver).aget_state(self.run_config(record.thread_id))
-        waiting = bool(snapshot.next) and any(task.interrupts for task in snapshot.tasks)
         values = dict(snapshot.values)
-        if not waiting:
-            raise ResumeTokenInvalid("the run is not waiting for an answer")
-        if values.get("session_id") != session_id:
-            raise ResumeTokenInvalid("the thread belongs to another session")
+        waiting = bool(snapshot.next) and any(task.interrupts for task in snapshot.tasks)
+        failed_after_answer = bool(snapshot.next) and bool(values.get("clarified"))
+        problem = None
+        if not (waiting or failed_after_answer):
+            problem = "the run is not waiting for an answer"
+        elif values.get("session_id") != session_id:
+            problem = "the thread belongs to another session"
+        if problem is not None:
+            await self.resumes.finish(token)  # a token that cannot be used is used up
+            raise ResumeTokenInvalid(problem)
         ctx.budget.add(int(values.get("tokens_before_clarify") or 0))
-        return list(values.get("history") or [])
+        inputs = Command(resume=answer) if waiting else None
+        return list(values.get("history") or []), inputs
 
     async def _hold_session(self, stack: AsyncExitStack, key: str, deadline: Deadline) -> None:
         """Take the session's lock within the request's deadline."""
@@ -345,7 +375,7 @@ class AgentRuntime:
             ) from None
 
     async def _run(
-        self, inputs: Mapping[str, Any] | Command, ctx: AgentContext
+        self, inputs: Mapping[str, Any] | Command | None, ctx: AgentContext
     ) -> tuple[AskResult, Mapping[str, Any]]:
         """Run (or continue) the graph; the result and the state it was made from."""
         async with self.checkpointers.open() as saver:

@@ -27,7 +27,12 @@ from langgraph.types import Overwrite, interrupt
 
 from rag.agent.budget import RequestTokenCapExceeded
 from rag.agent.context import AgentContext
-from rag.agent.result import compose_result, group_by_sub_question, smalltalk_answer
+from rag.agent.result import (
+    answer_question,
+    compose_result,
+    group_by_sub_question,
+    smalltalk_answer,
+)
 from rag.agent.routing import CLARIFY, TWO_HOP
 from rag.agent.rules import default_clarification
 from rag.agent.state import AgentState, RetrievalRound, working_question
@@ -132,7 +137,7 @@ async def clarify_node(state: AgentState, runtime: Runtime[AgentContext]) -> dic
     ctx = runtime.context
     began = time.perf_counter()
     with layer_span("clarify", attributes={attr.CLARIFY_RESUMED: ctx.resumed}) as span:
-        question = None if state.get("clarified") else await ctx.hooks.clarify(state, ctx)
+        question = await ctx.hooks.clarify(state, ctx)
         if question:
             span.set_attribute(attr.CLARIFY_QUESTION, question[:500])
     if not question:
@@ -273,7 +278,9 @@ async def answer_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict
                 metadata_keys=cfg.metadata.llm,
             )
             answer = await generate_answer(
-                state.get("standalone_question") or working_question(state),
+                answer_question(
+                    working_question(state), state.get("standalone_question"), cfg.answer.language
+                ),
                 context,
                 kb=cfg.kb,
                 config=cfg.answer,

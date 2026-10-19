@@ -281,6 +281,8 @@ class AskResult(_ResultMeta):
     cache_allowed: bool = True
     resume_token: str | None = None
     clarified: bool = False
+    question: str = ""
+    """The question as the caller first asked it (a resumed call carries only the answer)."""
     standalone_question: str | None = None
     search_queries: list[str] = Field(default_factory=list)
     fallbacks: list[str] = Field(default_factory=list)
