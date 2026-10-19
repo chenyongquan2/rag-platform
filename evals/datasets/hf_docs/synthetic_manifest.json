@@ -1,9 +1,9 @@
 {
- "created_at": "2026-10-18T16:12:48Z",
+ "created_at": "2026-10-19T02:18:32Z",
  "kb": "hf_docs",
  "run": "data/reports/synthetic/20261018T135147Z_hf_docs_synthetic",
  "spec": "P1-05",
- "git_commit": "ab28f7dc4337db49f73beff3c7eeba81ff4bfc46",
+ "git_commit": "f69f9c8eb3257aa1acb3148c3318ed85e10ffaa6",
  "source": {
   "manifest": "data/manifests/hf_docs.json",
   "repo_id": "m-ric/huggingface_doc",
@@ -105,9 +105,9 @@
  },
  "redacted_tokens": 2,
  "labels": {
-  "rule": "source page + every other page containing the answer (also in the span) and all question words found in the span (rag.eval.synthetic.labels)",
-  "questions_with_added_pages": 90,
-  "pages_added": 856
+  "rule": "source page + every other English, non-public page that contains verbatim a line or sentence of the span with the answer, at least 40 characters (rag.eval.synthetic.labels)",
+  "questions_with_added_pages": 43,
+  "pages_added": 195
  },
  "near_duplicate_groups": [
   [
@@ -215,11 +215,11 @@
  },
  "files": {
   "synthetic_dev.jsonl": {
-   "sha256": "342c9a11e8b8efff45a70e15cdd4d033a60b5107d699f40141a25d295fc3d989",
+   "sha256": "862d14c5d2b0e2e4be100fcff64eb9ec355a9de5fbc30aa48ee3a083786fe84e",
    "questions": 100
   },
   "synthetic_holdout.jsonl": {
-   "sha256": "76eddda4224a76af94266b4a060e11f18398ae91f109948c17e37e4cf7dc5fcd",
+   "sha256": "7675db0c8325a27d57b1897224a0160fe5aad8bf5679a68d3b22df5daa3a4386",
    "questions": 100
   }
  },
