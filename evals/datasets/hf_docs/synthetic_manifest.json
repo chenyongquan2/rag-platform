@@ -1,9 +1,9 @@
 {
- "created_at": "2026-10-19T02:18:32Z",
+ "created_at": "2026-10-19T02:58:48Z",
  "kb": "hf_docs",
  "run": "data/reports/synthetic/20261018T135147Z_hf_docs_synthetic",
  "spec": "P1-05",
- "git_commit": "f69f9c8eb3257aa1acb3148c3318ed85e10ffaa6",
+ "git_commit": "3184fe85d9d5661b0a92be135846817c01f959ed",
  "source": {
   "manifest": "data/manifests/hf_docs.json",
   "repo_id": "m-ric/huggingface_doc",
@@ -85,7 +85,7 @@
   "generation_calls": 800,
   "generated": 799,
   "kept": 200,
-  "dev": 100,
+  "dev": 99,
   "holdout": 100
  },
  "rejections": {
@@ -104,6 +104,11 @@
   "standalone_low": 45
  },
  "redacted_tokens": 2,
+ "dropped_after_split": {
+  "non_english_span": [
+   "synthetic:ee509b68d9c3"
+  ]
+ },
  "labels": {
   "rule": "source page + every other English, non-public page that contains verbatim a line or sentence of the span with the answer, at least 40 characters (rag.eval.synthetic.labels)",
   "questions_with_added_pages": 43,
@@ -150,7 +155,7 @@
    "huggingface/transformers:markdown": 18,
    "huggingface/optimum:mdx": 4,
    "huggingface/blog:markdown": 11,
-   "gradio-app/gradio:markdown": 6,
+   "gradio-app/gradio:markdown": 5,
    "huggingface/peft:markdown": 3,
    "huggingface/course:mdx": 3,
    "huggingface/peft:notebook": 3,
@@ -215,8 +220,8 @@
  },
  "files": {
   "synthetic_dev.jsonl": {
-   "sha256": "862d14c5d2b0e2e4be100fcff64eb9ec355a9de5fbc30aa48ee3a083786fe84e",
-   "questions": 100
+   "sha256": "374c223b2ee1282da11d082136ab402be36bc4f69b609244050efe8fa7745ce9",
+   "questions": 99
   },
   "synthetic_holdout.jsonl": {
    "sha256": "7675db0c8325a27d57b1897224a0160fe5aad8bf5679a68d3b22df5daa3a4386",
