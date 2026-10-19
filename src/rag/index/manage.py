@@ -9,6 +9,7 @@ was decided on a stale read fail as a whole instead of half-applying.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -280,13 +281,22 @@ def force_merge_index(
     it, so a plain force merge leaves them in the segments and BM25 still counts them
     (measured on 9.5.5: N 30 and a term's n 3 before and after the merge, though 5 documents were
     live). Opening the index again makes the shard compute the point from its checkpoints, and
-    the next merge drops the history: N 5, n 1. If opening fails the index stays closed; open
-    it by hand (`POST <index>/_open`) before a resume.
+    the next merge drops the history: N 5, n 1. If the close or the open fails, a second open is
+    tried; if that fails too the index stays closed, and `rebuild --version N` opens it again
+    before it resumes.
     """
     deleted_before, _ = _segment_counts(es, index)
     client = es.options(request_timeout=timeout_s)
-    client.indices.close(index=index)
-    client.indices.open(index=index, wait_for_active_shards="all")
+    try:
+        client.indices.close(index=index)
+        client.indices.open(index=index, wait_for_active_shards="all")
+    except BaseException:
+        # A close that timed out on our side may still have been applied, and an open that
+        # failed may work a second time: try to leave the index open, whatever went wrong.
+        # The first error is the one to report; a resume opens the index (rebuild._create).
+        with contextlib.suppress(Exception):
+            client.indices.open(index=index, wait_for_active_shards="all")
+        raise
     client.indices.forcemerge(index=index, max_num_segments=max_num_segments, flush=True)
     client.indices.refresh(index=index)  # searchers only see the merged segments after a refresh
     deleted_after, segments = _segment_counts(es, index)

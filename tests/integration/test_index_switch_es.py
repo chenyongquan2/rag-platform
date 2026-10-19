@@ -496,3 +496,20 @@ def test_force_merge_removes_deleted_documents(make_kb: Callable[..., Kb]) -> No
     collect(resp["hits"]["hits"][0]["_explanation"])
     assert totals == [live]
     assert kb.contents(2) == kb.expected()
+
+
+def test_resume_reopens_a_version_left_closed(make_kb: Callable[..., Kb]) -> None:
+    kb = make_kb()
+    kb.seed()
+
+    def reject(_ctx: GateContext) -> bool:
+        return False
+
+    with pytest.raises(GateFailedError):
+        kb.rebuild(gate=reject)
+    kb.es.indices.close(index=kb.index(2))  # what a failed merge could leave behind
+
+    report = kb.rebuild(version=2)
+
+    assert report.resumed and report.switched and kb.alias_target() == [kb.index(2)]
+    assert kb.contents(2) == kb.expected()

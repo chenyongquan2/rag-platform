@@ -180,10 +180,17 @@ class _FakeIndices:
 
     def close(self, *, index: str, **_: Any) -> dict[str, Any]:
         self._es.require(index)
+        self._es.closed.add(index)
+        if self._es.close_fails_after_applying:  # like a client time-out: ES did close it
+            raise TimeoutError("injected time-out while closing")
         return {"acknowledged": True}
 
     def open(self, *, index: str, **_: Any) -> dict[str, Any]:
         self._es.require(index)
+        if self._es.open_failures:
+            self._es.open_failures -= 1
+            raise TimeoutError("injected failure while opening")
+        self._es.closed.discard(index)
         self._es.reopens.append(index)
         return {"acknowledged": True, "shards_acknowledged": True}
 
@@ -224,6 +231,11 @@ class FakeElasticsearch:
         self.bulk_calls: list[int] = []
         """Number of operations (documents) in each bulk request."""
         self.refreshes: list[str] = []
+        self.closed: set[str] = set()
+        """Closed indices: bulk, search, count and delete_by_query on them fail."""
+        self.close_fails_after_applying = False
+        self.open_failures = 0
+        """Number of `open` calls that fail before one works."""
         self.reopens: list[str] = []
         """Indices opened again (the force merge closes and opens its index first)."""
         self.merges: list[dict[str, Any]] = []
@@ -232,6 +244,15 @@ class FakeElasticsearch:
         self.delete_failures: list[dict[str, Any]] = []
         self.delete_queries: list[dict[str, Any]] = []
         self.delete_timed_out = False
+
+    def require_open(self, index: str) -> None:
+        self.require(index)
+        if index in self.closed:
+            raise BadRequestError(
+                "index_closed_exception",
+                _Meta(400),  # type: ignore[arg-type]
+                {"error": {"type": "index_closed_exception", "index": index}},
+            )
 
     def require(self, index: str) -> None:
         if index not in self.mappings:
@@ -281,7 +302,7 @@ class FakeElasticsearch:
             if op != "index":
                 raise NotImplementedError(f"FakeElasticsearch bulk supports index only, got {op}")
             index, doc_id = meta["_index"], meta["_id"]
-            self.require(index)
+            self.require_open(index)
             error = self._check_source(index, source)
             if doc_id in self.fail_ids:
                 error = {"type": "injected_failure", "reason": f"injected failure for {doc_id}"}
@@ -308,7 +329,7 @@ class FakeElasticsearch:
     def delete_by_query(
         self, *, index: str, query: Mapping[str, Any], **kwargs: Any
     ) -> dict[str, Any]:
-        self.require(index)
+        self.require_open(index)
         self.delete_queries.append({"query": copy.deepcopy(dict(query)), **kwargs})
         if self.delete_failures:
             return {"deleted": 0, "failures": list(self.delete_failures), "timed_out": False}
@@ -327,7 +348,7 @@ class FakeElasticsearch:
         self, index: str, query: Mapping[str, Any] | None
     ) -> list[tuple[str, dict[str, Any]]]:
         index = self.aliases.get(index, index)  # reads through an alias, as Elasticsearch does
-        self.require(index)
+        self.require_open(index)
         return [(i, s) for i, s in self.docs[index].items() if matches(s, i, query)]
 
     def _composite(

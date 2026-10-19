@@ -34,6 +34,7 @@ a restored number would make them match again after later ingests (see docs/deci
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
@@ -171,6 +172,7 @@ class RebuildReport:
     new_index: str
     started_at: str
     duration_s: float = 0.0
+    index_prefix: str = ""
     resumed: bool = False
     step_seconds: dict[str, float] = field(default_factory=dict)
     full_write: IngestReport | None = None
@@ -217,6 +219,7 @@ class RebuildReport:
             "new_index": self.new_index,
             "started_at": self.started_at,
             "duration_s": round(self.duration_s, 3),
+            "index_prefix": self.index_prefix,
             "resumed": self.resumed,
             "step_seconds": {k: round(v, 3) for k, v in self.step_seconds.items()},
             "full_write": counts(self.full_write),
@@ -250,9 +253,17 @@ class RebuildReport:
             lines.append(f"gate {verdict}: {self.gate.detail}")
         if self.switched:
             lines.append(f"{self.alias} -> {self.new_index} (switched; {self.old_index} is kept)")
+            lines.append(f"data generation: {self.generation_before} -> {self.generation_after}")
+            if not self.previous_recorded:
+                lines.append(
+                    f"WARNING: the switch was not recorded in the _meta of {self.new_index}, so "
+                    f"`rollback` does not know the previous index; use `rollback --to-version "
+                    f"{_version_of(self.old_index)}` to go back"
+                )
+        if self.index_prefix:
             lines.append(
-                f"data generation: {self.generation_before} -> {self.generation_after}"
-                + ("" if self.previous_recorded else " (switch not recorded in the index _meta)")
+                f"index prefix: {self.index_prefix}; give `status` and `rollback` "
+                f"--index-prefix {self.index_prefix}"
             )
         lines.append(f"cost: {self.cost_cny:.6f} CNY; duration {self.duration_s:.1f} s")
         if self.report_path:
@@ -266,6 +277,14 @@ class RollbackResult:
     from_index: str
     to_index: str
     generation: int
+    recorded: bool = True
+    """The roll back was written to the `_meta` of both indices (only `status` reads it)."""
+
+
+def _version_of(index: str) -> str:
+    """The `N` of `..._vN` for messages (`?` when the name has no version)."""
+    match = re.search(r"_v([1-9][0-9]*)$", index)
+    return match.group(1) if match else "?"
 
 
 class _Rebuild:
@@ -314,6 +333,7 @@ class _Rebuild:
             old_index="",
             new_index="",
             started_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            index_prefix=names.prefix,
         )
         self.generation_prefix = f"{DEFAULT_KEY_PREFIX}{names.prefix}"
 
@@ -347,9 +367,12 @@ class _Rebuild:
         target, sentence = self._alias_sentence()
         parts = [f"rebuild of {self.names.alias} failed at step {step}: {reason}.", sentence]
         if self.step != "start" and self.new_index and self.new_index in self._existing():
+            version = self.names.version_of(self.new_index)
             parts.append(
-                f"The new index {self.new_index} was kept: resume it with --version "
-                f"{self.names.version_of(self.new_index)}, or delete it."
+                f"The new index {self.new_index} was kept. After a failure with unchanged "
+                f"settings, resume it with --version {version} (pages whose text did not change "
+                "are skipped, so old chunks stay). After changing chunking, embedding or mapping "
+                "settings, run the rebuild without --version to get a new version, or delete it."
             )
         message = " ".join(parts)
         self.report.error = message
@@ -444,6 +467,8 @@ class _Rebuild:
     def _create(self) -> None:
         if self.new_index in self._existing():  # a leftover of a failed rebuild: continue it
             self.report.resumed = True
+            # A failed force merge may have left it closed; opening an open index changes nothing.
+            self.es.indices.open(index=self.new_index, wait_for_active_shards="all")
             return
         version = self.names.version_of(self.new_index)
         assert version is not None
@@ -539,6 +564,9 @@ class _Rebuild:
                     "switched_at": datetime.now(UTC).isoformat(timespec="seconds"),
                     "generation_before_switch": before,
                     "rebuild_run_id": self.run_id,
+                    "rolled_back_from": None,  # records of an earlier roll back are stale now
+                    "rolled_back_to": None,
+                    "rolled_back_at": None,
                 },
             )
             self.report.previous_recorded = True
@@ -683,12 +711,23 @@ def _rollback(
     except (AliasConflictError, IndexStateError, ValueError) as exc:
         raise RollbackError(f"{exc}; {alias} is unchanged") from exc
     now = datetime.now(UTC).isoformat(timespec="seconds")
-    # Best effort: the records only serve the next `status` and `rollback`.
+    # The alias has moved; the records only serve the next `status` and `rollback`, so a failure
+    # here is reported in the result, not raised.
+    recorded = True
     try:
         update_index_meta(es, current, rolled_back_to=target, rolled_back_at=now)
-        update_index_meta(es, target, **{PREVIOUS_INDEX_KEY: None, "rolled_back_from": current})
+        update_index_meta(
+            es,
+            target,
+            **{
+                PREVIOUS_INDEX_KEY: None,
+                "rolled_back_from": current,
+                "rolled_back_to": None,
+                "rolled_back_at": None,
+            },
+        )
     except Exception:
-        pass
+        recorded = False
     prefix = f"{DEFAULT_KEY_PREFIX}{names.prefix}"
     try:
         generation = incr_data_generation(redis, names.kb, key_prefix=prefix)
@@ -697,4 +736,10 @@ def _rollback(
             f"{alias} was moved back to {target}, but the data generation was not raised "
             f"({type(exc).__name__}: {exc}); caches may serve results of {current}"
         ) from exc
-    return RollbackResult(alias=alias, from_index=current, to_index=target, generation=generation)
+    return RollbackResult(
+        alias=alias,
+        from_index=current,
+        to_index=target,
+        generation=generation,
+        recorded=recorded,
+    )

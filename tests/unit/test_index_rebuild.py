@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,7 @@ from rag.index.rebuild import (
 from rag.ingest import KbProcessor
 from rag.ingest import build as ingest_build
 from rag.ingest.job import IngestError, IngestJob
+from rag.ingest.job import main as ingest_main
 from rag.testing.fakes import FakeEmbedding
 from rag.testing.ingest import ListConnector, page, section
 from rag.testing.services import FakeElasticsearch, FakeRedis
@@ -100,6 +102,7 @@ class Env:
 
     def rebuild(self, **kwargs: Any) -> Any:
         kwargs.setdefault("gate", accept)
+        kwargs.setdefault("embed_factory", embed_factory)
         return rebuild_kb(
             self.cfg,
             self.settings,
@@ -107,7 +110,6 @@ class Env:
             redis=self.redis,
             connector=self.connector,
             names=self.names,
-            embed_factory=embed_factory,
             processor=self.processor(),
             lock_provider=self.locks,
             **kwargs,
@@ -216,6 +218,28 @@ def test_sync_picks_up_changes_made_during_the_full_write(env: Env) -> None:
     assert runs == {report.full_write.run_id, report.sync.run_id}
 
 
+def test_rebuild_does_not_block_incremental_runs_on_the_old_index(env: Env) -> None:
+    """An incremental run on the alias, started while a phase of the rebuild is writing."""
+    during: list[Any] = []
+    inner = threading.Event()
+
+    class IngestWhileEmbedding(FakeEmbedding):
+        def _vector(self, text: str) -> list[float]:
+            if not inner.is_set():  # first vector of the phase: the job holds its lock now
+                inner.set()
+                env.connector.put("c.md", page("C", section("c-meanwhile")))
+                during.append(env.ingest())
+            return super()._vector(text)
+
+    def factory(_run_id: str) -> tuple[FakeEmbedding, None]:
+        return IngestWhileEmbedding(dim=DIMS), None
+
+    report = env.rebuild(embed_factory=factory)
+
+    assert during and during[0].updated == [doc_id("c.md")] and during[0].index == env.index(1)
+    assert report.switched and env.contents(2) == env.expected()
+
+
 def test_force_merge_after_last_write_before_gate(env: Env) -> None:
     seen: dict[str, Any] = {}
 
@@ -249,6 +273,7 @@ def test_gate_failure_leaves_alias_untouched(env: Env) -> None:
     error = excinfo.value
     assert error.step == "gate" and error.alias_untouched is True
     assert "hit@5 0.52" in str(error) and "unchanged" in str(error)
+    assert "without --version" in str(error)  # changed settings need a new version, not a resume
     assert error.report is not None and error.report.gate is not None
     assert error.report.gate.metrics == {"hit_at_5": 0.52}
     assert env.alias() == env.index(1)
@@ -271,13 +296,22 @@ def test_gate_exception_leaves_alias_untouched(env: Env) -> None:
     assert env.alias() == env.index(1)
 
 
-@pytest.mark.parametrize("step", ["full_write", "sync", "merge"])
+@pytest.mark.parametrize("step", ["start", "create", "full_write", "sync", "merge"])
 def test_failure_before_switch_leaves_alias_untouched(
     env: Env, step: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     before = env.generation()
     callback: Callable[[str], None] | None = None
-    if step == "full_write":
+    kwargs: dict[str, Any] = {}
+    if step == "start":
+        kwargs["version"] = 1  # the version the alias serves
+    elif step == "create":
+
+        def no_create(**_: Any) -> None:
+            raise RuntimeError("cannot create the index")
+
+        monkeypatch.setattr(env.es.indices, "create", no_create)
+    elif step == "full_write":
         env.es.fail_ids = {f"{doc_id('a.md')}#0"}
     elif step == "sync":
 
@@ -295,12 +329,12 @@ def test_failure_before_switch_leaves_alias_untouched(
         monkeypatch.setattr(env.es.indices, "forcemerge", no_merge)
 
     with pytest.raises(RebuildError) as excinfo:
-        env.rebuild(after_step=callback)
+        env.rebuild(after_step=callback, **kwargs)
 
     error = excinfo.value
     assert error.step == step and error.alias_untouched is True
     assert f"step {step}" in str(error) and "unchanged" in str(error)
-    assert error.new_index == env.index(2)
+    assert error.new_index == env.index(1 if step == "start" else 2)
     assert env.alias() == env.index(1)
     assert env.generation() == before
 
@@ -315,6 +349,8 @@ def test_switch_raises_generation_once(env: Env) -> None:
 
 
 def test_alias_moved_during_rebuild_fails_without_switching(env: Env) -> None:
+    before = env.generation()
+
     def someone_else_switches(step: str) -> None:
         if step == "merge":
             create_kb_index(env.es, env.names, 3, index_body_for_kb(env.cfg, dims=DIMS))
@@ -325,6 +361,7 @@ def test_alias_moved_during_rebuild_fails_without_switching(env: Env) -> None:
 
     assert excinfo.value.step == "switch"
     assert env.alias() == env.index(3)  # left where the other party put it
+    assert env.generation() == before
     assert "not changed by this rebuild" in str(excinfo.value)
 
 
@@ -367,8 +404,10 @@ def test_rollback_points_alias_back_without_deleting(env: Env) -> None:
         env.rollback()
     assert env.alias() == env.index(1)
 
+    assert index_meta(env.es, env.index(2))["rolled_back_to"] == env.index(1)
     forward = env.rollback(to_version=2)  # explicit target: back to the new index
     assert forward.to_index == env.index(2) and env.alias() == env.index(2)
+    assert "rolled_back_to" not in index_meta(env.es, env.index(2))  # no stale record
 
 
 def test_rollback_refuses_without_switch_record(env: Env) -> None:
@@ -423,6 +462,64 @@ def test_resume_existing_unaliased_version(env: Env) -> None:
     assert env.index(3) not in env.es.mappings
     assert len(env.es.bulk_calls) == writes  # nothing to write again: the docstore knew it all
     assert report.full_write.unchanged and not report.full_write.added
+
+
+def test_force_merge_reopens_the_index_when_close_fails_after_applying(env: Env) -> None:
+    env.es.close_fails_after_applying = True  # a client time-out: Elasticsearch did close it
+
+    with pytest.raises(RebuildError, match="injected time-out") as excinfo:
+        env.rebuild()
+
+    assert excinfo.value.step == "merge"
+    assert env.es.closed == set()  # the failure handler opened it again
+    assert env.alias() == env.index(1)
+
+
+def test_resume_opens_a_version_left_closed(env: Env) -> None:
+    env.es.open_failures = 2  # the open and the retry in the failure handler both fail
+
+    with pytest.raises(RebuildError) as excinfo:
+        env.rebuild()
+
+    assert excinfo.value.step == "merge" and env.es.closed == {env.index(2)}
+    report = env.rebuild(version=2)  # the resume opens it before it writes
+    assert report.resumed and report.switched
+    assert env.es.closed == set() and env.alias() == env.index(2)
+
+
+def test_unrecorded_switch_is_visible_and_rollback_still_works(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def break_meta_after_gate(step: str) -> None:
+        if step == "gate":
+
+            def no_meta(**_: Any) -> None:
+                raise RuntimeError("meta write failed")
+
+            monkeypatch.setattr(env.es.indices, "put_mapping", no_meta)
+
+    report = env.rebuild(after_step=break_meta_after_gate)
+
+    assert report.switched and report.previous_recorded is False
+    assert any("not recorded" in line and "--to-version" in line for line in report.summary_lines())
+    monkeypatch.undo()
+    with pytest.raises(RollbackError, match="no previous index"):
+        env.rollback()
+    assert env.rollback(to_version=1).to_index == env.index(1)
+
+
+def test_rollback_reports_when_it_could_not_record(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env.rebuild()
+
+    def no_meta(**_: Any) -> None:
+        raise RuntimeError("meta write failed")
+
+    monkeypatch.setattr(env.es.indices, "put_mapping", no_meta)
+    result = env.rollback()
+
+    assert env.alias() == env.index(1) and result.recorded is False
 
 
 def test_chunk_count_gate(env: Env) -> None:
@@ -512,3 +609,20 @@ def test_cli_rebuild_and_rollback(
         cli.main(["rebuild", *common, "--no-gate", "--min-chunk-ratio", "0.5"], **deps)
     assert excinfo.value.code == 2
     assert cli.main(["rebuild", *common, "--min-chunk-ratio", "1.5"], **deps) == 2
+
+
+def test_cli_rebuild_prints_the_index_prefix(
+    env: Env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (env.tmp / "kb" / "public").mkdir(parents=True)
+    (env.tmp / "kb" / "public" / f"{KB}.yaml").write_text(json.dumps(KB_YAML), "utf-8")
+    monkeypatch.setattr(ingest_build, "load_tokenizer", lambda _model: words)
+    deps = {"settings": env.settings, "es": env.es, "redis": env.redis, "connector": env.connector}
+    assert ingest_main(["--kb", KB, "--fake-embed"], **deps) == 0  # creates fake_kb_t_v1
+    capsys.readouterr()
+
+    assert cli.main(["rebuild", "--kb", KB, "--fake-embed"], **deps) == 0  # no --index-prefix
+
+    out = capsys.readouterr().out
+    assert "fake_kb_t -> fake_kb_t_v2" in out
+    assert "index prefix: fake_" in out and "--index-prefix fake_" in out

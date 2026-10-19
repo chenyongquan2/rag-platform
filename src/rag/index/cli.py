@@ -303,6 +303,12 @@ def main(
                 f"{result.from_index} is kept)"
             )
             print(f"data generation: {result.generation}")
+            if not result.recorded:
+                print(
+                    "warning: the roll back could not be written to the indices' _meta; "
+                    "`status` will not show it",
+                    file=sys.stderr,
+                )
     except (ValueError, AliasConflictError, IndexStateError, RollbackError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
