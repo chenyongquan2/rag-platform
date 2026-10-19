@@ -1,26 +1,26 @@
 """Page labels of a synthetic question (spec P1-05, design s14-2).
 
-The source page of the span is always a gold page. Many HF pages share text (timm model cards
-repeat the same fine-tuning section, course pages repeat their subtitles), so other pages often
-answer the question too; with only the source page as gold, retrieval that returns one of them
-is scored wrong. A page is added as gold when, by exact text search over the cleaned corpus:
+The source page of the span is always a gold page. Many HF pages share text verbatim (timm
+model cards repeat the same inference snippet, course pages repeat their subtitles), so another
+page can hold the very sentence the question was written from; with only the source page as gold,
+retrieval that returns that page is scored wrong.
 
-- it contains the answer (lower case, whitespace collapsed, trailing period and quotes removed),
-  and the answer also occurs in the source span (else the answer is a paraphrase and cannot be
-  searched for), and is at least `min_answer_chars` long;
-- it contains every content word of the question that also occurs in the source span.
-
-Searching for the span itself finds almost nothing (spans are cut at random offsets: 2 of 200
-match a whole other page), and searching for a piece of the span labels pages that share the
-template but not the answer (a timm model card's model name); see docs/decisions.md.
+A page is added as gold only when it contains, verbatim (lower case, whitespace collapsed), an
+answer-bearing unit of the span: a line or sentence of the span that contains the answer and is
+at least `min_unit_chars` long. A short or common answer alone never adds a page ("accuracy",
+"two" and "huggingface_hub" occur on hundreds of pages that do not answer the question). The
+answer must occur in the span; a paraphrased answer adds nothing. Pages outside the sampled
+languages and the public questions' pages are never added, as in the sampler.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import re
+from collections.abc import Iterable, Sequence
 
-from rag.eval.synthetic.filters import STOPWORDS, tokens
 from rag.eval.synthetic.sampler import Page
+
+_UNITS = re.compile(r"\n|(?<=[.!?])\s+")
 
 
 def normalize(text: str) -> str:
@@ -31,30 +31,44 @@ def normalize_answer(answer: str) -> str:
     return normalize(answer).rstrip(".").strip("`'\" ")
 
 
-class PageIndex:
-    """The cleaned pages, normalized once for repeated exact-text searches."""
+def answer_units(answer: str, span: str, *, min_unit_chars: int) -> list[str]:
+    """Normalized lines and sentences of `span` that contain the answer and are long enough."""
+    wanted = normalize_answer(answer)
+    if not wanted:
+        return []
+    units = {normalize(u) for u in _UNITS.split(span)}
+    return sorted(u for u in units if wanted in u and len(u) >= min_unit_chars)
 
-    def __init__(self, pages: Iterable[Page], *, min_answer_chars: int = 3) -> None:
-        self.min_answer_chars = min_answer_chars
-        self._text: dict[str, str] = {}
-        self._words: dict[str, set[str]] = {}
-        for page in pages:
-            self._text[page.doc_id] = normalize(page.text)
-            self._words[page.doc_id] = set(tokens(page.text))
+
+class PageIndex:
+    """The cleaned pages that may be labelled, normalized once for exact-text searches."""
+
+    def __init__(
+        self,
+        pages: Iterable[Page],
+        *,
+        min_unit_chars: int = 40,
+        languages: Sequence[str] = ("en",),
+        exclude_pages: Iterable[str] = (),
+    ) -> None:
+        self.min_unit_chars = min_unit_chars
+        excluded = set(exclude_pages)
+        self._text = {
+            p.doc_id: normalize(p.text)
+            for p in pages
+            if p.language in languages and p.doc_id not in excluded
+        }
 
     def __len__(self) -> int:
         return len(self._text)
 
-    def answering_pages(self, *, question: str, answer: str, span: str, source: str) -> list[str]:
-        """Other pages that contain the answer and the question's words (sorted doc_ids)."""
-        wanted = normalize_answer(answer)
-        span_text = normalize(span)
-        if len(wanted) < self.min_answer_chars or wanted not in span_text:
+    def answering_pages(self, *, answer: str, span: str, source: str) -> list[str]:
+        """Other pages holding an answer-bearing line or sentence of the span (sorted)."""
+        units = answer_units(answer, span, min_unit_chars=self.min_unit_chars)
+        if not units:
             return []
-        span_words = set(tokens(span))
-        words = [w for w in tokens(question) if w not in STOPWORDS and w in span_words]
         return sorted(
             doc
             for doc, text in self._text.items()
-            if doc != source and wanted in text and all(w in self._words[doc] for w in words)
+            if doc != source and any(u in text for u in units)
         )

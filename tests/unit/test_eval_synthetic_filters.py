@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
 import pytest
 
@@ -136,58 +137,50 @@ def test_near_duplicates_stay_in_one_set() -> None:
     )
 
 
-def test_answering_pages_by_exact_text() -> None:
-    from rag.eval.synthetic.labels import PageIndex
+def _page(doc: str, text: str, language: str = "en") -> Any:
     from rag.eval.synthetic.sampler import Page
 
-    card = (
-        "Use timm.create_model('{m}', pretrained=True, num_classes=NUMBER_OF_CLASSES) to finetune."
-    )
+    return Page(doc_id=doc, source_rel=doc, doc_type="markdown", language=language, text=text)
+
+
+def test_answering_pages_by_exact_text() -> None:
+    from rag.eval.synthetic.labels import PageIndex
+
+    snippet = ">>> top5_prob, top5_catid = torch.topk(probabilities, 5)"
+    span = f"To get the top-5 predictions class names:\n```py\n{snippet}\n```"
     pages = [
-        Page(
-            doc_id=f"hf_docs:{m}.md",
-            source_rel=f"{m}.md",
-            doc_type="markdown",
-            language="en",
-            text=f"# {m}\n" + card.format(m=m),
-        )
-        for m in ("pnasnet", "xception65", "dla102")
+        _page("hf_docs:pnasnet.md", f"# PNASNet\n{span}"),
+        # a real verbatim duplicate: another model card with the same snippet
+        _page("hf_docs:dla.md", f"# DLA\nOther text.\n{snippet}\nmore"),
+        _page("hf_docs:zh.md", f"# 中文\n{snippet}", language="zh"),
+        _page("hf_docs:public.md", f"# Public\n{snippet}"),
+        _page("hf_docs:topk.md", "torch.topk returns the k largest values; top 5 probabilities."),
     ]
-    pages.append(
-        Page(
-            doc_id="hf_docs:other.md",
-            source_rel="other.md",
-            doc_type="markdown",
-            language="en",
-            text="num_classes is also a field of other configs.",
-        )
+    index = PageIndex(pages, exclude_pages=["hf_docs:public.md"])
+    got = index.answering_pages(answer="torch.topk", span=span, source="hf_docs:pnasnet.md")
+    # not the zh page, not the public page, not a page that only mentions the answer
+    assert got == ["hf_docs:dla.md"]
+
+    # negatives from the review: a short or common answer alone never adds a page
+    xnli = _page("hf_docs:xnli.md", ">>> results = xnli_metric.compute()\n{'accuracy': 1.0}\n")
+    paper = _page("hf_docs:xlmr.md", "XLM-R reaches an accuracy of 80.9 on XNLI {'accuracy': 1.0}")
+    mrpc = _page(
+        "hf_docs:ch3.md",
+        "We adjust the number of labels to the number of classes on this dataset, here two.",
     )
-    index = PageIndex(pages)
-    span = pages[0].text
-    # a generic question: every model card answers it, the unrelated page does not
-    assert index.answering_pages(
-        question="Which timm.create_model parameter sets the number of classes to finetune?",
-        answer="`num_classes`.",
-        span=span,
-        source="hf_docs:pnasnet.md",
-    ) == ["hf_docs:dla102.md", "hf_docs:xception65.md"]
-    # a page-specific answer stays on its page
-    assert (
-        index.answering_pages(
-            question="What model name loads the pretrained PNASNet?",
-            answer="pnasnet",
-            span=span,
-            source="hf_docs:pnasnet.md",
-        )
-        == []
+    readme = _page("hf_docs:distil.md", "MRPC has two classes; we train two epochs on GLUE MRPC.")
+    hub = _page(
+        "hf_docs:hub.md",
+        "The `huggingface_hub` library allows you to interact with the Hugging Face Hub.",
     )
+    imports = _page("hf_docs:imp.md", "from huggingface_hub import HfApi  # work with the Hub")
+    index = PageIndex([xnli, paper, mrpc, readme, hub, imports])
+    for answer, source in (("accuracy", xnli), ("two", mrpc), ("huggingface_hub", hub)):
+        assert index.answering_pages(answer=answer, span=source.text, source=source.doc_id) == []
     # an answer that is not in the span (a paraphrase) adds nothing
     assert (
-        index.answering_pages(
-            question="Which argument sets the class count?",
-            answer="the class count argument",
-            span=span,
-            source="hf_docs:pnasnet.md",
+        PageIndex(pages).answering_pages(
+            answer="the k largest values", span=span, source="hf_docs:pnasnet.md"
         )
         == []
     )

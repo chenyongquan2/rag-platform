@@ -354,7 +354,12 @@ def _build(args: argparse.Namespace, settings: ServiceSettings) -> int:
     for c in crits:
         scores.setdefault(c.span_id, {})[c.criterion] = c.score
         rationales.setdefault(c.span_id, {})[c.criterion] = c.rationale
-    index = PageIndex(load_pages(cfg, settings))
+    public = [] if args.no_exclude_public else _public_pages(cfg)
+    index = PageIndex(
+        load_pages(cfg, settings),
+        languages=SamplerConfig().languages,
+        exclude_pages=public,
+    )
     generator = GeneratorConfig(**({"model": gens[0].model} if gens else {}))
     critic = CriticConfig(**({"model": crits[0].model} if crits else {}))
 
@@ -401,9 +406,7 @@ def _build(args: argparse.Namespace, settings: ServiceSettings) -> int:
         question, n_q = redact_secrets(gen.question or "")
         answer, n_a = redact_secrets(gen.answer or "")
         redacted += n_redacted + n_q + n_a
-        others = index.answering_pages(
-            question=gen.question or "", answer=gen.answer or "", span=span.text, source=gen.doc_id
-        )
+        others = index.answering_pages(answer=gen.answer or "", span=span.text, source=gen.doc_id)
         runs_kept.append(overlap.longest_run)
         recall_kept.append(overlap.content_recall)
         kept.append(
@@ -482,8 +485,9 @@ def _build(args: argparse.Namespace, settings: ServiceSettings) -> int:
         "rejections_only_reason": dict(sorted(only_reason.items())),
         "redacted_tokens": redacted,
         "labels": {
-            "rule": "source page + every other page containing the answer (also in the span) "
-            "and all question words found in the span (rag.eval.synthetic.labels)",
+            "rule": "source page + every other English, non-public page that contains verbatim "
+            f"a line or sentence of the span with the answer, at least {index.min_unit_chars} "
+            "characters (rag.eval.synthetic.labels)",
             "questions_with_added_pages": sum(bool(q.meta["pages_added"]) for q in kept),
             "pages_added": sum(int(q.meta["pages_added"]) for q in kept),
         },
@@ -561,6 +565,11 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--holdout-share", type=float, default=0.5)
     p.add_argument("--min-each", type=int, default=100)
     p.add_argument("--max-copy-run", type=int, default=FilterConfig().max_copy_run)
+    p.add_argument(
+        "--no-exclude-public",
+        action="store_true",
+        help="also label the public questions' source pages",
+    )
     p.add_argument("--out-dir", help="default: the KB's eval directory")
     return parser
 
