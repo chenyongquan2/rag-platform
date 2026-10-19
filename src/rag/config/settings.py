@@ -336,6 +336,27 @@ class ServiceSettings(BaseSettings):
     service_host: str = "127.0.0.1"
     service_port: int = Field(default=28080, gt=0, lt=65536)
 
+    # The ask_docs graph (spec P3-01, design s13-3, s16-4, s16-8). `agent_deadline_ms`: total time
+    # of one ask_docs request (a caller's deadline_ms replaces it, at most `search_max_deadline_ms`;
+    # MCP clients time out tool calls). `agent_answer_reserve_ms`: time kept for writing the
+    # answer: no further round starts when less is left (the online chat profile's deadline is
+    # 12 s). `agent_recursion_limit`: LangGraph steps of one run (route, rewrite, retrieve, judge
+    # count one each; three rounds need about 12). `agent_token_cap`: model tokens of one request
+    # (usage from the gateway, else an estimate); `agent_answer_reserve_tokens`: tokens kept for
+    # the answer, so the calls before it (rewrite, judge) stop earlier. `agent_history_turns`:
+    # past turns of a session given to the graph (0 = no history). `checkpoint_url`: one
+    # checkpoint thread per request. `session_store_url`: the turns of each session;
+    # `session_lock_url`: `memory://` serialises one session's requests inside this process,
+    # `file://<dir>` also across processes on this machine (design s16-7).
+    agent_deadline_ms: int = Field(default=30_000, gt=0)
+    agent_answer_reserve_ms: int = Field(default=12_000, ge=0)
+    agent_recursion_limit: int = Field(default=25, gt=0)
+    agent_token_cap: int = Field(default=20_000, gt=0)
+    agent_answer_reserve_tokens: int = Field(default=6_000, ge=0)
+    agent_history_turns: int = Field(default=6, ge=0)
+    session_store_url: str = "sqlite://data/sessions/sessions.db"
+    session_lock_url: str = "memory://"
+
     # Money: stop real model jobs when spent + estimate would exceed budget_stop_cny.
     budget_cny: float = Field(default=30.0, ge=0)
     budget_stop_cny: float = Field(default=28.0, ge=0)
@@ -363,6 +384,25 @@ class ServiceSettings(BaseSettings):
             )
         if not all(isinstance(g, str) and g for g in self.service_acl_groups):
             raise ValueError("service_acl_groups must be non-empty group names")
+        return self
+
+    @model_validator(mode="after")
+    def _agent_limits_consistent(self) -> Self:
+        if self.agent_deadline_ms > self.search_max_deadline_ms:
+            raise ValueError(
+                f"agent_deadline_ms ({self.agent_deadline_ms}) must not exceed "
+                f"search_max_deadline_ms ({self.search_max_deadline_ms})"
+            )
+        if self.agent_answer_reserve_ms >= self.agent_deadline_ms:
+            raise ValueError(
+                f"agent_answer_reserve_ms ({self.agent_answer_reserve_ms}) must be below "
+                f"agent_deadline_ms ({self.agent_deadline_ms}): the search needs time too"
+            )
+        if self.agent_answer_reserve_tokens >= self.agent_token_cap:
+            raise ValueError(
+                f"agent_answer_reserve_tokens ({self.agent_answer_reserve_tokens}) must be "
+                f"below agent_token_cap ({self.agent_token_cap})"
+            )
         return self
 
     @model_validator(mode="after")

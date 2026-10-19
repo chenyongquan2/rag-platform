@@ -58,6 +58,14 @@ ANSWER_COST_CNY = "rag.answer.cost_cny"  # CNY of those lines
 GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"  # GenAI conventions
 GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"  # reasoning tokens included
 
+# ask_docs graph (design s13-3; spec P3-01): set on the node step spans and the request span.
+ROUTE_RETRIEVE = "rag.route.retrieve"  # the rules decided to retrieve
+ROUTE_REASON = "rag.route.reason"  # which rule decided
+AGENT_ROUND = "rag.agent.round"  # retrieval rounds done so far
+AGENT_VERDICT = "rag.agent.verdict"  # sufficient | insufficient
+AGENT_STOP_REASON = "rag.agent.stop_reason"  # deadline | recursion_limit | token_cap | max_rounds
+AGENT_TOKENS = "rag.agent.tokens_used"  # tokens spent on model calls by this request so far
+
 # Value of ERROR_CATEGORY when an exception has no category (a bug, not a known failure).
 UNCLASSIFIED = "unclassified"
 OUTCOME_OK = "ok"

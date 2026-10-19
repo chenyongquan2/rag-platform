@@ -7,7 +7,7 @@ everything that crosses a layer boundary is one of these models.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
@@ -35,6 +35,10 @@ class ErrorCategory(StrEnum):
     KB_NOT_FOUND = "kb_not_found"
     NOT_READY = "not_ready"
     INTERNAL_ERROR = "internal_error"
+    # ask_docs graph (spec P3-01, s16-8): the run was stopped by its total deadline or its
+    # recursion limit, or by the per-request token cap; the answer uses what was found so far.
+    AGENT_DEADLINE = "agent_deadline"
+    TOKEN_CAP_REACHED = "token_cap_reached"
 
 
 class AnswerStatus(StrEnum):
@@ -121,6 +125,11 @@ class _ResultMeta(BaseModel):
         generation_error = getattr(self, "generation_error", None)
         if generation_error is not None:
             categories.append(ErrorCategory(generation_error))
+        stop_reason = getattr(self, "stop_reason", None)
+        if stop_reason in ("deadline", "recursion_limit"):
+            categories.append(ErrorCategory.AGENT_DEADLINE)
+        elif stop_reason == "token_cap":
+            categories.append(ErrorCategory.TOKEN_CAP_REACHED)
         return categories
 
 
@@ -224,3 +233,46 @@ class Answer(_ResultMeta):
     @property
     def text(self) -> str:
         return " ".join(s.text for s in self.sentences)
+
+
+StopReason = Literal["deadline", "recursion_limit", "token_cap", "max_rounds"]
+"""Why an `ask_docs` run stopped searching before it confirmed it had searched enough (s13-3):
+its total deadline, its recursion limit, the per-request token cap, or the KB's `max_rounds`."""
+
+
+class AskResult(_ResultMeta):
+    """Output of the `ask_docs` graph (design s4-2, s13-3, s16-1).
+
+    `sources` are the numbered fragments the answer was written from (the citation with marker n
+    points to `sources[n - 1]`); after a run cut short, the chunks found so far. `rounds` counts
+    retrieval rounds (0 when the question needed none). `status` is `need_clarification` only in
+    P3-02 (`answer` is then the question to ask and `resume_token` the thread to resume).
+    `coverage_unconfirmed` is the s13-3 flag "not confirmed that everything was searched": set
+    with `stop_reason`, and `notice` says so in the answer's language. `cache_allowed` is False
+    for a call that carried history (the exact cache neither reads nor writes it, s12-1).
+    """
+
+    status: AnswerStatus = AnswerStatus.ANSWERED
+    found: bool = False
+    answer: str = ""
+    sentences: list[AnswerSentence] = Field(default_factory=list)
+    sources: list[Chunk] = Field(default_factory=list)
+    rounds: int = Field(default=0, ge=0)
+    session_id: str | None = None
+    thread_id: str = ""
+    answer_parse_failed: bool = False
+    generation_error: ErrorCategory | None = None
+    citation_check: CitationCheck = Field(default_factory=CitationCheck)
+    config_version: str = ""
+    coverage_unconfirmed: bool = False
+    stop_reason: StopReason | None = None
+    notice: str | None = None
+    tokens_used: int = Field(default=0, ge=0)
+    used_history: bool = False
+    cache_allowed: bool = True
+    resume_token: str | None = None
+
+    @property
+    def chunks(self) -> list[Chunk]:
+        """Same as `sources`: what `RequestScope.set_result` counts as hits."""
+        return self.sources

@@ -50,8 +50,9 @@ def search_config_version(
     """First 16 hex digits of the sha256 of what decides a search result besides the data: the
     whole KB config, the embedding model and the reranker (model and input length)."""
     payload = {
-        # The description only tells callers what the KB holds (spec P0-09); it changes no result.
-        "kb_config": cfg.model_dump(mode="json", exclude={"description"}),
+        # The description only tells callers what the KB holds (spec P0-09); `agent` (rounds of
+        # the ask_docs graph, spec P3-01) is not part of a search. Neither changes a result.
+        "kb_config": cfg.model_dump(mode="json", exclude={"description", "agent"}),
         "embed_model": embed_model_id,
         "reranker": {
             "model": settings.reranker_model,

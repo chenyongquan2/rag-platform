@@ -212,6 +212,17 @@ class AnswerConfig(_Strict):
     parse_retries: int = Field(default=1, ge=0)
 
 
+class AgentConfig(_Strict):
+    """The `ask_docs` graph for this knowledge base (design s13-3, s15-3; spec P3-01).
+
+    - `max_rounds`: retrieval rounds of one request at most (the sufficiency judge of P3-03 asks
+      for another round while this many have not been used). Deadline, recursion limit and
+      token cap are service settings (`agent_*`), they bound a request whatever the KB.
+    """
+
+    max_rounds: int = Field(default=3, ge=1)
+
+
 class KnowledgeBaseConfig(_Strict):
     kb: str = Field(default="default", pattern=r"^[a-z0-9][a-z0-9_-]*$")
     description: str = ""
@@ -226,6 +237,7 @@ class KnowledgeBaseConfig(_Strict):
     eval: EvalConfig = Field(default_factory=EvalConfig)
     access: AccessConfig = Field(default_factory=AccessConfig)
     answer: AnswerConfig = Field(default_factory=AnswerConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
 
     @model_validator(mode="after")
     def _default_eval_dir(self) -> Self:

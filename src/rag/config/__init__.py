@@ -2,6 +2,7 @@
 
 from rag.config.kb import (
     AccessConfig,
+    AgentConfig,
     AnswerConfig,
     EsConfig,
     EvalConfig,
@@ -20,6 +21,7 @@ from rag.config.settings import ChatProfile, ChatProfileName, ModelPrice, Servic
 __all__ = [
     "REPO_ROOT",
     "AccessConfig",
+    "AgentConfig",
     "AnswerConfig",
     "ChatProfile",
     "ChatProfileName",

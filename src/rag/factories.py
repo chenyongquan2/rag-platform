@@ -11,8 +11,13 @@ import hashlib
 import os
 import re
 import threading
-from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    asynccontextmanager,
+    contextmanager,
+)
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -24,7 +29,10 @@ from llama_index.core.storage.kvstore import SimpleKVStore
 if TYPE_CHECKING:
     from elasticsearch import Elasticsearch
     from langgraph.checkpoint.base import BaseCheckpointSaver
+    from langgraph.checkpoint.serde.base import SerializerProtocol
     from redis import Redis
+
+    from rag.agent.session import SessionLocks, SessionStore
 
 _SCHEME_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*)://(.*)$")
 
@@ -264,3 +272,86 @@ def make_lock_provider(url: str) -> LockProvider:
     if scheme == "memory":
         return InProcessLockProvider()
     raise _unsupported("lock provider", scheme, "file, memory")
+
+
+# ---- ask_docs: async checkpointer, session history, session locks (spec P3-01) --------------
+
+
+class CheckpointerSource(Protocol):
+    def open(self) -> AbstractAsyncContextManager[BaseCheckpointSaver]:
+        """A saver for the `async with` block (the ask_docs graph is async)."""
+        ...
+
+
+class _SqliteCheckpointerSource:
+    """A connection per request, closed with the block: nothing is tied to one event loop and
+    no thread outlives the request. WAL mode and a busy timeout let requests of different
+    sessions write their checkpoints at the same time."""
+
+    def __init__(self, path: Path, serde: SerializerProtocol | None) -> None:
+        self.path = path
+        self.serde = serde
+
+    @asynccontextmanager
+    async def open(self) -> AsyncIterator[BaseCheckpointSaver]:
+        import aiosqlite
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(self.path) as conn:
+            await conn.execute("PRAGMA journal_mode=WAL")
+            await conn.execute("PRAGMA busy_timeout=5000")
+            saver = AsyncSqliteSaver(conn, serde=self.serde)
+            await saver.setup()
+            yield saver
+
+
+class _MemoryCheckpointerSource:
+    def __init__(self, serde: SerializerProtocol | None) -> None:
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        self._saver = InMemorySaver(serde=serde)
+
+    @asynccontextmanager
+    async def open(self) -> AsyncIterator[BaseCheckpointSaver]:
+        yield self._saver
+
+
+def make_checkpointer_source(
+    url: str, *, serde: SerializerProtocol | None = None
+) -> CheckpointerSource:
+    """`sqlite://<path>` -> an async SQLite saver per `open()`, `memory://` -> one in-memory
+    saver kept by the source. `serde` lists the types the state may hold (the serializer
+    refuses others in strict mode)."""
+    scheme, _ = split_url(url)
+    if scheme == "sqlite":
+        return _SqliteCheckpointerSource(url_path(url), serde)
+    if scheme == "memory":
+        return _MemoryCheckpointerSource(serde)
+    raise _unsupported("async checkpointer", scheme, "sqlite, memory")
+
+
+def make_session_store(url: str, *, keep_turns: int) -> SessionStore:
+    """`sqlite://<path>` -> turns in a SQLite file, `memory://` -> in process memory; the last
+    `keep_turns` turns of each session are kept (0 keeps none). Postgres later (design s16-7)."""
+    from rag.agent.session import MemorySessionStore, SqliteSessionStore
+
+    scheme, _ = split_url(url)
+    if scheme == "sqlite":
+        return SqliteSessionStore(url_path(url), keep_turns)
+    if scheme == "memory":
+        return MemorySessionStore(keep_turns)
+    raise _unsupported("session store", scheme, "sqlite, memory")
+
+
+def make_session_locks(url: str) -> SessionLocks:
+    """`memory://` -> locks inside this process, `file://<dir>` -> also file locks across the
+    processes of this machine. Redis or Postgres locks come with several instances."""
+    from rag.agent.session import SessionLocks
+
+    scheme, _ = split_url(url)
+    if scheme == "memory":
+        return SessionLocks()
+    if scheme == "file":
+        return SessionLocks(FileLockProvider(url_path(url)))
+    raise _unsupported("session lock", scheme, "file, memory")

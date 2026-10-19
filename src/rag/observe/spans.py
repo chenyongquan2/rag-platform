@@ -37,7 +37,7 @@ from opentelemetry.util.types import AttributeValue
 from rag.observe import attributes as attr
 from rag.observe.context import bind_request, current_request
 from rag.observe.setup import get_observability
-from rag.types import Answer, RetrievalResult
+from rag.types import Answer, AskResult, RetrievalResult
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ class RequestScope:
             self.error_categories.append(str(category))
         self.span.set_attribute(attr.ERROR_CATEGORIES, list(self.error_categories))
 
-    def set_result(self, result: RetrievalResult | Answer) -> None:
+    def set_result(self, result: RetrievalResult | Answer | AskResult) -> None:
         """Index version, data generation, flags and hit count of the result on the root span;
         its error categories are counted when the request ends."""
         self.span.set_attributes(
