@@ -95,7 +95,16 @@ class MetadataConfig(_Strict):
 
 
 class EsConfig(_Strict):
+    """Elasticsearch settings of one knowledge base.
+
+    - `analyzer`: analyzer of `content` and `title_path` (design s7-3).
+    - `vector_index`: type of the dense_vector field (spec P2-03 quantization ablation):
+      `int8_hnsw` (default), `bbq_hnsw` or `flat`; `bbq_disk` needs Enterprise and is not offered.
+      The HNSW and rescore parameters are our defaults for the type (`rag.index.mapping`).
+    """
+
     analyzer: str = "standard"
+    vector_index: Literal["int8_hnsw", "bbq_hnsw", "flat"] = "int8_hnsw"
 
 
 RRF_ROUTES = ("bm25", "vector")
@@ -117,6 +126,8 @@ class RetrievalConfig(_Strict):
       (s9-3), >= 0, not all 0 (spec P0-13).
     - `rerank_n`: fused candidates sent to the reranker (s10-1); later ones are dropped.
     - `final_k`: chunks returned when the caller gives no top_k.
+    - `rerank_with_title`: the reranker reads the title path before the body (s10-1); false sends
+      the body alone (spec P2-03 ablation).
     - `threshold`: rerank score (sigmoid, 0 to 1) a chunk needs to be returned (s10-2).
     - `expand`: context added around each returned chunk (s10-3, s7-2): `none`, `neighbors`
       (same page, chunk_index within `expand_window`) or `parent` (its heading section).
@@ -133,6 +144,7 @@ class RetrievalConfig(_Strict):
     )
     rerank_n: int = Field(default=30, gt=0)
     final_k: int = Field(default=8, gt=0)
+    rerank_with_title: bool = True
     threshold: float = Field(default=0.3, ge=0, le=1)
     expand: Literal["none", "neighbors", "parent"] = "none"
     expand_window: int = Field(default=1, ge=1)

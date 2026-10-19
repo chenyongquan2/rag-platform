@@ -423,10 +423,15 @@ class BatchedTimeoutRerank(BaseNodePostprocessor):
     timing_name: ClassVar[str] = "rerank"
 
     top_n: int = Field(default=30, gt=0, description="Candidates sent to the reranker.")
+    include_title: bool = Field(
+        default=True, description="Send the title path before the body (false: body only)."
+    )
     _runner: RerankRunner = PrivateAttr()
 
-    def __init__(self, *, runner: RerankRunner, top_n: int = 30, **kwargs: Any) -> None:
-        super().__init__(top_n=top_n, **kwargs)
+    def __init__(
+        self, *, runner: RerankRunner, top_n: int = 30, include_title: bool = True, **kwargs: Any
+    ) -> None:
+        super().__init__(top_n=top_n, include_title=include_title, **kwargs)
         self._runner = runner
 
     @property
@@ -446,7 +451,7 @@ class BatchedTimeoutRerank(BaseNodePostprocessor):
         window = list(nodes[: self.top_n])
         texts = [
             rerank_text(
-                str(item.node.metadata.get("title_path", "") or ""),
+                str(item.node.metadata.get("title_path", "") or "") if self.include_title else "",
                 item.node.get_content(metadata_mode=MetadataMode.NONE),
             )
             for item in window

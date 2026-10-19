@@ -188,6 +188,7 @@ def make_search_pipeline(
         reranker=BatchedTimeoutRerank(
             runner=runner if runner is not None else get_rerank_runner(settings),
             top_n=retrieval.rerank_n,
+            include_title=retrieval.rerank_with_title,
         ),
         threshold=RerankThreshold(threshold=retrieval.threshold),
         expander=expander,

@@ -84,6 +84,20 @@ def test_rerank_text_is_question_title_path_and_body() -> None:
     assert rerank_text(["A", "B"], "body") == "A > B\nbody"
 
 
+def test_rerank_without_title_reads_the_body_only() -> None:
+    """Spec P2-03 AC3: `include_title=False` sends the body alone; the default is unchanged."""
+    scorer = FakeCrossEncoder()
+    post = BatchedTimeoutRerank(runner=_runner(scorer), top_n=30, include_title=False)
+    post.postprocess_nodes([_node(0), _node(1)], query_bundle=_query("how to install?"))
+    pairs = [pair for batch in scorer.batches for pair in batch]
+    assert pairs == [("how to install?", "body 0"), ("how to install?", "body 1")]
+    with_title = FakeCrossEncoder()
+    default = BatchedTimeoutRerank(runner=_runner(with_title), top_n=30)
+    assert default.include_title is True
+    default.postprocess_nodes([_node(0)], query_bundle=_query("q"))
+    assert with_title.batches == [[("q", "Page 0 > Part\nbody 0")]]
+
+
 def test_rerank_batches_of_eight_and_sorts_by_rerank_score() -> None:
     # 25 candidates, rerank_n 20: batches of 8, 8, 4; candidates 20-24 are not reranked.
     scores = {f"Page {i} > Part\nbody {i}": (i % 5) / 10 for i in range(25)}

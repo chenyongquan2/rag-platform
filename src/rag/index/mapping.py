@@ -149,5 +149,7 @@ def build_index_body(
 def index_body_for_kb(
     cfg: KnowledgeBaseConfig, *, dims: int, vector: VectorIndexOptions | None = None
 ) -> dict[str, Any]:
-    """Index body with the knowledge base's analyzer (`es.analyzer` in its YAML)."""
+    """Index body with the knowledge base's analyzer and vector type (`es.analyzer` and
+    `es.vector_index` in its YAML); an explicit `vector` wins."""
+    vector = vector or VectorIndexOptions(type=cfg.es.vector_index)
     return build_index_body(analyzer=cfg.es.analyzer, dims=dims, vector=vector)

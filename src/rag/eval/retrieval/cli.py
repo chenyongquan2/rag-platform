@@ -7,6 +7,8 @@ uv run python -m rag.eval.retrieval rerank-curve --kb hf_docs [--rerank-ns 10,20
     [--warmup 1] [--out DIR]
 uv run python -m rag.eval.retrieval compare <run_a> <run_b> [--list final] [--level page]
     [--metric mrr@10] [--iterations 10000] [--seed 0] [--alpha 0.05] [--out FILE]
+uv run python -m rag.eval.retrieval ablate <baseline> --variant NAME=RUN [--variant ...]
+    [--baseline-name N] [--metrics hit@1,mrr@8] [--list final] [--level page] [--out FILE]
 uv run python -m rag.eval.retrieval export-hf [--manifest P] [--out P] [--no-download]
 
 `run` builds the chain search_docs uses (`make_search_pipeline`; with `--no-rerank` the
@@ -33,6 +35,7 @@ from rag.eval.questions import (
     load_question_set,
     save_question_set,
 )
+from rag.eval.retrieval.ablation import ablation_table, render_ablation
 from rag.eval.retrieval.compare import compare_runs, render_comparison
 from rag.eval.retrieval.protocol import Retriever
 from rag.eval.retrieval.record import FINAL, RunRecord
@@ -322,6 +325,34 @@ def _compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ablate(args: argparse.Namespace) -> int:
+    baseline = load_run(args.baseline, reports_root=args.reports_dir)
+    variants: dict[str, RunRecord] = {}
+    for item in args.variant:
+        name, sep, run = item.partition("=")
+        if not sep or not name.strip() or not run.strip() or name.strip() in variants:
+            raise UsageError(f"--variant must be NAME=RUN with a new name, got {item!r}")
+        variants[name.strip()] = load_run(run.strip(), reports_root=args.reports_dir)
+    metrics = [m.strip() for m in args.metrics.split(",") if m.strip()] if args.metrics else None
+    try:
+        table = ablation_table(
+            baseline,
+            variants,
+            metrics=metrics,
+            list_name=args.list,
+            level=args.level,
+            iterations=args.iterations,
+            seed=args.seed,
+        )
+    except ValueError as exc:
+        raise UsageError(str(exc)) from exc
+    text = render_ablation(table, baseline_name=args.baseline_name)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
+    _echo(text)
+    return 0
+
+
 def _export_hf(args: argparse.Namespace) -> int:
     manifest = load_manifest(repo_path(args.manifest))
     if manifest.eval is None:
@@ -380,6 +411,22 @@ def main(argv: Sequence[str] | None = None, *, settings: ServiceSettings | None 
     p_compare.add_argument("--reports-dir", default=REPORTS_ROOT)
     p_compare.add_argument("--out", help="also write the Markdown to this file")
 
+    p_ablate = sub.add_parser(
+        "ablate", help="variant runs against one baseline: better, worse, unchanged, tests"
+    )
+    p_ablate.add_argument("baseline", help="the baseline run (id, directory or results.json)")
+    p_ablate.add_argument(
+        "--variant", action="append", required=True, metavar="NAME=RUN", help="repeat per variant"
+    )
+    p_ablate.add_argument("--baseline-name", default="baseline")
+    p_ablate.add_argument("--metrics", help="comma-separated (default: hit@1, hit@5, MRR, nDCG)")
+    p_ablate.add_argument("--list", default=FINAL, help="final (default) or a route")
+    p_ablate.add_argument("--level", default="page", choices=["page", "chunk"])
+    p_ablate.add_argument("--iterations", type=int, default=10_000)
+    p_ablate.add_argument("--seed", type=int, default=0)
+    p_ablate.add_argument("--reports-dir", default=REPORTS_ROOT)
+    p_ablate.add_argument("--out", help="also write the Markdown to this file")
+
     p_export = sub.add_parser("export-hf", help="write the HF eval set as a labelled question set")
     p_export.add_argument("--manifest", default=DEFAULT_MANIFEST)
     p_export.add_argument("--out", help="default: evals/datasets/<kb>/<eval dataset name>.jsonl")
@@ -397,6 +444,12 @@ def main(argv: Sequence[str] | None = None, *, settings: ServiceSettings | None 
             return 2
     if args.command == "compare":
         return _compare(args)
+    if args.command == "ablate":
+        try:
+            return _ablate(args)
+        except UsageError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if args.command == "export-hf":
         return _export_hf(args)
     raise AssertionError(args.command)

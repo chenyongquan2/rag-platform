@@ -135,3 +135,30 @@ def test_vector_options_validation() -> None:
         build_index_body(analyzer="", dims=1024)
     flat = build_index_body(analyzer="standard", dims=8, vector=VectorIndexOptions(type="flat"))
     assert flat["mappings"]["properties"]["embedding"]["index_options"] == {"type": "flat"}
+
+
+def _embedding_options(vector_index: str | None) -> dict:
+    es = EsConfig() if vector_index is None else EsConfig(vector_index=vector_index)
+    cfg = KnowledgeBaseConfig(kb="x", es=es)
+    return index_body_for_kb(cfg, dims=8)["mappings"]["properties"]["embedding"]["index_options"]
+
+
+def test_vector_index_option_sets_the_dense_vector_mapping() -> None:
+    """Spec P2-03 AC1: `es.vector_index` picks the dense_vector type; the default is unchanged."""
+    assert EsConfig().vector_index == "int8_hnsw"
+    # The default mapping is the one before the switch existed (int8_hnsw, m 16, ef 100, x3).
+    assert index_body_for_kb(KnowledgeBaseConfig(kb="x"), dims=8) == build_index_body(
+        analyzer="standard", dims=8
+    )
+    assert _embedding_options("int8_hnsw") == _embedding_options(None)
+    assert _embedding_options("bbq_hnsw") == {
+        "type": "bbq_hnsw",
+        "m": 16,
+        "ef_construction": 100,
+        "rescore_vector": {"oversample": 3.0},
+    }
+    # flat stores plain float vectors and compares with every one: no HNSW or rescore settings.
+    assert _embedding_options("flat") == {"type": "flat"}
+    for bad in ("bbq_disk", "hnsw2", ""):
+        with pytest.raises(ValidationError):
+            EsConfig(vector_index=bad)

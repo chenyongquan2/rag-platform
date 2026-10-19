@@ -309,6 +309,37 @@ def test_make_search_pipeline_from_config(monkeypatch: pytest.MonkeyPatch) -> No
     assert build(cfg).postprocessors[1].runner is shared
 
 
+def test_pipeline_passes_the_rerank_title_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spec P2-03 AC4: `retrieval.rerank_with_title` reaches the reranker, defaults to true and
+    is part of the config version (another setting is another version)."""
+    assert RetrievalConfig().rerank_with_title is True
+    hf = load_kb_config(repo_path("kb/public/hf_docs.yaml"), kb_root=repo_path("kb"))
+    assert hf.retrieval.rerank_with_title is True
+    es = _expand_es()
+    es.mappings[INDEX] = {"_meta": {"embed_model": "fake-embedding@4"}, "properties": {}}
+    settings = ServiceSettings(_env_file=None, embed_backend="fake", embed_dim=4)  # type: ignore[call-arg]
+    runner = RerankRunner(FakeCrossEncoder(), batch_size=8, max_concurrency=1)
+
+    def build(cfg: KnowledgeBaseConfig) -> SearchPipeline:
+        return make_search_pipeline(
+            cfg,
+            settings,
+            acl_groups=["public"],
+            es=es,
+            embed_model=FakeEmbedding(dim=4),
+            count_tokens=count_tokens,
+            runner=runner,
+        )
+
+    on = build(KnowledgeBaseConfig(kb=KB))
+    off_cfg = KnowledgeBaseConfig(kb=KB, retrieval=RetrievalConfig(rerank_with_title=False))
+    off = build(off_cfg)
+    assert on.postprocessors[1].include_title is True
+    assert off.postprocessors[1].include_title is False
+    assert on.config_version != off.config_version
+    assert off.config_version == search_config_version(off_cfg, settings, "fake-embedding@4")
+
+
 def test_retrieval_config_rerank_and_expand_defaults() -> None:
     cfg = RetrievalConfig()
     assert (cfg.rerank_n, cfg.final_k, cfg.threshold) == (30, 8, 0.3)
