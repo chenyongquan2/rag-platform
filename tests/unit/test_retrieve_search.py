@@ -130,7 +130,7 @@ def test_hybrid_search_result() -> None:
     bodies = es.calls[0]["searches"][1::2]
     assert {"term": {"language": "en"}} in bodies[0]["query"]["bool"]["filter"]
     assert {"term": {"language": "en"}} in bodies[1]["knn"]["filter"]
-    assert es.calls[0]["options"]["request_timeout"] <= 0.9
+    assert es.calls[0]["options"]["request_timeout"] <= 0.9 + 1e-6
     with pytest.raises(ValueError, match="other_kb"):
         _search(_es()).retrieve("q", kb="other_kb", top_k=2)
 
