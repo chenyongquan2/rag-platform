@@ -245,13 +245,14 @@ result.answer, result.sentences, result.sources, result.rounds, result.timings_m
 result.status, result.coverage_unconfirmed, result.stop_reason, result.cache_allowed
 ```
 
-- One request is one checkpoint thread `"{session_id}:{request_id}"` (SQLite file `CHECKPOINT_URL`).
-  The retrieval fields of the state are appended per round and cleared by `route`, so a request
-  never sees the chunks of another one in the same session.
-- The turns of a session (question and answer text only) are stored per session id
+- One run is one checkpoint thread `"{session_id}:{run_id}"` (SQLite file `CHECKPOINT_URL`); the
+  run id is made by the server, the caller's request id is only for correlation. The retrieval
+  fields of the state are appended per round and cleared by `route`, so a request never sees
+  the chunks of another one in the same session.
+- The turns of a session (question and answer text only) are stored per caller, KB and session id
   (`SESSION_STORE_URL`, last `AGENT_HISTORY_TURNS` kept) and passed in as input. A call that
   carried history has `cache_allowed=false`: the exact cache of P5 must not read or write it.
-- Requests with the same `session_id` run one after another (`SESSION_LOCK_URL`: `memory://`
+- Requests with the same caller, KB and `session_id` run one after another (`SESSION_LOCK_URL`: `memory://`
   inside this process, `file://<dir>` also across processes); different sessions run in
   parallel. The wait counts against the deadline (`agent_deadline` error when it runs out).
 - Limits of one request: total deadline `AGENT_DEADLINE_MS` (a caller's `deadline_ms` replaces
