@@ -268,8 +268,11 @@ result.standalone_question, result.search_queries, result.fallbacks  # what the 
 ### Rewrite, route and clarify (P3-02)
 
 Rules run first and make no model call (`rag.agent.rules`): whitespace and Unicode are
-normalised, identifiers, code spans, versions, flags, paths and quoted messages are found, and
-the question is classified as clear, vague or undecided and as one lookup or possibly two. The
+normalised; identifiers (snake_case, CamelCase, dotted names, versions, flags such as `--lr` and
+`-U`, paths including Windows paths, acronyms such as RLHF, model names such as
+`bert-base-uncased`), code spans and quoted messages are found (a long message is kept by its
+first 40 characters, a fenced code block by the identifiers inside it); and the question is
+classified as clear, vague or undecided and as one lookup or possibly two. The
 small model (`AGENT_REWRITE_PROFILE`, default `cheap`, structured output by function calling)
 is called only where it can change something, and only if the KB's `agent` section allows it:
 
@@ -277,11 +280,18 @@ is called only where it can change something, and only if the KB's `agent` secti
   history (this goes to the answer step); the search query is written as a declarative
   statement (`agent.declarative`; this goes to retrieval); a two-hop question becomes at most
   `agent.max_sub_questions` queries, one search each. A statement-form question with no history
-  is only normalised: no model call. Every identifier of the question must survive in the
-  queries and the language must stay the question's, else the original question is searched.
-  A model failure, timeout, unparsable answer or refused call (token cap) does the same. The
-  request is never failed: it is answered, `degraded` is set and `fallbacks` names the step and
-  reason (`rewrite:timeout`, `rewrite:identifiers_lost`, `route:parse_failed`, ...).
+  is only normalised: no model call. The model's output is untrusted (it read the question
+  and earlier answers made from documents, which are given to it in marked untrusted blocks).
+  Every identifier of the question must survive in the queries as a whole token (`3.1` is not
+  `3.12`, `--lr` is not `--lr-scheduler`), the language must stay the question's, and the
+  rewrite must stay about the question: at least half of its topic words occur in the question
+  and the history shown, and it shares a topic word with the question itself. Otherwise the
+  original question is searched. A model failure, timeout (never into the answer's time),
+  unparsable answer or refused call (token cap) does the same. The request is never failed:
+  it is answered, `degraded` is set and `fallbacks` names the step and reason
+  (`rewrite:timeout`, `rewrite:identifiers_lost`, `rewrite:ungrounded`, `route:parse_failed`,
+  ...). The answer step is given the question as the user asked it and, when the rewrite
+  changed it, the standalone version too, labelled; `standalone_question` is set only then.
 - `route` (`agent.route_model`): when the rules call a question undecided (it points at "this
   model" with some topic words) or possibly two-hop, the small model decides; if it fails, the
   rules' view stands.
@@ -294,9 +304,13 @@ is called only where it can change something, and only if the KB's `agent` secti
   the reply is added to the question and the run goes on (at most one clarification per
   request; a vague reply is searched as it is). A token works once, only for the caller, KB and
   session it was issued for, only while the run waits, for `AGENT_RESUME_TTL_S`; anything else
-  is `invalid_resume_token` (HTTP 400), the same answer for every reason. When the run
-  completes, the session history gets the question, the question asked back, the reply and the
-  answer as two turns. The request's token cap counts both calls.
+  is `invalid_resume_token` (HTTP 400), the same answer for every reason. A call that fails or
+  is cancelled while running the thread gives the token back: the same token and call can be
+  retried and the run goes on from the step that failed (with the first reply). A call that
+  dies without ending leaves the token in use until a lease (twice `SEARCH_MAX_DEADLINE_MS`)
+  lapses. When the run ends, the session history gets the question, the question asked back,
+  the reply and the answer as two turns (also when it was cut off and has no answer text: the
+  reply is then stored with the notice). The request's token cap counts both calls.
 
 | Setting (env var) | Default | Meaning |
 |---|---|---|
