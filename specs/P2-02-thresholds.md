@@ -23,7 +23,7 @@ means file-level skip later). The result and the threshold decision go into `doc
   - `collect --kb hf_docs --questions P --kind answerable|no_answer --out FILE [--rerank-n N] [--deadline-ms MS]`: runs the real chain
     with threshold 0 and stores every reranked candidate's score. Seam `build_retriever` is the one of `rag.eval.retrieval.cli`.
   - `sweep --dev FILE [--check NAME=FILE]... [--no-answer NAME=FILE]... [--thresholds LIST|START:STOP:STEP]
-    [--max-false-refusal 0.05] [--bound observed|wilson_upper] [--out FILE]`.
+    [--max-false-refusal 0.05] [--bound observed|wilson_upper] [--baseline T] [--out FILE]`.
 - `scripts/p2_02/read_timing.py`: times connector listing, reader and cleaning of the whole corpus (no embedding, no Elasticsearch).
 - Data: `evals/datasets/hf_docs/no_answer_extra.jsonl` (20 hand-written no-answer questions, labelled in `meta`; the original 10 are untouched).
 - No config default changes unless the report's data supports it (then `docs/decisions.md` records why).
@@ -37,9 +37,10 @@ Each line maps to one test in `tests/unit/test_threshold_sweep.py` (S) or `tests
 - [ ] AC5 `recommend` returns the largest threshold whose dev false-refusal rate is within the cap (observed rate, or Wilson upper bound); None when even the lowest exceeds it — `S::test_recommend_largest_threshold_within_cap`, `S::test_recommend_wilson_upper_mode`, `S::test_recommend_none_when_no_threshold_fits`
 - [ ] AC6 The threshold list parses (list, `start:stop:step` without float drift) and bad input is refused — `S::test_parse_thresholds`
 - [ ] AC7 `collect` runs the chain with threshold 0, records all reranked candidates with the question kind, and refuses a run that had a rerank timeout — `C::test_collect_records_all_candidates_with_threshold_zero`, `C::test_collect_rejects_rerank_timeout`
-- [ ] AC8 `sweep` prints the table, the recommendation and the rule it used; the check and no-answer sets are reported but never change the recommendation — `C::test_sweep_prints_table_and_recommendation`, `C::test_check_and_no_answer_sets_do_not_move_the_recommendation`
+- [ ] AC8 `sweep` prints the table, the recommendation and the rule it used; the check and no-answer sets are reported but never change the recommendation — `C::test_sweep_prints_table_and_recommendation`, `C::test_check_and_no_answer_sets_do_not_move_the_recommendation`; with `--baseline T` it adds a paired table (questions newly refused or accepted against T, exact McNemar) — `S::test_paired_change_against_a_baseline_threshold`, `C::test_sweep_baseline_adds_a_paired_table`
 - [ ] AC9 Bad arguments exit with code 2 and one line on stderr — `C::test_sweep_usage_errors_exit_2`
-- [ ] AC10 (by running) dev, public-65, 10 + 20 no-answer sets scored; holdout scored once at the chosen threshold; read timing measured; report section 「P2-02 阈值和读取耗时」 in `docs/reports/P2-report.md`.
+- [ ] AC10 The 20 extra no-answer questions load without labels, are typed near_miss (12) or off_topic (8), repeat nothing of the original 10, and each records what was checked against the corpus — `tests/unit/test_threshold_data.py::test_no_answer_extra_set_is_new_unlabelled_and_typed`
+- [ ] AC11 (by running) dev, public-65, 10 + 20 no-answer sets scored; holdout scored once at the chosen threshold; read timing measured; report section 「P2-02 阈值和读取耗时」 in `docs/reports/P2-report.md`.
 
 ## Out of scope
 Changing the reranker or the fusion settings (P0-13b); the answer-step refusal (`found=false`, P1-02); a gateway

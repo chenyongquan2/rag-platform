@@ -226,6 +226,31 @@ def test_check_and_no_answer_sets_do_not_move_the_recommendation(
     assert "Recommended threshold: 0.30" in with_others
 
 
+def test_sweep_baseline_adds_a_paired_table(
+    files: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = [
+        "sweep",
+        "--dev",
+        str(files["dev"]),
+        "--no-answer",
+        f"na={files['na1']}",
+        "--thresholds",
+        "0.1,0.5,0.7",
+        "--baseline",
+        "0.3",
+    ]
+    assert cli.main(argv) == 0
+    text = capsys.readouterr().out
+    assert "Paired change against threshold 0.30" in text
+    # dev: 0.4 is refused at 0.5 but not at 0.3; 0.2 is accepted at 0.1 but refused at 0.3.
+    assert "| 0.50 | +1 / -0 (p 1.000) |" in text
+    assert "| 0.10 | +0 / -1 (p 1.000) |" in text
+    # the no-answer question with top 0.6 is refused at 0.7 only; 0.05 is refused at both
+    assert "| 0.70 | +1 / -0 (p 1.000) | +1 / -0 (p 1.000) |" in text
+    assert cli.main([*argv[:-1], "1.5"]) == 2
+
+
 def test_sweep_says_so_when_no_threshold_fits(
     files: dict[str, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:

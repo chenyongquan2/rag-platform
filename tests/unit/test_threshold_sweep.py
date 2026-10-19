@@ -9,6 +9,7 @@ from rag.eval.threshold.records import Candidate, ScoreRecord
 from rag.eval.threshold.sweep import (
     group_rates,
     is_refused,
+    paired_vs_baseline,
     parse_thresholds,
     recommend,
     sweep,
@@ -147,3 +148,14 @@ def test_parse_thresholds() -> None:
     for bad in ("", "abc", "0.5:0.1:0.1", "0.1:0.5:0", "-0.1,0.5", "0.5,1.5", "0.1:0.5"):
         with pytest.raises(ValueError):
             parse_thresholds(bad)
+
+
+def test_paired_change_against_a_baseline_threshold() -> None:
+    records = [rec(f"q{i}", [t]) for i, t in enumerate([0.2, 0.4, 0.6, 0.8])]
+    up = paired_vs_baseline(records, 0.7, baseline=0.3)  # 0.4 and 0.6 are newly refused
+    assert (up.newly_refused, up.newly_accepted, up.n) == (2, 0, 4)
+    assert up.p_value == pytest.approx(0.5)  # exact McNemar of 2 against 0
+    down = paired_vs_baseline(records, 0.1, baseline=0.5)  # 0.2 and 0.4 are newly accepted
+    assert (down.newly_refused, down.newly_accepted) == (0, 2)
+    same = paired_vs_baseline(records, 0.3, baseline=0.3)
+    assert (same.newly_refused, same.newly_accepted, same.p_value) == (0, 0, 1.0)

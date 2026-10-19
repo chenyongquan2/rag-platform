@@ -4,7 +4,7 @@ uv run python -m rag.eval.threshold collect --kb hf_docs --questions P --kind an
     --out FILE [--rerank-n N] [--deadline-ms MS] [--index-prefix P]
 uv run python -m rag.eval.threshold sweep --dev FILE [--check NAME=FILE]...
     [--no-answer NAME=FILE]... [--thresholds 0.3,0.5 | 0.05:0.95:0.05] [--max-false-refusal 0.05]
-    [--bound observed|wilson_upper] [--top-k 8] [--out FILE]
+    [--bound observed|wilson_upper] [--baseline T] [--top-k 8] [--out FILE]
 
 `collect` asks every question of a set through the real search chain (the one search_docs uses)
 with the threshold forced to 0, so every candidate the reranker scored is kept, and writes the
@@ -40,6 +40,7 @@ from rag.eval.threshold.sweep import (
     DEFAULT_TOP_K,
     parse_thresholds,
     recommend,
+    render_paired,
     render_sweep,
     sweep,
 )
@@ -154,6 +155,8 @@ def _load(path: Path, kind: Kind, option: str) -> ScoreFile:
 def _sweep(args: argparse.Namespace) -> int:
     if not 0.0 <= args.max_false_refusal <= 1.0:
         raise UsageError("--max-false-refusal must be between 0 and 1")
+    if args.baseline is not None and not 0.0 <= args.baseline <= 1.0:
+        raise UsageError("--baseline must be between 0 and 1")
     if args.top_k < 1:
         raise UsageError("--top-k must be a positive integer")
     try:
@@ -193,6 +196,8 @@ def _sweep(args: argparse.Namespace) -> int:
         max_false_refusal=args.max_false_refusal,
         bound=args.bound,
     )
+    if args.baseline is not None:
+        text += "\n" + render_paired(thresholds, groups, baseline=args.baseline)
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(text, encoding="utf-8", newline="\n")
@@ -231,6 +236,9 @@ def main(argv: Sequence[str] | None = None, *, settings: ServiceSettings | None 
     p_sweep.add_argument("--thresholds", default=DEFAULT_THRESHOLDS)
     p_sweep.add_argument("--max-false-refusal", type=float, default=0.05)
     p_sweep.add_argument("--bound", choices=["observed", "wilson_upper"], default="observed")
+    p_sweep.add_argument(
+        "--baseline", type=float, help="also list questions that flip against this threshold"
+    )
     p_sweep.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     p_sweep.add_argument("--out", help="also write the Markdown to this file")
 

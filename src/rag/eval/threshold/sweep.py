@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from rag.eval.stats import wilson_interval
+from rag.eval.stats import mcnemar_exact, wilson_interval
 from rag.eval.threshold.records import ScoreRecord
 
 Bound = Literal["observed", "wilson_upper"]
@@ -144,6 +144,38 @@ def recommend(
     return max(fits) if fits else None
 
 
+@dataclass(frozen=True)
+class PairedChange:
+    """The same questions at two thresholds: which flipped between refused and accepted."""
+
+    threshold: float
+    baseline: float
+    n: int
+    newly_refused: int
+    """Accepted at the baseline, refused at `threshold`."""
+    newly_accepted: int
+    """Refused at the baseline, accepted at `threshold`."""
+    p_value: float
+    """Exact McNemar test on the two flip counts (design s14-4)."""
+
+
+def paired_vs_baseline(
+    records: Sequence[ScoreRecord], threshold: float, *, baseline: float
+) -> PairedChange:
+    before = [is_refused(r, baseline) for r in records]
+    after = [is_refused(r, threshold) for r in records]
+    newly_refused = sum(a and not b for a, b in zip(after, before, strict=True))
+    newly_accepted = sum(b and not a for a, b in zip(after, before, strict=True))
+    return PairedChange(
+        threshold=threshold,
+        baseline=baseline,
+        n=len(records),
+        newly_refused=newly_refused,
+        newly_accepted=newly_accepted,
+        p_value=mcnemar_exact(newly_refused, newly_accepted),
+    )
+
+
 def parse_thresholds(text: str) -> list[float]:
     """`0.3,0.5` (a list) or `0.05:0.95:0.05` (start:stop:step, stop included); values in [0, 1].
 
@@ -220,4 +252,30 @@ def render_sweep(
         lines.append(f"No threshold on the grid meets the rule on {dev!r}.")
     else:
         lines.append(f"Recommended threshold: {format_threshold(recommended)}")
+    return "\n".join(lines) + "\n"
+
+
+def render_paired(
+    thresholds: Sequence[float],
+    groups: Mapping[str, Sequence[ScoreRecord]],
+    *,
+    baseline: float,
+) -> str:
+    """Markdown table: per threshold and group, `+a / -b (p)` with a = questions newly refused
+    and b = questions newly accepted compared with the baseline threshold."""
+    names = list(groups)
+    lines = [
+        f"Paired change against threshold {format_threshold(baseline)} "
+        "(+ = refused at this threshold but not at the baseline, - = the reverse; "
+        "p = exact McNemar):",
+        "",
+        "| threshold | " + " | ".join(names) + " |",
+        "|---" * (len(names) + 1) + "|",
+    ]
+    for t in sorted(set(thresholds)):
+        cells = []
+        for name in names:
+            c = paired_vs_baseline(groups[name], t, baseline=baseline)
+            cells.append(f"+{c.newly_refused} / -{c.newly_accepted} (p {c.p_value:.3f})")
+        lines.append(f"| {format_threshold(t)} | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
