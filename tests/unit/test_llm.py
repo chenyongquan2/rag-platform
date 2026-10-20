@@ -575,15 +575,23 @@ def test_gateway_errors_classified_and_retry_after_capped(tmp_path: Path) -> Non
 def test_cancelled_call_records_estimate(tmp_path: Path) -> None:
     """A call cancelled after it was handed to the network may already be billed."""
 
+    handed_over = asyncio.Event()
+
     async def never_answers(request: httpx.Request) -> httpx.Response:
+        handed_over.set()
         await asyncio.sleep(5)
         raise AssertionError("cancelled before this")
 
     model, ledger = gateway_model(tmp_path, never_answers)
 
     async def cancel_invoke() -> None:
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(model.ainvoke("ping"), 0.05)
+        # Cancel only once the request reached the transport; a fixed short timeout fired before
+        # that on a slow machine and no billing row was written.
+        call = asyncio.ensure_future(model.ainvoke("ping"))
+        await asyncio.wait_for(handed_over.wait(), 30)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
 
     asyncio.run(cancel_invoke())
     (row,) = ledger.entries()
