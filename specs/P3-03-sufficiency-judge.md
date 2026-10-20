@@ -1,6 +1,6 @@
 # P3-03 Sufficiency judge, correction loop, judge-accuracy script, hard questions
 
-Status: in progress
+Status: review
 Phase: P3
 Depends on: P3-01 (graph, hooks, limits), P3-02 (rewrite module, `next_round`, helper model), P2-02 (threshold, no-answer sets), P1-05 (synthetic sets)
 Design sections: s13-4 (main), s13-3, s8-2, s10-2, s14-2, s14-4, s16-8, s11-1
@@ -79,7 +79,9 @@ Switching knowledge base after a failed round (the graph serves one KB per call;
 `correction.py`); step-back prompts (s8-2); per-caller budgets (P8); the end-to-end Agentic RAG eval (P3-05).
 
 ## Handoff (filled at the end)
-- Files:
-- Decisions:
-- Open issues:
-- Review rounds:
+- Files: new `src/rag/agent/{judge,correction}.py`, `src/rag/eval/judge_accuracy/{__init__,__main__,records,metrics,runner,cli}.py`, `tests/unit/test_{agent_judge,agent_correction,eval_judge_accuracy,hard_questions_data}.py`, `tests/llm/test_sufficiency_gateway.py`, `evals/datasets/hf_docs/{two_hop,no_answer_hard}.jsonl`, `docs/reports/P3-report.md` (new, section 1); changed `src/rag/agent/{nodes,state,decisions,hooks,context,helper,result,rewrite,runtime,__init__}.py`, `src/rag/{types,testing/agent}.py`, `src/rag/config/{kb,settings}.py`, `src/rag/observe/attributes.py`, `src/rag/serve/{schema,service,mcp_server}.py`, `kb/public/hf_docs.yaml`, `.env.example`, `README.md`, `docs/decisions.md`. 40 new agent and script unit tests plus 5 data tests, one `llm` test (run once, 0.006 CNY), no integration test (two real runs cover the join with the search chain).
+- Existing tests changed (spec change): `test_agent_rewrite.py::test_next_round_signature_takes_what_was_missing`, `test_agent_config.py::test_hf_docs_sets_agent_keys` (and the settings defaults test is new).
+- Decisions (docs/decisions.md, 2026-10-20 P3-03): three tiers with rules first and a rule-only fallback; partly and not enough share one correction (only the missing sub-questions; multi-query round 2, HyDE round 3); three rounds below the threshold are a real `not_found` with `nearest`; new stop reason `no_new_query`; a round needs `agent_round_min_ms` (8 s) on top of the answer's time; judge timeout 9 s (6 s timed out half of the pilot and billed twice); HyDE is a query only, checked the other way round; label and fallback comparison of the script.
+- Results (234 questions, real cheap model, 1.09 CNY): accuracy 94.0% (90.2 to 96.4), precision of enough 94.3%, recall 97.6%; rules alone 82.1%; fixed two rounds 28.2% (168 wasted rounds against 4 for the judge, 468 rounds against 294); another round finds the page for 6 of 16 questions with phrasings, 8 of 16 with HyDE too.
+- Open issues: labels know one gold page, so some false "enough" are right; the script judges a two-hop question as one sub-question (graph splits it first: not measured); correction rounds were measured only as single rounds, not in the whole graph (P3-05); the default 30 s total may not fit three rounds; keyword checks cannot prove a no-answer question is absent (one false premise found, tagged); the two-hop and no-answer questions are unreviewed by the owner; judging a question again with another model needs a re-run; switching knowledge base is not built.
+- Review rounds: 0 (awaiting review).
