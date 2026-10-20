@@ -37,3 +37,12 @@ documentation. Written by `uv run python -m rag.eval.synthetic build` (spec P1-0
 - `relevant_pages` is the page's doc_id (`hf_docs:<path>`).
 
 The derived files are distributed under the MIT licence of the corpus.
+
+# NOTICE: colloquial.jsonl
+
+Fifteen hand-written casual rewrites (spec P3-05) of the public questions in
+`huggingface_doc_qa_eval.jsonl`: every 4th question, row index 0, 4, ..., 56. The wording was
+written by hand (lower case, pronouns inside the question, typos, abbreviations, three mixed
+Chinese/English); `meta.source_qid` names the source question. `answer` and `relevant_pages` are copied
+unchanged from it, so no fact is new. The file is distributed under the same Apache License 2.0 as the
+source questions.
