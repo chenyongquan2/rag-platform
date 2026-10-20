@@ -348,9 +348,14 @@ function fakeServer(script) {
   async function fetchFake(url, init = {}) {
     calls.push({ url, init, body: init.body ? JSON.parse(init.body) : null });
     const reply = script(url, init, calls);
+    if (reply.reject) throw new TypeError("Failed to fetch");
     if (reply.stream) {
-      const chunks = [...reply.stream];
-      const encoder = new TextEncoder();
+      // The stream as the network delivers it: bytes, cut every `split` bytes (3 by default), so
+      // a multi-byte character is often split between two reads.
+      const bytes = new TextEncoder().encode(reply.stream.join(""));
+      const size = reply.split || 3;
+      const chunks = [];
+      for (let i = 0; i < bytes.length; i += size) chunks.push(bytes.subarray(i, i + size));
       return {
         ok: true,
         status: 200,
@@ -358,7 +363,7 @@ function fakeServer(script) {
         body: {
           getReader: () => ({
             read: async () => {
-              if (chunks.length) return { done: false, value: encoder.encode(chunks.shift()) };
+              if (chunks.length) return { done: false, value: chunks.shift() };
               if (!reply.hang) return { done: true };
               await new Promise((_, reject) => {
                 init.signal.addEventListener("abort", () => {
@@ -573,6 +578,92 @@ async function suiteApp() {
   await sleep(20);
   check(page.ui("status").textContent.startsWith("Cancelled"), "after cancel: " + page.ui("status").textContent);
   check(!page.ui("ask").disabled && page.ui("cancel").hidden, "the page is ready again");
+
+  // 3b. Text that is not ASCII, cut between bytes: the page decodes the stream as a stream.
+  const CJK = "\u4f60\u597d\u4e16\u754c \ud83d\ude00";
+  page = await startPage(() => ({
+    stream: [
+      sse("token", { text: CJK, attempt: 1 }),
+      sse("answer", {
+        ...ANSWER,
+        sentences: [{ text: CJK, citations: [{ marker: 1, chunk_id: SOURCES[0].chunk_id }] }],
+      }),
+      DONE("r", "answered", 1),
+    ],
+    split: 1,
+  }));
+  await ask(page, "q");
+  check(page.ui("answer").textContent.includes(CJK), "non-ASCII answer intact: " + page.ui("answer").textContent);
+  check(!page.ui("answer").textContent.includes("\ufffd"), "no replacement character in the answer");
+  page = await startPage(() => ({ stream: [sse("token", { text: CJK, attempt: 1 })], split: 2 }));
+  await ask(page, "q");
+  same(page.ui("live").textContent, CJK, "non-ASCII streamed text intact");
+
+  // 3c. A run that fails after text was streamed: the text stays, marked as not checked.
+  page = await startPage(() => ({
+    stream: [
+      sse("token", { text: "Half an answer", attempt: 1 }),
+      sse("error", { error: "internal_error", request_id: "req-7", message: "Internal error." }),
+    ],
+  }));
+  await ask(page, "q");
+  check(page.ui("live").textContent === "Half an answer" && !page.ui("live").hidden, "the streamed text stays");
+  check(page.ui("live").classes.has("unverified"), "and is marked unverified");
+  check(page.ui("notice").textContent.includes("not checked") && !page.ui("notice").hidden, "with a note");
+  page = await startPage(() => ({ stream: [sse("token", { text: "Cut off", attempt: 1 })] }));
+  await ask(page, "q");
+  check(page.ui("live").classes.has("unverified") && page.ui("live").textContent === "Cut off", "a cut stream too");
+  page = await startPage(() => ({ stream: [sse("token", { text: "Fine", attempt: 1 }), sse("answer", ANSWER), DONE("r", "answered", 1)] }));
+  await ask(page, "q");
+  check(!page.ui("live").classes.has("unverified") && page.ui("notice").hidden, "a good run is not marked");
+
+  // 3d. A reply to a question asked back that fails or is cancelled can be sent again.
+  const ASK_BACK = [
+    sse("need_clarification", { request_id: "r1", question: "Which library?", resume_token: "fake-resume-value-for-the-test", session_id: "s" }),
+    DONE("r1", "need_clarification", 100),
+  ];
+  const resumeCalls = (p) => p.fetch.calls.filter((c) => c.url === "/v1/ask_docs/stream").slice(1);
+  for (const [label, failure] of [
+    ["a connection that fails", { reject: true }],
+    ["an error event", { stream: [sse("error", { error: "internal_error", request_id: "r2", message: "Internal error." })] }],
+    ["an HTTP error", { status: 502, headers: { "x-request-id": "r3" }, json: { error: "retrieval_failed", request_id: "r3", message: "The search backend failed." } }],
+  ]) {
+    let step = 0;
+    page = await startPage(() => (++step === 1 ? { stream: ASK_BACK } : step === 2 ? failure : { stream: [sse("answer", ANSWER), DONE("r4", "answered", 5)] }));
+    await ask(page, "How do I fix this error?");
+    page.ui("clarify-reply").value = "transformers";
+    page.ui("clarify-send").click();
+    for (let i = 0; i < 100 && page.ui("ask").disabled; i++) await sleep(5);
+    check(!page.ui("clarify").hidden, label + ": the question stays on the page");
+    same(page.ui("clarify-reply").value, "transformers", label + ": the reply stays");
+    check(!page.ui("clarify-send").disabled, label + ": it can be sent again");
+    check(!page.ui("error").hidden, label + ": the error is shown");
+    page.ui("clarify-send").click();
+    for (let i = 0; i < 100 && page.ui("ask").disabled; i++) await sleep(5);
+    const again = resumeCalls(page);
+    same(again.length, 2, label + ": a second reply was sent");
+    same(again[1] && again[1].body, again[0] && again[0].body, label + ": with the same token and the same reply");
+    check(page.ui("clarify").hidden && page.ui("answer").textContent.includes("Push it."), label + ": then it ends with the answer");
+  }
+  // Cancelled while the reply is running: the question stays too.
+  let calls3 = 0;
+  page = await startPage(() => (++calls3 === 1 ? { stream: ASK_BACK } : { stream: [sse("progress", { node: "route", phase: "start" })], hang: true }));
+  await ask(page, "How do I fix this error?");
+  page.ui("clarify-reply").value = "transformers";
+  page.ui("clarify-send").click();
+  await sleep(20);
+  check(!page.ui("clarify").hidden, "while the reply runs the question stays visible");
+  page.ui("cancel").click();
+  await sleep(20);
+  check(!page.ui("clarify").hidden && page.ui("clarify-reply").value === "transformers", "cancelled: question and reply stay");
+  // A token the server no longer accepts is dropped, with the error.
+  let calls4 = 0;
+  page = await startPage(() => (++calls4 === 1 ? { stream: ASK_BACK } : { status: 400, headers: { "x-request-id": "r5" }, json: { error: "invalid_resume_token", request_id: "r5", message: "Not valid." } }));
+  await ask(page, "How do I fix this error?");
+  page.ui("clarify-reply").value = "transformers";
+  page.ui("clarify-send").click();
+  for (let i = 0; i < 100 && page.ui("ask").disabled; i++) await sleep(5);
+  check(page.ui("clarify").hidden && page.ui("error").textContent.includes("invalid_resume_token"), "a used up token is dropped");
 
   // 4. A new conversation gets a new session id.
   page = await startPage(() => ({ stream: [DONE("r", "answered", 1)] }));

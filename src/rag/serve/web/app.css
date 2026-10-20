@@ -150,6 +150,13 @@ button.quiet {
   border-style: dashed;
 }
 
+.live.unverified {
+  border-color: var(--err-fg);
+  color: var(--muted);
+  font-style: italic;
+  opacity: 0.7;
+}
+
 .sentence.unsupported {
   text-decoration: underline dotted var(--muted);
 }

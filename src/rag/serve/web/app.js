@@ -91,22 +91,41 @@
     ui.kb.disabled = running;
     ui.clarifySend.disabled = running;
   }
-  function resetOutput() {
+  // `keepClarification`: a reply to a question asked back is being sent; the question, the
+  // reply and the resume token stay until that call has ended with an answer, so a reply
+  // that fails or is cancelled can be sent again (the server gives the token back).
+  function resetOutput(keepClarification) {
     for (const node of [ui.live, ui.answer, ui.removed, ui.notice, ui.sources, ui.passage, ui.error]) {
       R.clear(node);
       node.hidden = true;
     }
-    ui.clarify.hidden = true;
+    ui.live.className = "live";
+    if (!keepClarification) dropClarification();
     ui.feedback.hidden = true;
     ui.feedbackStatus.textContent = "";
     ui.useful.disabled = false;
     ui.notUseful.disabled = false;
     state.attempt = 1;
     state.rated = false;
-    state.resumeToken = null;
     state.requestId = null;
   }
+  function dropClarification() {
+    ui.clarify.hidden = true;
+    ui.clarifyReply.value = "";
+    state.resumeToken = null;
+  }
+  // Text that was streamed before the run failed: it was not checked against the sources.
+  function markUnverified() {
+    if (!ui.live.textContent) return;
+    ui.live.hidden = false;
+    ui.live.className = "live unverified";
+    ui.notice.textContent =
+      "The grey text was written before the run stopped. It was not checked against the " +
+      "sources and may be incomplete or wrong.";
+    ui.notice.hidden = false;
+  }
   function showError(error) {
+    if (error.error === "invalid_resume_token") dropClarification(); // used up or expired
     R.renderError(document, ui.error, error);
     ui.error.hidden = false;
   }
@@ -156,6 +175,7 @@
       state.attempt = event.attempt;
     }
     ui.live.hidden = false;
+    ui.live.className = "live";
     R.appendText(document, ui.live, event.text);
   }
 
@@ -163,6 +183,7 @@
     state.requestId = response.request_id;
     R.clear(ui.live);
     ui.live.hidden = true;
+    dropClarification(); // the run ended with an answer
     R.renderAnswer(document, ui.answer, response, (marker, source) => showPassage(source, marker));
     ui.answer.hidden = false;
     R.renderRemoved(document, ui.removed, response.citation_check && response.citation_check.removed_markers);
@@ -233,6 +254,7 @@
         break;
       case "error":
         showError(data);
+        markUnverified();
         setStatus("Stopped by an error.");
         return true;
       case "done":
@@ -246,8 +268,8 @@
 
   // ---- one call -----------------------------------------------------------------------------
 
-  async function run(body) {
-    resetOutput();
+  async function run(body, resume) {
+    resetOutput(resume);
     setRunning(true);
     state.controller = new AbortController();
     setStatus("Sending the question…");
@@ -282,6 +304,7 @@
         }
       }
       if (!finished) {
+        markUnverified();
         setStatus("The connection ended before the answer was complete.");
       }
     } catch (error) {
@@ -291,6 +314,7 @@
         setStatus("Cancelled. The server stops working on it.");
       } else {
         showError({ error: "connection_lost", message: "The connection to the server was lost." });
+        markUnverified();
         setStatus("Stopped by an error.");
       }
     } finally {
@@ -314,13 +338,16 @@
   function sendClarification() {
     const reply = ui.clarifyReply.value.trim();
     if (!reply || state.running || !state.resumeToken || !state.request) return;
-    run({
-      kb: state.request.kb,
-      question: state.request.question,
-      session_id: sessionId(),
-      resume_token: state.resumeToken,
-      answer: reply,
-    });
+    run(
+      {
+        kb: state.request.kb,
+        question: state.request.question,
+        session_id: sessionId(),
+        resume_token: state.resumeToken,
+        answer: reply,
+      },
+      true
+    );
   }
 
   async function sendFeedback(useful) {

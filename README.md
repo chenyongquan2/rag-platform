@@ -383,6 +383,9 @@ no accuracy, which would only be the share of "not enough" labels). `--rescue` a
 | `AGENT_JUDGE_CONTEXT_TOKENS` | 1500 | Estimated tokens of fragments shown to the judge |
 | `AGENT_ROUND_MIN_MS` | 8000 | Time one more round needs, on top of the answer's time |
 | `SSE_HEARTBEAT_S` | 10 | Seconds of silence before the stream sends a heartbeat comment line |
+| `SSE_QUEUE_MAX_EVENTS` | 5000 | Events of one stream waiting for the client; past it the run is cancelled |
+| `SERVICE_SHUTDOWN_TIMEOUT_S` | 5 | Seconds the server waits for connections to close at shutdown |
+| `SERVICE_ALLOWED_HOSTS` | empty | Host names (besides localhost and the listen address) the HTTP routes answer to |
 | `CHECKPOINT_URL` | `sqlite://data/checkpoints/langgraph.db` | Checkpoints (`memory://` for tests) |
 | `SESSION_STORE_URL` | `sqlite://data/sessions/sessions.db` | Session history and resume tokens (`memory://` for tests) |
 | `SESSION_LOCK_URL` | `memory://` | Session locks (`file://data/locks` for several processes) |
@@ -430,7 +433,24 @@ answer text; the page replaces the text it had streamed). A client that closes t
 (closes the page, presses Cancel) cancels the run: no further model call, the session lock is
 released, the checkpoint stays at the last finished node, the span ends `cancelled` and the
 business record gets one line flagged `client_cancelled` (`extra.cancelled_at`: the node it was in).
-That is not an error category of the service: nobody receives it.
+That is not an error category of the service: nobody receives it. A client that stops
+reading is cut off the same way once `SSE_QUEUE_MAX_EVENTS` events (5000) wait for it
+(`cancelled_by: slow_client`); one that connects and never reads is not timed out.
+
+When the server shuts down (`python -m rag.serve http` gets Ctrl-C or SIGTERM) it first
+cancels the runs of the open streams: each stream ends with an `error` event
+(`server_shutdown`, no `done`), the request is recorded as `client_cancelled` with
+`cancelled_by: shutdown`, and the server waits at most `SERVICE_SHUTDOWN_TIMEOUT_S` (5 s)
+for the connections to close. (uvicorn runs the app's own shutdown code only after open
+responses have ended, so this is done by the server itself: `rag.serve.server`.)
+
+Every HTTP route except `/mcp` answers only to the `Host` names `localhost`, `127.0.0.1`,
+`[::1]`, the address the server listens on and `SERVICE_ALLOWED_HOSTS` (a JSON list such as `["docs.example.com"]`; set
+your public name there when you deploy, and the name a container health check uses): another
+`Host` is refused with 421, and a POST whose `Content-Type` is not `application/json` with
+415, both with the usual error body. This keeps a web page on another site, or a DNS name
+rebound to 127.0.0.1, from driving a service on a developer's machine. Listening on
+`0.0.0.0` does not make any name valid: list the names.
 
 `GET /` serves the page: `index.html` and `/ui/{sse.js,render.js,app.js,app.css}` from
 `src/rag/serve/web/` (no build step, no framework, no outside request). The page sets
@@ -440,7 +460,10 @@ no-referrer`. It lists the knowledge bases of `GET /v1/knowledge_bases` (only th
 use), keeps a session id in `sessionStorage`, reads the stream with `fetch` (EventSource cannot
 POST), shows progress, the streamed answer, and after the `answer` event each `[n]` as a button
 that opens the passage (title, source, text; removed markers are struck through with a note),
-asks the question back when the run needs it, cancels with an `AbortController`, shows errors
+asks the question back when the run needs it (the question, the reply and the token stay
+until the reply has ended with an answer, so a failed or cancelled reply can be sent
+again), cancels with an `AbortController`, greys out text that was streamed before a run
+failed (it was not checked), shows errors
 (category and request id) and sends the two feedback buttons to `POST /v1/feedback`
 (`{request_id, useful, comment?}`, a comment up to 500 characters): one business record line
 (`tool: feedback`, `request_id` the rated request's, `extra.useful`, `extra.comment`). Everything
@@ -451,7 +474,8 @@ uv run python -m rag.serve http --dev-fake --port 28099   # fake search and mode
 uv run python scripts/stream_latency.py --url http://127.0.0.1:28099 --kb demo_docs --question "How do I push a model with push_to_hub?" --runs 20
 ```
 
-`--dev-fake` serves the knowledge base `demo_docs` on a local address only; questions with `xss`,
+`--dev-fake` serves the knowledge base `demo_docs` on a local address only (its business
+records go to `data/observe/dev-fake/`, not to the real file); questions with `xss`,
 `retry`, `slow` or `nothing` in them show the markup case, a second answer attempt, a long answer
 (to press Cancel) and a not-found result. The JavaScript is tested with node
 (`tests/web/ui_test.js`, run by `tests/unit/test_serve_web.py`; skipped when node is missing).

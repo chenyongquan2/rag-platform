@@ -81,6 +81,7 @@ def settings(records_path: Path) -> ServiceSettings:
         business_record_path=str(records_path),
         log_dir="",
         log_stderr_level="OFF",
+        service_allowed_hosts=["testserver"],  # the Host of Starlette's test client
     )
 
 
