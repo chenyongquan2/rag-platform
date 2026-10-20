@@ -311,3 +311,26 @@ def test_judge_stability() -> None:
     assert result.n == 3 and result.n_rule_excluded == 1
     assert (result.score_flips.count, result.correct_flips.count) == (1, 1)
     assert result.mean_abs_diff == pytest.approx(1 / 3)
+
+
+def test_clean_refusal_excludes_errors() -> None:
+    """A run that crashed (a retrieval error, a gateway timeout) gave no answer, so it counts as
+    a refusal by the fixed definition; the clean refusal rate leaves those out."""
+    records = [
+        *(rec("standard", f"n{i}", "no_answer", answered=False, found=False) for i in range(10)),
+        *(
+            rec("agentic", f"n{i}", "no_answer", answered=False, found=False,
+                status="error" if i < 4 else "not_found",
+                error="RetrievalError: x" if i < 4 else None)
+            for i in range(10)
+        ),
+    ]  # fmt: skip
+    records[0] = rec(
+        "standard", "n0", "no_answer", answered=False, found=False, generation_error="llm_timeout"
+    )
+    summary = per_type_summary(records, [])["no_answer"]
+    assert summary.refusal is not None and summary.clean_refusal is not None
+    assert (summary.refusal.a.count, summary.refusal.b.count) == (10, 10)  # by the fixed definition
+    assert (summary.clean_refusal.a.count, summary.clean_refusal.b.count) == (9, 6)
+    assert (summary.clean_refusal.improved, summary.clean_refusal.worsened) == (0, 3)
+    assert summary.errors == {"standard": 1, "agentic": 4}

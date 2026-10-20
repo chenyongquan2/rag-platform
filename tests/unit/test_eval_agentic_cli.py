@@ -21,6 +21,7 @@ from rag.eval.agentic.records import (
     system_file,
 )
 from rag.eval.agentic.report import project_cost, render_report
+from rag.eval.agentic.runner import RunStats
 from rag.eval.agentic.sets import EvalItem
 from rag.eval.answer.record import Usage
 from rag.observe import shutdown_observability
@@ -111,6 +112,7 @@ def test_report_renders_the_tables() -> None:
     for needle in (
         "single_hop",
         "no_answer",
+        "refused cleanly",
         "McNemar",
         "direction only",
         "Wilson",
@@ -243,3 +245,19 @@ def test_cli_rejects_a_run_past_the_stop_line(env: dict[str, Any]) -> None:
     assert (
         cli.main(["run", "--system", "standard", "--out", str(env["out"])], settings=settings) == 2
     )
+
+
+def test_cli_selects_questions_and_passes_the_deadline(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def spy(items: Any, **kw: Any) -> Any:
+        seen["qids"] = [i.qid for i in items]
+        seen["deadline_ms"] = kw["deadline_ms"]
+        return RunStats()
+
+    monkeypatch.setattr(cli, "run_agentic", spy)
+    assert _main(env, "run", "--system", "agentic", "--qids", "n1", "--deadline-ms", "60000") == 0
+    assert seen == {"qids": ["n1"], "deadline_ms": 60000}
+    assert _main(env, "run", "--system", "agentic", "--qids", "nope") == 2  # unknown question id

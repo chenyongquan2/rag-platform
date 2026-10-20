@@ -116,6 +116,13 @@ def render_report(records: Sequence[SystemRecord], lines: Sequence[JudgeLine]) -
     out += ["", "## No-answer questions: refusal rate (no answer given)", ""]
     if na and na.refusal:
         out += [*_BINARY_HEAD, _binary_row("no_answer: refused", na.refusal)]
+        if na.clean_refusal:
+            out.append(_binary_row("no_answer: refused cleanly (no error)", na.clean_refusal))
+        out += [
+            "",
+            f"Runs that ended in an error (counted as refusals in the first row): "
+            f"standard {na.errors.get('standard', 0)}, agentic {na.errors.get('agentic', 0)}.",
+        ]
         out += [
             "",
             f"Clarifications counted as refusals: standard {na.clarifications.get('standard', 0)}, "

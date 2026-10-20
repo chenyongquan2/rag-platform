@@ -120,9 +120,16 @@ def _take(values: Sequence[str] | None) -> dict[str, int] | None:
 def _items(args: argparse.Namespace, kb: str) -> list[EvalItem]:
     types = [t.strip() for t in args.types.split(",") if t.strip()] if args.types else None
     try:
-        return load_items(kb, types=types, take=_take(args.take))
+        items = load_items(kb, types=types, take=_take(args.take))
     except ValueError as exc:
         raise UsageError(str(exc)) from exc
+    if args.qids:
+        wanted = [q.strip() for q in args.qids.split(",") if q.strip()]
+        unknown = [q for q in wanted if q not in {i.qid for i in items}]
+        if unknown:
+            raise UsageError(f"--qids: unknown question ids {unknown}")
+        items = [i for i in items if i.qid in set(wanted)]
+    return items
 
 
 def _out(args: argparse.Namespace) -> Path:
@@ -185,6 +192,7 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
                         tracer=tracer,
                         max_cny=args.max_cny,
                         spent_before=before,
+                        deadline_ms=args.deadline_ms,
                         model=model,
                         helper_model=helper,
                         judge_model=judge,
@@ -293,6 +301,10 @@ def _parser() -> argparse.ArgumentParser:
     p_run.add_argument("--system", choices=["standard", "agentic", "both"], default="both")
     p_run.add_argument("--types", help=f"question types, comma separated ({', '.join(QTYPES)})")
     p_run.add_argument("--take", action="append", metavar="TYPE=N", help="first N of a type")
+    p_run.add_argument("--qids", help="only these question ids, comma separated")
+    p_run.add_argument(
+        "--deadline-ms", type=int, help="total deadline of each graph run (default: the settings')"
+    )
     p_run.add_argument("--max-cny", type=float, default=DEFAULT_MAX_CNY)
     p_run.add_argument("--index-prefix", default="")
     add_out(p_run)

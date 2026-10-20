@@ -76,6 +76,15 @@ def judge_scores(lines: Iterable[JudgeLine], system: str, run: int = 1) -> dict[
     }
 
 
+def _failed(record: SystemRecord) -> bool:
+    """The run ended in an error: no answer because something broke, not because it refused."""
+    return (
+        record.status == "error"
+        or record.generation_error is not None
+        or record.answer_parse_failed
+    )
+
+
 def _in_types(record: SystemRecord, qtype: str) -> bool:
     return record.answerable if qtype == ANSWERABLE else record.qtype == qtype
 
@@ -185,6 +194,11 @@ class TypeSummary(BaseModel):
     adequate: PairedBinary | None = None
     score: PairedScores | None = None
     refusal: PairedBinary | None = None
+    clean_refusal: PairedBinary | None = None
+    """Refused without a crash: the refusals of `refusal` minus the runs that ended in an error."""
+    errors: dict[str, int] = Field(default_factory=dict)
+    """No-answer questions whose run ended in an error (retrieval error, gateway timeout, parse
+    failure): they gave no answer, so `refusal` counts them, and `clean_refusal` does not."""
     clarifications: dict[str, int] = Field(default_factory=dict)
     """No-answer questions where the graph asked back (counted as refusals)."""
 
@@ -209,10 +223,21 @@ def per_type_summary(
                 s: {q: not systems[s][q].answered for q in common}  # type: ignore[index]
                 for s in ("standard", "agentic")
             }
+            clean = {
+                s: {  # type: ignore[index]
+                    q: not systems[s][q].answered and not _failed(systems[s][q]) for q in common
+                }
+                for s in ("standard", "agentic")
+            }
             out[qtype] = TypeSummary(
                 qtype=qtype,
                 n=len(common),
                 refusal=paired_binary("refused", refused["standard"], refused["agentic"]),
+                clean_refusal=paired_binary("refused cleanly", clean["standard"], clean["agentic"]),
+                errors={
+                    s: sum(1 for q in common if _failed(systems[s][q]))  # type: ignore[index]
+                    for s in ("standard", "agentic")
+                },
                 clarifications={
                     s: sum(1 for q in common if systems[s][q].clarification)  # type: ignore[index]
                     for s in ("standard", "agentic")
