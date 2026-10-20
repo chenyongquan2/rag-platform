@@ -105,6 +105,7 @@ def _pipeline(
     threshold: float = 0.3,
     rerank_n: int = 30,
     clock: ManualClock | None = None,
+    rerank_reserve_ms: int = 0,
 ) -> SearchPipeline:
     retriever = EsHybridRetriever(
         msearch,
@@ -114,6 +115,7 @@ def _pipeline(
         config=RetrievalConfig(),
         es_reserve_ms=100,
         es_margin_ms=200,
+        rerank_reserve_ms=rerank_reserve_ms,
     )
     runner = RerankRunner(scorer, batch_size=8, max_concurrency=2)
     reader = ContextReader(_expand_es(), kb=KB, index=ALIAS, count_tokens=count_tokens)
@@ -382,3 +384,19 @@ def test_config_version_ignores_description() -> None:
     assert search_config_version(plain, settings, "e@1") == search_config_version(
         described, settings, "e@1"
     )
+
+
+def test_search_docs_output_is_identical_with_and_without_the_rerank_reserve() -> None:
+    """Spec P3-06 AC10: the whole chain (fusion, dedupe, rerank, threshold, top_k) gives the same
+    result for a fixed scripted run whatever the vector-wait reserve, when time is ample. The
+    config version is unchanged too (it does not include the reserve)."""
+
+    def run(reserve: int) -> dict[str, Any]:
+        pipeline = _pipeline(
+            _msearch(), FakeCrossEncoder(SCORES), expand="neighbors", rerank_reserve_ms=reserve
+        )
+        result = pipeline.retrieve("which page?", kb=KB, top_k=3, request_id="req-1")
+        return result.model_dump(exclude={"timings_ms"})
+
+    assert run(0) == run(2_000)
+    assert run(0)["config_version"] == "cfg1"

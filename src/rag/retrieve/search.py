@@ -313,6 +313,7 @@ def hybrid_parts(
         config=cfg.retrieval,
         es_reserve_ms=settings.search_es_reserve_ms,
         es_reserve_ratio=settings.search_es_reserve_ratio,
+        rerank_reserve_ms=settings.search_rerank_reserve_ms,
         es_margin_ms=settings.search_es_margin_ms,
         embed_threads=settings.embed_max_concurrency,
         routes=routes,

@@ -211,6 +211,7 @@ def test_factory_refuses_other_embed_model() -> None:
     assert search.deadline_ms == settings.search_deadline_ms
     assert search.retriever.es_reserve_ms == settings.search_es_reserve_ms
     assert search.retriever.es_reserve_ratio == settings.search_es_reserve_ratio
+    assert search.retriever.rerank_reserve_ms == settings.search_rerank_reserve_ms == 2_000
     # With an index prefix the fake-vector alias is used.
     es.indices.create(
         index="fake_kb_hf_docs_v1", mappings={"_meta": {"embed_model": "fake-embedding@4"}}
