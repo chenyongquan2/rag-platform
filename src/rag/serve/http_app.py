@@ -7,6 +7,8 @@ One Starlette app, so one process holds one reranker for every way in:
     POST /v1/search_docs       {kb, query, filters?, top_k?, deadline_ms?} -> SearchResponse
     POST /v1/ask_docs          {kb, question, session_id?, deadline_ms?, resume_token?, answer?}
                                -> AskResponse
+    POST /v1/ask_docs/stream   the same body -> Server-Sent Events (`rag.serve.stream`)
+    POST /v1/feedback          {request_id, useful, comment?} -> FeedbackResponse
     POST /v1/get_context       {chunk_id, mode?}                           -> ContextResponse
     GET  /v1/knowledge_bases                                               -> KnowledgeBaseList
     /mcp                       MCP over streamable-http (when an MCPServer is given)
@@ -21,6 +23,7 @@ comes with the SDK, and four routes need no generated docs or dependency injecti
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import re
@@ -33,7 +36,7 @@ from mcp.server import MCPServer
 from pydantic import BaseModel, ConfigDict, ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import BaseRoute, Mount, Route
 
 from rag.observe import new_request_id
@@ -41,6 +44,7 @@ from rag.security.access import Credentials
 from rag.serve.errors import ServiceError, http_status
 from rag.serve.schema import ErrorResponse
 from rag.serve.service import SearchService
+from rag.serve.stream import encode
 from rag.types import ErrorCategory
 
 logger = logging.getLogger(__name__)
@@ -70,6 +74,14 @@ class AskRequest(BaseModel):
     deadline_ms: int | None = None
     resume_token: str | None = None
     answer: str | None = None
+
+
+class FeedbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    request_id: str
+    useful: bool
+    comment: str | None = None
 
 
 class ContextRequest(BaseModel):
@@ -198,6 +210,62 @@ def build_http_app(
             answer=body.answer,
         )
 
+    async def ask_docs_stream(request: Request) -> JSONResponse | StreamingResponse:
+        request_id = _request_id(request)
+        body, problem = await _body(request, AskRequest)
+        if body is None:
+            return await reject("ask_docs", request_id, problem)
+        events = service.ask_docs_stream(
+            Credentials(transport=TRANSPORT),
+            request_id=request_id,
+            kb=body.kb,
+            question=body.question,
+            session_id=body.session_id,
+            deadline_ms=body.deadline_ms,
+            resume_token=body.resume_token,
+            answer=body.answer,
+        )
+        # The first event decides: a failure before it is a plain error response (s16-9), the
+        # same one `POST /v1/ask_docs` gives; once the first event is out the status is 200.
+        try:
+            first = await anext(events)
+        except ServiceError as err:
+            return _error(err.category, err.request_id)
+        except Exception:
+            logger.exception("request %s failed outside the service", request_id)
+            return _error(ErrorCategory.INTERNAL_ERROR, request_id)
+
+        async def body_bytes() -> AsyncIterator[bytes]:
+            # `aclosing`: when the response is closed at a write, the event generator is
+            # closed with it, and that cancels the run.
+            async with contextlib.aclosing(events):
+                yield encode(first)
+                async for item in events:
+                    yield encode(item)
+
+        return StreamingResponse(
+            body_bytes(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",  # nginx and kin: do not hold the stream back
+                REQUEST_ID_HEADER: request_id,
+            },
+        )
+
+    async def feedback(request: Request) -> JSONResponse:
+        request_id = _request_id(request)
+        body, problem = await _body(request, FeedbackRequest)
+        if body is None:
+            return await reject("feedback", request_id, problem)
+        return await _call(
+            service.feedback,
+            request_id,
+            rated_request_id=body.request_id,
+            useful=body.useful,
+            comment=body.comment,
+        )
+
     async def get_context(request: Request) -> JSONResponse:
         request_id = _request_id(request)
         body, problem = await _body(request, ContextRequest)
@@ -213,6 +281,8 @@ def build_http_app(
         Route("/readyz", readyz, methods=["GET"]),
         Route("/v1/search_docs", search_docs, methods=["POST"]),
         Route("/v1/ask_docs", ask_docs, methods=["POST"]),
+        Route("/v1/ask_docs/stream", ask_docs_stream, methods=["POST"]),
+        Route("/v1/feedback", feedback, methods=["POST"]),
         Route("/v1/get_context", get_context, methods=["POST"]),
         Route("/v1/knowledge_bases", knowledge_bases, methods=["GET"]),
     ]
@@ -224,10 +294,13 @@ def build_http_app(
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         service.start()
-        if mcp is None:
-            yield
-            return
-        async with mcp.session_manager.run():
-            yield
+        try:
+            if mcp is None:
+                yield
+            else:
+                async with mcp.session_manager.run():
+                    yield
+        finally:
+            await service.cancel_streams()  # runs of streams still open end cleanly
 
     return Starlette(routes=routes, lifespan=lifespan)

@@ -330,3 +330,45 @@ class SlowChatModel(FakeChatModel):
     ) -> ChatResult:
         await asyncio.sleep(self.delay_s)
         return self._generate(messages, stop, None, **kwargs)
+
+
+class SlowStreamingChatModel(StreamingFakeChatModel):
+    """A streaming chat model that waits `delay_s` before each piece (a gateway that writes at
+    the speed of a model). `pieces_sent` counts the pieces handed out, `started` is set when a
+    stream begins and `closed` when it ends or is cancelled: a test that cancels a request looks
+    at them to see that the model stopped. The wait is a cancellable `asyncio.sleep`."""
+
+    delay_s: float = 0.05
+    _sent: list[str] = PrivateAttr(default_factory=list)
+    _started: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _closed: threading.Event = PrivateAttr(default_factory=threading.Event)
+
+    @property
+    def pieces_sent(self) -> int:
+        return len(self._sent)
+
+    @property
+    def started(self) -> threading.Event:
+        return self._started
+
+    @property
+    def closed(self) -> threading.Event:
+        return self._closed
+
+    async def _astream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        self._started.set()
+        try:
+            for chunk in self._pieces(messages):
+                await asyncio.sleep(self.delay_s)
+                self._sent.append(chunk.text)
+                if run_manager is not None:
+                    await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
+                yield chunk
+        finally:
+            self._closed.set()

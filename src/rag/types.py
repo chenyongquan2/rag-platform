@@ -43,6 +43,10 @@ class ErrorCategory(StrEnum):
     # used, issued to another caller, knowledge base or session, or whose run is not waiting for
     # an answer. One category for all of them, so a caller cannot tell which tokens exist.
     INVALID_RESUME_TOKEN = "invalid_resume_token"
+    # Streaming (spec P3-04, s16-9): the client closed the page or pressed cancel, so the run
+    # was cancelled. Not a failure of the service: it is written to the business record only
+    # (the request span ends `cancelled`), and no response is sent to anyone.
+    CLIENT_CANCELLED = "client_cancelled"
 
 
 class AnswerStatus(StrEnum):

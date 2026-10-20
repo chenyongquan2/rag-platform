@@ -381,6 +381,10 @@ class ServiceSettings(BaseSettings):
     agent_judge_timeout_ms: int = Field(default=9_000, gt=0)
     agent_judge_context_tokens: int = Field(default=1_500, gt=0)
     agent_round_min_ms: int = Field(default=8_000, ge=0)
+    # Streaming endpoint (spec P3-04, design s16-9): `sse_heartbeat_s` is how often a comment
+    # line is sent while the stream is silent (the retrieval and rerank seconds), so a proxy
+    # that closes idle connections after 30 to 60 s keeps it open.
+    sse_heartbeat_s: float = Field(default=10.0, gt=0)
     session_store_url: str = "sqlite://data/sessions/sessions.db"
     session_lock_url: str = "memory://"
 

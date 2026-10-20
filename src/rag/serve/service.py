@@ -36,7 +36,7 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -69,13 +69,17 @@ from rag.security.access import (
 )
 from rag.serve.errors import ServiceError, error_category
 from rag.serve.schema import (
+    FEEDBACK_COMMENT_CHARS,
     AskResponse,
     ContextResponse,
+    ErrorResponse,
+    FeedbackResponse,
     KnowledgeBaseInfo,
     KnowledgeBaseList,
     SearchResponse,
 )
-from rag.types import ContextResult, ErrorCategory, RetrievalResult
+from rag.serve.stream import HEARTBEAT, Heartbeat, StreamEvent
+from rag.types import AnswerStatus, ContextResult, ErrorCategory, RetrievalResult
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +95,9 @@ _CALLER_ERRORS = {
     ErrorCategory.KB_NOT_FOUND,
     ErrorCategory.INVALID_RESUME_TOKEN,
 }
+# The request id a feedback verdict names: what `X-Request-Id` and `new_request_id` allow.
+_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+_END = object()  # the producer of a stream has finished
 # What a resume token looks like (`rag.agent.resume.new_token`): anything else cannot be one.
 _RESUME_TOKEN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
@@ -200,6 +207,8 @@ class _Call:
     scope: RequestScope | None = None
     record: BusinessRecord | None = None
     """The success path's record; failures get one built from the fields above."""
+    stage: str | None = None
+    """The graph node a streamed request is in (the record of a cancelled one names it)."""
 
     def elapsed_ms(self) -> float:
         return (time.perf_counter() - self.began) * 1000.0
@@ -264,6 +273,7 @@ class SearchService:
         self._closed = False
         self.load_s: float | None = None
         self._agent = agent
+        self._streams: set[asyncio.Task[None]] = set()  # the runs of open streams
         self._answer_model = answer_model  # None: the runtime's `online` chat model
         self._helper_model = helper_model  # None: the runtime's `agent_rewrite_profile` model
 
@@ -513,6 +523,32 @@ class SearchService:
         with `resume_token` and `answer` (and the same `kb` and `session_id`; `question` is
         required as always but not used). A token that is unknown, used, expired or not the
         caller's is `invalid_resume_token`."""
+        return await self._ask_docs(
+            credentials,
+            kb=kb,
+            question=question,
+            session_id=session_id,
+            deadline_ms=deadline_ms,
+            request_id=request_id,
+            resume_token=resume_token,
+            answer=answer,
+        )
+
+    async def _ask_docs(
+        self,
+        credentials: Credentials,
+        *,
+        kb: str,
+        question: str,
+        session_id: str | None = None,
+        deadline_ms: int | None = None,
+        request_id: str | None = None,
+        resume_token: str | None = None,
+        answer: str | None = None,
+        emit: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> AskResponse:
+        """The one implementation of `ask_docs` and of the streamed call (`emit` is the stream's
+        listener: the run's events go to it as they happen)."""
         request_id = request_id or new_request_id()
         caller, cfg = self._resolve(credentials, kb, request_id)
         pipeline = self._pipelines.get(cfg.kb) if cfg is not None else None
@@ -526,6 +562,8 @@ class SearchService:
             "deadline_ms": deadline_ms if _is_int(deadline_ms) else None,
             "resumed": resume_token is not None,
         }
+        if emit is not None:
+            extra["stream"] = True
         if cfg is None:
             extra["requested_kb"] = _clip(kb, RECORD_TEXT_CHARS)
         with self._call(
@@ -544,6 +582,14 @@ class SearchService:
             )
             deadline = Deadline.after_ms(deadline_ms)
             pipeline = await asyncio.to_thread(self._ready_pipeline, cfg.kb, deadline, request_id)
+            listener = None
+            if emit is not None:
+
+                def listener(name: str, data: dict[str, Any]) -> None:
+                    if name == "progress" and data.get("phase") in ("start", "waiting"):
+                        call.stage = data.get("node")  # where a cancelled request was
+                    emit(name, data)
+
             result = await self.agent.ask(
                 question,
                 cfg=cfg,
@@ -558,6 +604,7 @@ class SearchService:
                 helper_model=self._helper_model,
                 resume_token=resume_token,
                 answer=answer,
+                emit=listener,
             )
             assert call.scope is not None
             call.scope.set_result(result)
@@ -603,6 +650,201 @@ class SearchService:
                 }
             )
             return response
+
+    async def ask_docs_stream(
+        self,
+        credentials: Credentials,
+        *,
+        kb: str,
+        question: str,
+        session_id: str | None = None,
+        deadline_ms: int | None = None,
+        request_id: str | None = None,
+        resume_token: str | None = None,
+        answer: str | None = None,
+        heartbeat_s: float | None = None,
+    ) -> AsyncIterator[StreamEvent | Heartbeat]:
+        """`ask_docs` as a stream of events (s16-9; the events are in `rag.serve.stream` and the
+        spec). The run is the same one `ask_docs` makes (`_ask_docs`: the caller's access, the
+        argument checks, the session lock, the deadline, the token cap, the business record,
+        the spans); it runs in a task of its own that puts the events in a queue, and this
+        generator hands them out, with a heartbeat after `heartbeat_s` seconds of silence.
+
+        A failure before anything was produced (a bad argument, a hidden KB, a refused resume
+        token, a service that is not ready) raises `ServiceError` from the first `anext`, so the
+        HTTP layer can still answer with a status code. After that, a failure is an `error`
+        event and the stream ends. Closing the generator (the client left) cancels the run:
+        the graph stops where it is, the session lock is released, the request is recorded as
+        `client_cancelled` and its span ends `cancelled`. The task, not the generator, does
+        that work, because the generator is being cancelled itself when this happens."""
+        request_id = request_id or new_request_id()
+        beat = self.settings.sse_heartbeat_s if heartbeat_s is None else heartbeat_s
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        began = time.perf_counter()
+        task = asyncio.create_task(
+            self._produce_stream(
+                queue,
+                began,
+                credentials,
+                request_id=request_id,
+                kb=kb,
+                question=question,
+                session_id=session_id,
+                deadline_ms=deadline_ms,
+                resume_token=resume_token,
+                answer=answer,
+            ),
+            name=f"ask-stream-{request_id}",
+        )
+        self._streams.add(task)
+        task.add_done_callback(self._streams.discard)
+        started = False
+        try:
+            while True:
+                try:
+                    # No heartbeat before the first event: until then the HTTP layer may still
+                    # answer with a plain error, and nothing has been sent.
+                    item = await asyncio.wait_for(queue.get(), beat if started else None)
+                except TimeoutError:
+                    yield HEARTBEAT
+                    continue
+                if item is _END:
+                    return
+                if isinstance(item, ServiceError):
+                    if not started:
+                        raise item
+                    failure = ErrorResponse.of(item.category, item.request_id)
+                    item = StreamEvent("error", failure.model_dump())
+                started = True
+                yield item
+        finally:
+            if not task.done():
+                task.cancel()
+
+    async def _produce_stream(
+        self,
+        queue: asyncio.Queue[Any],
+        began: float,
+        credentials: Credentials,
+        *,
+        request_id: str,
+        **ask: Any,
+    ) -> None:
+        """Run the request and put its events in `queue`; a `ServiceError` for a failure; `_END`
+        last, however it ends."""
+        first: dict[str, float] = {}
+
+        def emit(name: str, data: dict[str, Any]) -> None:
+            if name not in first and name in ("progress", "token"):
+                first[name] = round((time.perf_counter() - began) * 1000.0, 3)
+            queue.put_nowait(StreamEvent(name, data))
+
+        try:
+            response = await self._ask_docs(credentials, request_id=request_id, emit=emit, **ask)
+            for event in self._closing_events(response, first):
+                queue.put_nowait(event)
+        except ServiceError as err:
+            queue.put_nowait(err)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # `_call` turns everything into a ServiceError; this is a bug
+            logger.exception("stream %s failed outside the call", request_id)
+            queue.put_nowait(ServiceError(ErrorCategory.INTERNAL_ERROR, request_id))
+        finally:
+            queue.put_nowait(_END)
+
+    @staticmethod
+    def _closing_events(response: AskResponse, first: Mapping[str, float]) -> list[StreamEvent]:
+        """What ends a stream that did not fail: the checked answer (or the question to ask the
+        caller back), then `done` with the numbers of the run."""
+        if response.status == AnswerStatus.NEED_CLARIFICATION:
+            last = StreamEvent(
+                "need_clarification",
+                {
+                    "request_id": response.request_id,
+                    "question": response.answer,
+                    "resume_token": response.resume_token,
+                    "session_id": response.session_id,
+                },
+            )
+        else:
+            last = StreamEvent("answer", response.model_dump(mode="json"))
+        done = StreamEvent(
+            "done",
+            {
+                "request_id": response.request_id,
+                "status": response.status,
+                "rounds": response.rounds,
+                "degraded": response.degraded,
+                "rerank_timeout": response.rerank_timeout,
+                "coverage_unconfirmed": response.coverage_unconfirmed,
+                "stop_reason": response.stop_reason,
+                "tokens_used": response.tokens_used,
+                "timings_ms": {
+                    **response.timings_ms,
+                    **{f"first_{name}": ms for name, ms in first.items()},
+                },
+            },
+        )
+        return [last, done]
+
+    async def cancel_streams(self) -> None:
+        """Cancel the runs of the open streams and wait until they have cleaned up (at shutdown;
+        a stream whose client is gone has been cancelled already)."""
+        loop = asyncio.get_running_loop()
+        tasks = [t for t in self._streams if t.get_loop() is loop]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def feedback(
+        self,
+        credentials: Credentials,
+        *,
+        rated_request_id: Any,
+        useful: Any,
+        comment: Any = None,
+        request_id: str | None = None,
+    ) -> FeedbackResponse:
+        """The user's verdict on an answer (s16-1): one business record line with the rated
+        request's id, `useful` and a comment of at most `FEEDBACK_COMMENT_CHARS` characters
+        (typed by the user; nothing else about the user is stored). P5 turns it into a score
+        on the trace; until then it is only this line. The id is checked for its shape, not
+        for existence."""
+        request_id = request_id or new_request_id()
+        caller, _ = self._resolve(credentials, "", request_id)
+        with self._call(
+            "feedback",
+            request_id=request_id,
+            caller=caller,
+            cfg=None,
+            config_version="",
+            extra={},
+        ) as call:
+            problem = None
+            if not isinstance(rated_request_id, str) or not _REQUEST_ID.match(rated_request_id):
+                problem = "request_id must be the id of a request"
+            elif not isinstance(useful, bool):
+                problem = "useful must be true or false"
+            elif comment is not None and not isinstance(comment, str):
+                problem = "comment must be text"
+            elif comment is not None and len(comment) > FEEDBACK_COMMENT_CHARS:
+                problem = f"comment longer than {FEEDBACK_COMMENT_CHARS} characters"
+            if problem is not None:
+                raise ServiceError(ErrorCategory.INVALID_REQUEST, request_id, detail=problem)
+            text = comment.strip() if isinstance(comment, str) else ""
+            record = self._record(
+                call,
+                timings_ms={"request": call.elapsed_ms()},
+                extra={
+                    "useful": useful,
+                    "comment": text or None,
+                    "feedback_request_id": request_id,
+                },
+            )
+            # Keyed by the rated request: a join on `request_id` finds the answer and the verdict.
+            call.record = record.model_copy(update={"request_id": rated_request_id})
+            return FeedbackResponse(request_id=rated_request_id, recorded=True)
 
     def get_context(
         self,
@@ -879,6 +1121,20 @@ class SearchService:
                             flags=[category],
                             timings_ms={"request": call.elapsed_ms()},
                             extra={**call.extra, "error": category},
+                        )
+                    )
+                    raise
+                except asyncio.CancelledError:
+                    # The caller went away (a closed stream) or the server is shutting down:
+                    # not a failure, but a request that ended without an answer. One record, so
+                    # the day's numbers add up; the span ends `cancelled` (in `request_span`).
+                    logger.info("%s request %s cancelled in %s", tool, request_id, call.stage)
+                    self._write(
+                        self._record(
+                            call,
+                            flags=[ErrorCategory.CLIENT_CANCELLED],
+                            timings_ms={"request": call.elapsed_ms()},
+                            extra={**call.extra, "cancelled": True, "cancelled_at": call.stage},
                         )
                     )
                     raise

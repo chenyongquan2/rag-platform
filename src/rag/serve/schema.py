@@ -263,6 +263,18 @@ class KnowledgeBaseList(BaseModel):
     knowledge_bases: list[KnowledgeBaseInfo]
 
 
+FEEDBACK_COMMENT_CHARS = 500
+
+
+class FeedbackResponse(BaseModel):
+    """Result of `POST /v1/feedback`: the verdict was written to the business record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(description="The request the verdict is about.")
+    recorded: bool
+
+
 class ErrorResponse(BaseModel):
     """A failed request: the category (s16-8), the request id to quote, and a fixed sentence
     about the category; never details of the failure (s16-4)."""
