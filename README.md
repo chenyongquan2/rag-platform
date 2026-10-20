@@ -229,7 +229,7 @@ only for what rules cannot decide) -> `clarify` (ask the caller back) -> `rewrit
 in `AgentHooks` (`rag.agent.hooks`); the sufficiency judge and the correction rounds are in
 `rag.agent.judge` and `rag.agent.correction` (below). It is exposed as the MCP tool
 `ask_docs(kb, question, session_id, deadline_ms, resume_token, answer)` and `POST /v1/ask_docs`
-(JSON body `{kb, question, session_id?, deadline_ms?, resume_token?, answer?}`), non-streaming,
+(JSON body `{kb, question, session_id?, deadline_ms?, resume_token?, answer?}`), non-streaming (the streaming form is below),
 with the caller, ACL, error categories, spans and business record line of `search_docs`.
 
 ```python
@@ -382,6 +382,7 @@ no accuracy, which would only be the share of "not enough" labels). `--rescue` a
 | `AGENT_JUDGE_TIMEOUT_MS` | 9000 | Longest one judge call (never into the answer's time) |
 | `AGENT_JUDGE_CONTEXT_TOKENS` | 1500 | Estimated tokens of fragments shown to the judge |
 | `AGENT_ROUND_MIN_MS` | 8000 | Time one more round needs, on top of the answer's time |
+| `SSE_HEARTBEAT_S` | 10 | Seconds of silence before the stream sends a heartbeat comment line |
 | `CHECKPOINT_URL` | `sqlite://data/checkpoints/langgraph.db` | Checkpoints (`memory://` for tests) |
 | `SESSION_STORE_URL` | `sqlite://data/sessions/sessions.db` | Session history and resume tokens (`memory://` for tests) |
 | `SESSION_LOCK_URL` | `memory://` | Session locks (`file://data/locks` for several processes) |
@@ -394,6 +395,66 @@ no accuracy, which would only be the share of "not enough" labels). `--rescue` a
 | KB config `agent.judge` | false (`hf_docs`: true) | Judge after each round, correct with more rounds |
 | KB config `agent.multi_queries` | 3 | Phrasings of each missing sub-question in round 2 |
 | KB config `agent.hyde` | true | Round 3 searches a hypothetical answer passage |
+
+## Streaming answers and the Q&A page (P3-04)
+
+`POST /v1/ask_docs/stream` takes the body of `POST /v1/ask_docs` and answers with Server-Sent
+Events (`Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`,
+`X-Request-Id`). It is the same run as `ask_docs` (same caller and ACL, argument checks, session
+lock, deadline, token cap, business record line, spans): `AgentRuntime.ask(..., emit=...)` and
+`SearchService.ask_docs_stream` share their code with the non-streaming call. MCP stays
+non-streaming. A failure before the first event (bad JSON or argument, unknown or hidden KB, a
+resume token that is refused, a service that is not ready) is a plain JSON error with the status
+code of `POST /v1/ask_docs`; once the first event is out the status is 200 and a failure is an
+`error` event. A request that has to wait behind an earlier one of its session starts with the
+`queued` progress event, so the status is 200 for it, and a refused resume token then arrives as an
+`error` event.
+
+An event is `event: <name>` and one line `data: <JSON>`, then a blank line. A line that starts with
+`:` is a heartbeat (`: keep-alive`), sent every `SSE_HEARTBEAT_S` seconds (10) while the run is
+silent, so a proxy that closes idle connections keeps the stream open. Behind nginx the
+`X-Accel-Buffering: no` header turns its buffering off for this response.
+
+| Event | Data | When |
+|---|---|---|
+| `progress` | `{node, phase, round?, ms?, ...}` | `node` is `queued`, `route`, `clarify`, `rewrite`, `retrieve`, `judge`, `answer` or `verify`. `phase` is `waiting` (queued behind the session's earlier request), `start`, `end` (with `ms`; `route`: `retrieve`, `clarify`; `rewrite`: `queries`; `retrieve`: `chunks` found by this round and `chunks_total` of all rounds; `judge`: `loop`, `verdict` when the KB judges; `answer`: `found`, `status`) or `retry` (answer: the attempt cited nothing, its text is void, `attempt`). No query or model text. |
+| `token` | `{text, attempt}` | A piece of the answer as the model writes it, markers like `[1]` included. Only the `answer` node writes these. A new `attempt` number means the text so far is void. |
+| `answer` | the `AskResponse` of `POST /v1/ask_docs` | The checked answer: `sentences` with their citations, `sources`, `citation_check.removed_markers` (the `[n]` in the streamed text that match no source), `found`, `sufficiency`, `degraded`, `fallbacks`, `stop_reason`, `notice`. It replaces the streamed text. |
+| `need_clarification` | `{request_id, question, resume_token, session_id}` | Instead of `answer`: send the user's reply with `resume_token` and `answer` to the same endpoint (same `kb` and `session_id`). |
+| `error` | `{error, request_id, message}` | Category (design 16.8), request id, a fixed sentence; never details. The last event: no `done`. |
+| `done` | `{request_id, status, rounds, degraded, rerank_timeout, coverage_unconfirmed, stop_reason, tokens_used, timings_ms}` | The last event of a run that did not fail. `timings_ms` has the steps, `request`, and `first_progress` and `first_token` (ms since the request came in; no `first_token` when no text was written). |
+
+A deadline that passes in the middle of the stream is not an error: the run is cut where it is and
+the `answer` event carries what was found (`stop_reason: deadline`, `coverage_unconfirmed`, no
+answer text; the page replaces the text it had streamed). A client that closes the connection
+(closes the page, presses Cancel) cancels the run: no further model call, the session lock is
+released, the checkpoint stays at the last finished node, the span ends `cancelled` and the
+business record gets one line flagged `client_cancelled` (`extra.cancelled_at`: the node it was in).
+That is not an error category of the service: nobody receives it.
+
+`GET /` serves the page: `index.html` and `/ui/{sse.js,render.js,app.js,app.css}` from
+`src/rag/serve/web/` (no build step, no framework, no outside request). The page sets
+`Content-Security-Policy: default-src 'self'; script-src 'self'; ...; frame-ancestors 'none'` (no
+inline script or style is needed), `X-Content-Type-Options: nosniff`, `Referrer-Policy:
+no-referrer`. It lists the knowledge bases of `GET /v1/knowledge_bases` (only those the caller may
+use), keeps a session id in `sessionStorage`, reads the stream with `fetch` (EventSource cannot
+POST), shows progress, the streamed answer, and after the `answer` event each `[n]` as a button
+that opens the passage (title, source, text; removed markers are struck through with a note),
+asks the question back when the run needs it, cancels with an `AbortController`, shows errors
+(category and request id) and sends the two feedback buttons to `POST /v1/feedback`
+(`{request_id, useful, comment?}`, a comment up to 500 characters): one business record line
+(`tool: feedback`, `request_id` the rated request's, `extra.useful`, `extra.comment`). Everything
+that comes from a model or a document is put into the page as text, never as HTML.
+
+```bash
+uv run python -m rag.serve http --dev-fake --port 28099   # fake search and model, no gateway; open http://127.0.0.1:28099/
+uv run python scripts/stream_latency.py --url http://127.0.0.1:28099 --kb demo_docs --question "How do I push a model with push_to_hub?" --runs 20
+```
+
+`--dev-fake` serves the knowledge base `demo_docs` on a local address only; questions with `xss`,
+`retry`, `slow` or `nothing` in them show the markup case, a second answer attempt, a long answer
+(to press Cancel) and a not-found result. The JavaScript is tested with node
+(`tests/web/ui_test.js`, run by `tests/unit/test_serve_web.py`; skipped when node is missing).
 
 ## Retrieval evaluation
 

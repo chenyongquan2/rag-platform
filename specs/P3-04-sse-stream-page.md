@@ -1,6 +1,6 @@
 # P3-04 SSE streaming endpoint and the single-page Q&A web page
 
-Status: in progress
+Status: review
 Phase: P3
 Depends on: P3-01 (graph, runtime, lock, deadline, token cap), P3-02 (resume token), P3-03 (judge, HyDE)
 Design sections: s16-9 (main), s16-1, s16-8, s13-3, s11-1, s11-2, s15-1
@@ -44,39 +44,39 @@ heartbeat comment sent every `sse_heartbeat_s` seconds while nothing else is sen
 - Settings: `sse_heartbeat_s` (10.0). `ErrorCategory.CLIENT_CANCELLED` (`client_cancelled`).
 - `python -m rag.serve http --dev-fake`: the same app over fake retrieval and a slow fake model (no gateway,
   no Docker), for the page and for latency numbers.
-- Files: `src/rag/serve/web/{index.html,app.js,app.css}`.
+- Files: `src/rag/serve/web/{index.html,sse.js,render.js,app.js,app.css}`; `scripts/stream_latency.py` times a stream from the client.
 
 ## Acceptance criteria
 Tests: `tests/unit/test_agent_stream.py` (A), `test_serve_stream.py` (S), `test_serve_stream_cancel.py` (C, a
 real uvicorn server on an ephemeral port), `test_serve_web.py` (W; runs `tests/web/ui_test.js` with node and
 is skipped without node). Fakes only. Names are relative to the file named first in each group.
-- [ ] AC1 Every node writes `progress` start and end with the round; retrieve says how many chunks it found, judge its verdict — `test_agent_stream.py::test_progress_events_for_every_node_with_round_and_chunks`
-- [ ] AC2 `token` events carry the answer node's text only; rewrite, route, judge and HyDE model text is never streamed — `test_agent_stream.py::test_token_events_come_only_from_the_answer_node`, `::test_hyde_and_judge_text_never_reaches_a_token_event`
-- [ ] AC3 A retried answer attempt is marked (`progress` phase `retry`, `token.attempt`) — `test_agent_stream.py::test_a_retried_answer_attempt_is_marked`
-- [ ] AC4 `ask` and the stream share one run: same result either way, the non-stream path emits nothing — `test_agent_stream.py::test_the_streamed_run_gives_the_same_result_as_ask`
-- [ ] AC5 A request that waits for the session lock reports `queued`; one that does not, does not — `test_agent_stream.py::test_a_request_waiting_for_the_session_lock_reports_queued`
-- [ ] AC6 Event order: progress, then token, then `answer`, then `done`; every node's `end` after its `start` — `test_serve_stream.py::test_event_order_progress_token_answer_done`
-- [ ] AC7 `answer` has the `AskResponse` shape and lists the removed markers; the streamed text still holds them — `test_serve_stream.py::test_answer_event_carries_the_checked_answer_and_the_removed_markers`
-- [ ] AC8 `need_clarification` event, then a second stream with `resume_token` and `answer` finishes the run — `test_serve_stream.py::test_need_clarification_then_resume_over_the_stream`
-- [ ] AC9 `done` has timings, rounds, flags, tokens, `first_progress`, `first_token` — `test_serve_stream.py::test_done_event_has_timings_rounds_flags_and_token_usage`
-- [ ] AC10 Failures before the first byte (bad JSON, bad input, unknown and hidden KB, bad resume token, not ready) are JSON errors with the status of the non-stream endpoint — `test_serve_stream.py::test_errors_before_streaming_are_json_with_the_status_of_ask_docs`
-- [ ] AC11 A failure after the first byte is an `error` event (category and request id, no internals), then the stream ends — `test_serve_stream.py::test_a_failure_after_the_first_byte_is_an_error_event_then_close`
-- [ ] AC12 Heartbeat comment lines while the run is silent — `test_serve_stream.py::test_heartbeat_comment_lines_while_nothing_else_is_sent`
-- [ ] AC13 Response headers (`text/event-stream`, no-cache, `X-Accel-Buffering: no`, `X-Request-Id`) — `test_serve_stream.py::test_stream_response_headers`
-- [ ] AC14 Same caller and ACL handling as `ask_docs`: the caller's groups reach retrieval — `test_serve_stream.py::test_stream_uses_the_callers_access_like_ask_docs`
-- [ ] AC15 The total deadline in the middle of the stream ends with an `answer` event (chunks only, `stop_reason` deadline), not an error — `test_serve_stream.py::test_deadline_in_the_middle_of_the_stream_ends_with_an_answer_event`
-- [ ] AC16 Token cap, session history and business record work as in the non-stream call — `test_serve_stream.py::test_the_token_cap_still_applies_to_a_streamed_run`, `::test_a_streamed_run_writes_the_history_and_one_business_record`
-- [ ] AC17 Client disconnect during the answer: no further model call, the session lock is released, spans closed — `test_serve_stream_cancel.py::test_disconnect_while_the_answer_is_written_stops_the_model`
-- [ ] AC18 Disconnect before the answer: no model call at all; checkpoint stays at the last finished node — `test_serve_stream_cancel.py::test_disconnect_during_retrieval_makes_no_model_call_and_keeps_the_checkpoint`
-- [ ] AC19 A cancelled request writes one business record flagged `client_cancelled` (with the node it was in), and the request span ends `cancelled` — `test_serve_stream_cancel.py::test_a_cancelled_request_is_recorded_as_client_cancelled`
-- [ ] AC20 A request that waited behind the cancelled one runs once the lock is free — `test_serve_stream_cancel.py::test_a_waiting_request_runs_after_the_first_one_disconnects`
-- [ ] AC21 `GET /` serves the page with CSP (`default-src 'self'`, no inline script or style), `nosniff`, no outside URL; `/ui/app.js` and `/ui/app.css` are served — `test_serve_web.py::test_root_serves_the_page_with_security_headers`, `::test_the_page_loads_nothing_from_outside_and_has_no_inline_code`
-- [ ] AC22 `GET /v1/knowledge_bases` (the page's list) shows only the KBs the caller may use — `test_serve_web.py::test_the_knowledge_base_list_hides_what_the_caller_may_not_use`
-- [ ] AC23 `POST /v1/feedback` writes one record line with the request id, the verdict and a capped comment; bad bodies are `invalid_request` — `test_serve_web.py::test_feedback_writes_one_record`, `::test_feedback_rejects_bad_bodies`
-- [ ] AC24 The page's SSE parser handles comments, split chunks, multi-line `data:` and unknown events — `test_serve_web.py::test_sse_parser_in_node`
-- [ ] AC25 Rendering uses text nodes only: `<img onerror>` and `<script>` in an answer and in a passage stay text; the code has no `innerHTML` — `test_serve_web.py::test_rendering_untrusted_text_creates_no_elements`, `::test_app_js_never_sets_html`
-- [ ] AC26 Settings and the dev fake mode: `sse_heartbeat_s` validated; `--dev-fake` builds a service that streams without any network — `test_serve_stream.py::test_stream_settings`, `::test_dev_fake_service_streams_without_a_gateway`
-- [ ] AC27 (by running) the page in a real browser against a running dev-fake server: streamed answer, markers, removed markers, clarification, cancel, error, XSS payloads, feedback; time to first progress and first token measured; section 「P3-04 流式和页面」 of `docs/reports/P3-report.md`
+- [x] AC1 Every node writes `progress` start and end with the round; retrieve says how many chunks it found, judge its verdict — `test_agent_stream.py::test_progress_events_for_every_node_with_round_and_chunks`
+- [x] AC2 `token` events carry the answer node's text only; rewrite, route, judge and HyDE model text is never streamed — `test_agent_stream.py::test_token_events_come_only_from_the_answer_node`, `::test_hyde_and_judge_text_never_reaches_a_token_event`
+- [x] AC3 A retried answer attempt is marked (`progress` phase `retry`, `token.attempt`) — `test_agent_stream.py::test_a_retried_answer_attempt_is_marked`
+- [x] AC4 `ask` and the stream share one run: same result either way, the non-stream path emits nothing — `test_agent_stream.py::test_the_streamed_run_gives_the_same_result_as_ask`
+- [x] AC5 A request that waits for the session lock reports `queued`; one that does not, does not — `test_agent_stream.py::test_a_request_waiting_for_the_session_lock_reports_queued`
+- [x] AC6 Event order: progress, then token, then `answer`, then `done`; every node's `end` after its `start` — `test_serve_stream.py::test_event_order_progress_token_answer_done`
+- [x] AC7 `answer` has the `AskResponse` shape and lists the removed markers; the streamed text still holds them — `test_serve_stream.py::test_answer_event_carries_the_checked_answer_and_the_removed_markers`
+- [x] AC8 `need_clarification` event, then a second stream with `resume_token` and `answer` finishes the run — `test_serve_stream.py::test_need_clarification_then_resume_over_the_stream`
+- [x] AC9 `done` has timings, rounds, flags, tokens, `first_progress`, `first_token` — `test_serve_stream.py::test_done_event_has_timings_rounds_flags_and_token_usage`
+- [x] AC10 Failures before the first byte (bad JSON, bad input, unknown and hidden KB, bad resume token, not ready) are JSON errors with the status of the non-stream endpoint — `test_serve_stream.py::test_errors_before_streaming_are_json_with_the_status_of_ask_docs`, `::test_a_service_that_is_not_ready_answers_503_before_any_byte`
+- [x] AC11 A failure after the first byte is an `error` event (category and request id, no internals), then the stream ends — `test_serve_stream.py::test_a_failure_after_the_first_byte_is_an_error_event_then_close`
+- [x] AC12 Heartbeat comment lines while the run is silent — `test_serve_stream.py::test_heartbeat_comment_lines_while_nothing_else_is_sent`
+- [x] AC13 Response headers (`text/event-stream`, no-cache, `X-Accel-Buffering: no`, `X-Request-Id`) — `test_serve_stream.py::test_stream_response_headers`
+- [x] AC14 Same caller and ACL handling as `ask_docs`: the caller's groups reach retrieval — `test_serve_stream.py::test_stream_uses_the_callers_access_like_ask_docs`
+- [x] AC15 The total deadline in the middle of the stream ends with an `answer` event (chunks only, `stop_reason` deadline), not an error — `test_serve_stream.py::test_deadline_in_the_middle_of_the_stream_ends_with_an_answer_event`
+- [x] AC16 Token cap, session history and business record work as in the non-stream call — `test_serve_stream.py::test_the_token_cap_still_applies_to_a_streamed_run`, `::test_a_streamed_run_writes_the_history_and_one_business_record`, `::test_cancel_streams_ends_the_runs_of_open_streams`
+- [x] AC17 Client disconnect during the answer: no further model call, the session lock is released, spans closed — `test_serve_stream_cancel.py::test_disconnect_while_the_answer_is_written_stops_the_model`
+- [x] AC18 Disconnect before the answer: no model call at all; checkpoint stays at the last finished node — `test_serve_stream_cancel.py::test_disconnect_during_retrieval_makes_no_model_call_and_keeps_the_checkpoint`
+- [x] AC19 A cancelled request writes one business record flagged `client_cancelled` (with the node it was in), and the request span ends `cancelled` — `test_serve_stream_cancel.py::test_a_cancelled_request_is_recorded_as_client_cancelled`
+- [x] AC20 A request that waited behind the cancelled one runs once the lock is free — `test_serve_stream_cancel.py::test_a_waiting_request_runs_after_the_first_one_disconnects`
+- [x] AC21 `GET /` serves the page with CSP (`default-src 'self'`, no inline script or style), `nosniff`, no outside URL; `/ui/app.js` and `/ui/app.css` are served — `test_serve_web.py::test_root_serves_the_page_with_security_headers`, `::test_the_page_loads_nothing_from_outside_and_has_no_inline_code`
+- [x] AC22 `GET /v1/knowledge_bases` (the page's list) shows only the KBs the caller may use — `test_serve_web.py::test_the_knowledge_base_list_hides_what_the_caller_may_not_use`
+- [x] AC23 `POST /v1/feedback` writes one record line with the request id, the verdict and a capped comment; bad bodies are `invalid_request` — `test_serve_web.py::test_feedback_writes_one_record`, `::test_feedback_rejects_bad_bodies`
+- [x] AC24 The page's SSE parser handles comments, split chunks, multi-line `data:` and unknown events — `test_serve_web.py::test_sse_parser_in_node`, `::test_the_pages_own_code_in_node` (`app.js` against a fake document and a scripted server)
+- [x] AC25 Rendering uses text nodes only: `<img onerror>` and `<script>` in an answer and in a passage stay text; the code has no `innerHTML` — `test_serve_web.py::test_rendering_untrusted_text_creates_no_elements`, `::test_app_js_never_sets_html`
+- [x] AC26 Settings and the dev fake mode: `sse_heartbeat_s` validated; `--dev-fake` builds a service that streams without any network — `test_serve_stream.py::test_stream_settings`, `::test_dev_fake_service_streams_without_a_gateway`
+- [x] AC27 (by running) the page in a real browser against a running dev-fake server: streamed answer, markers, removed markers, clarification, cancel, error, XSS payloads, feedback; time to first progress and first token measured; section 「P3-04 流式和页面」 of `docs/reports/P3-report.md`
 
 ## Out of scope
 Feedback into traces and metrics (P5; here one record line); server-side persistence of the page's history;
@@ -85,7 +85,7 @@ reverse proxy configuration file (the headers are set; nginx notes in the README
 MCP (stays non-streaming: s16-9); React pages for evaluation data (later phases).
 
 ## Handoff (filled at the end)
-- Files:
-- Decisions:
-- Open issues:
-- Review rounds:
+- Files: new `src/rag/agent/events.py`, `src/rag/serve/{stream,devfake}.py`, `src/rag/serve/web/{index.html,sse.js,render.js,app.js,app.css}`, `src/rag/testing/live.py`, `scripts/stream_latency.py`, `tests/unit/test_{agent_stream,serve_stream,serve_stream_cancel,serve_web}.py`, `tests/web/ui_test.js`; changed `src/rag/agent/{nodes,runtime,session}.py` (one `astream` loop behind `ask`; `emit`; `SessionLocks.busy`), `src/rag/serve/{service,http_app,schema,cli}.py` (`_ask_docs` shared by `ask_docs` and `ask_docs_stream`, the stream route, `/v1/feedback`, `GET /` and `/ui/*`, `--dev-fake`), `src/rag/types.py` (`ErrorCategory.CLIENT_CANCELLED`), `src/rag/config/settings.py` (`sse_heartbeat_s`), `src/rag/testing/agent.py` (`SlowStreamingChatModel`), `README.md`, `.env.example`, `docs/decisions.md`, `docs/reports/P3-report.md` (section 2). No existing test changed.
+- Decisions (docs/decisions.md, 2026-10-20 P3-04): tokens come from the answer node through the stream writer, not from LangGraph's `messages` mode (the token-cap guard replaces the run's callbacks, so a guarded model emits no message chunks: verified on langgraph 1.2.15); one run implementation for `ask` and the stream; the run lives in its own task behind a queue and the closing of the response cancels it; cancelled requests are one `client_cancelled` business record line (not an error); errors before the first event are plain JSON with the status of `POST /v1/ask_docs`, later ones are `error` events (no `done`), no heartbeat before the first event; a deadline in the middle ends with an `answer` event (`stop_reason: deadline`); `answer` event = `AskResponse`; page without a framework, CSP without inline code, text nodes only; the knowledge-base list reuses `GET /v1/knowledge_bases`; feedback writes one record keyed by the rated request; `--dev-fake` on local addresses only.
+- Open issues: first text on the real gateway came after 11 to 16 s (rewrite, search, judge and the model's first token; 2 runs, no P95); nothing was run behind nginx; the browser check used the fake service and Edge only (no Firefox, no narrow screen, `queued` and mid-stream `error` only in tests); the search thread of a cancelled run cannot be stopped (it ends at its own deadline but does not advance the graph); the event queue has no bound; `queued` is only seen for an in-process lock (a file lock held by another process is not detected); feedback checks the request id's shape, not that it exists, and has no login; the dev server of this run wrote its records to the ignored `data/observe/`.
+- Review rounds: 0 (author finished; waiting for the reviewer). TDD note: each stage's tests were written first and run red (agent events: `emit` unknown; stream: 404 on the route; web: missing files). The feedback endpoint and the KB-list test were written together with or after the code (the service code was committed in the stream commit, its tests came with the page commit), so those two tests never saw red. 27 mutation checks: 23 caught at once, 2 equivalent, 2 caught after adding a test.

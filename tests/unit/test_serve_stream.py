@@ -305,15 +305,19 @@ def test_errors_before_streaming_are_json_with_the_status_of_ask_docs(
 
 
 def test_a_service_that_is_not_ready_answers_503_before_any_byte() -> None:
-    builder = FakePipelineBuilder(
-        {"hf_docs": ScriptedSearchBackend("hf_docs")}, prepare_error=RuntimeError("no models")
-    )
-    service, _ = _service(builder=builder, load=False)
-    with TestClient(build_http_app(service)) as client:
-        service.wait_ready(5)
-        r = client.post("/v1/ask_docs/stream", json={**BODY, "deadline_ms": 300})
+    # The models are still loading (the gate is closed): the stream waits for them within its
+    # deadline, and even with a heartbeat shorter than that wait nothing is sent before the 503.
+    gate = threading.Event()
+    builder = FakePipelineBuilder({"hf_docs": ScriptedSearchBackend("hf_docs")}, prepare_gate=gate)
+    service, _ = _service(builder=builder, load=False, sse_heartbeat_s=0.05)
+    try:
+        with TestClient(build_http_app(service)) as client:
+            r = client.post("/v1/ask_docs/stream", json={**BODY, "deadline_ms": 400})
+    finally:
+        gate.set()
     assert r.status_code == 503 and r.json()["error"] == "not_ready"
     assert "text/event-stream" not in r.headers["content-type"]
+    assert r.text.lstrip().startswith("{")
 
 
 # ---- AC11 -----------------------------------------------------------------------------------
@@ -524,3 +528,34 @@ def test_dev_fake_service_streams_without_a_gateway(capsys: pytest.CaptureFixtur
     # Fake data is only served on this machine.
     assert main(["http", "--dev-fake", "--host", "0.0.0.0"]) == 2
     assert "--host 127.0.0.1" in capsys.readouterr().err
+
+
+def test_cancel_streams_ends_the_runs_of_open_streams(tmp_path: Path) -> None:
+    """At shutdown the runs of streams that are still open are cancelled and cleaned up."""
+    import asyncio
+
+    from rag.security.access import Credentials
+
+    path = tmp_path / "records.jsonl"
+    model = SlowStreamingChatModel(default_response="word " * 400, chunk_chars=4, delay_s=0.05)
+    with memory_observability(business_record_path=str(path)):
+        service, _ = _service(model=model, business_record_path=str(path))
+
+        async def scenario() -> None:
+            events = service.ask_docs_stream(
+                Credentials(transport="http"),
+                kb="hf_docs",
+                question="How do I push a model?",
+                request_id="req-shutdown",
+            )
+            async for item in events:
+                if getattr(item, "name", "") == "token":
+                    break
+            assert len(service._streams) == 1
+            await service.cancel_streams()
+            assert not service._streams and model.closed.is_set()
+            await events.aclose()
+
+        asyncio.run(scenario())
+    (record,) = [json.loads(line) for line in path.read_text("utf-8").splitlines()]
+    assert record["request_id"] == "req-shutdown" and record["flags"] == ["client_cancelled"]

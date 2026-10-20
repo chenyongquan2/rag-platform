@@ -119,7 +119,7 @@ def test_a_second_round_reports_its_round_and_the_chunks_found_so_far() -> None:
         by_question={
             "alpha setting": scored_result(KB, [0.9], pages=[1]),
             "beta setting": scored_result(KB, [0.1], pages=[3]),
-            "beta option": scored_result(KB, [0.8, 0.5], pages=[5, 1]),
+            "beta option": scored_result(KB, [0.8], pages=[5]),
         },
     )
     helper = FakeChatModel(
@@ -142,7 +142,7 @@ def test_a_second_round_reports_its_round_and_the_chunks_found_so_far() -> None:
         hooks=AgentHooks(decide_route=_two_hop),
     )
     ends = [p for p in _progress(events) if p["node"] == "retrieve" and p["phase"] == "end"]
-    assert [(p["round"], p["chunks"], p["chunks_total"]) for p in ends] == [(1, 1, 1), (2, 2, 2)]
+    assert [(p["round"], p["chunks"], p["chunks_total"]) for p in ends] == [(1, 1, 1), (2, 1, 2)]
     verdicts = [p["verdict"] for p in _progress(events) if p["node"] == "judge" and "verdict" in p]
     assert verdicts == ["partly_enough", "enough"]
 
