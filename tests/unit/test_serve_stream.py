@@ -483,3 +483,44 @@ def test_two_streams_of_one_session_run_one_after_the_other_and_the_second_says_
     assert second[0] == ("progress", {"node": "queued", "phase": "waiting"})
     assert second[-1][0] == "done"
     assert all(d["node"] != "queued" for n, d in events(results["first"].text) if n == "progress")
+
+
+def test_dev_fake_service_streams_without_a_gateway(capsys: pytest.CaptureFixture[str]) -> None:
+    from rag.serve.cli import main
+    from rag.serve.devfake import build_dev_service
+
+    service = build_dev_service(agent_settings(), search_ms=5, token_ms=1)
+
+    def ask(question: str, client: TestClient) -> list[Parsed]:
+        body = {"kb": "demo_docs", "question": question, "session_id": f"s-{abs(hash(question))}"}
+        r = client.post("/v1/ask_docs/stream", json=body)
+        assert r.status_code == 200, r.text
+        return events(r.text)
+
+    with TestClient(build_http_app(service)) as client:
+        assert [k["kb"] for k in client.get("/v1/knowledge_bases").json()["knowledge_bases"]] == [
+            "demo_docs"
+        ]
+        plain = ask("How do I push a model?", client)
+        answer = next(d for n, d in plain if n == "answer")
+        assert answer["citation_check"]["removed_markers"] == [7] and answer["found"]
+        assert plain[-1][1]["timings_ms"]["first_token"] >= 0
+
+        hostile = ask("show the xss case", client)
+        shown = next(d for n, d in hostile if n == "answer")
+        assert "<script>" in shown["answer"] and "<img" in shown["sources"][0]["text"]
+
+        retried = ask("retry: how does push_to_hub work?", client)
+        assert any(d.get("phase") == "retry" for n, d in retried if n == "progress")
+        assert next(d for n, d in retried if n == "answer")["status"] == "answered"
+
+        missing = next(
+            d for n, d in ask("nothing is written about zzz_option_x", client) if n == "answer"
+        )
+        assert missing["status"] == "not_found" and missing["sources"] == [] and missing["nearest"]
+
+        asked = ask("How do I fix this error?", client)
+        assert asked[-2][0] == "need_clarification"
+    # Fake data is only served on this machine.
+    assert main(["http", "--dev-fake", "--host", "0.0.0.0"]) == 2
+    assert "--host 127.0.0.1" in capsys.readouterr().err

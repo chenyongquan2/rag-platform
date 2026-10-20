@@ -2,6 +2,8 @@
 
     uv run python -m rag.serve stdio                       # MCP over stdio, one process per client
     uv run python -m rag.serve http [--host H] [--port P]  # HTTP API + MCP streamable-http at /mcp
+                                                           # and the Q&A page at /
+    uv run python -m rag.serve http --dev-fake             # the same over fake data (no gateway)
 
 Both set up observability (service name `rag-serve`), read the KB configs and start loading the
 reranker in a background thread: over stdio the MCP handshake and `list_knowledge_bases` answer
@@ -12,11 +14,13 @@ the load ends. Logs go to stderr and the log file, never to stdout (stdout is th
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Callable, Sequence
 from typing import Any
 
 from rag.config import ServiceSettings
 from rag.observe import init_observability, shutdown_observability
+from rag.serve.devfake import LOCAL_HOSTS, build_dev_service
 from rag.serve.http_app import build_http_app
 from rag.serve.mcp_server import build_mcp_server
 from rag.serve.service import SearchService
@@ -31,6 +35,21 @@ def build_parser(settings: ServiceSettings) -> argparse.ArgumentParser:
     p_http = sub.add_parser("http", help="HTTP API and MCP streamable-http at /mcp")
     p_http.add_argument("--host", default=settings.service_host, help="default: SERVICE_HOST")
     p_http.add_argument("--port", type=int, default=settings.service_port, help="SERVICE_PORT")
+    p_http.add_argument(
+        "--dev-fake",
+        action="store_true",
+        help="serve the fake knowledge base demo_docs (fake search, fake model, memory stores); "
+        "only on a local address",
+    )
+    p_http.add_argument(
+        "--fake-search-ms", type=int, default=400, help="with --dev-fake: time of one search"
+    )
+    p_http.add_argument(
+        "--fake-token-ms",
+        type=int,
+        default=30,
+        help="with --dev-fake: pause between two pieces of the answer",
+    )
     return parser
 
 
@@ -55,6 +74,15 @@ def main(
 ) -> int:
     settings = settings if settings is not None else ServiceSettings()
     args = build_parser(settings).parse_args(argv)
+    if args.command == "http" and args.dev_fake:
+        if args.host not in LOCAL_HOSTS:
+            hosts = " or ".join(LOCAL_HOSTS)
+            print(f"--dev-fake serves fake data: use --host {hosts}", file=sys.stderr)
+            return 2
+
+        def service_factory(s: ServiceSettings) -> SearchService:
+            return build_dev_service(s, search_ms=args.fake_search_ms, token_ms=args.fake_token_ms)
+
     init_observability(settings, SERVICE_NAME)
     service = service_factory(settings)
     try:

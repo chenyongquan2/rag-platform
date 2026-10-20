@@ -2,6 +2,9 @@
 
 One Starlette app, so one process holds one reranker for every way in:
 
+    GET  /                     the Q&A page (one HTML file, a script for the SSE parser, one for
+                               drawing, one for the page, one style sheet: `web/`)
+    GET  /ui/<file>            those files, nothing else
     GET  /healthz              200 {"status": "ok"} while the process runs
     GET  /readyz               200 when the reranker and the chains are loaded, else 503
     POST /v1/search_docs       {kb, query, filters?, top_k?, deadline_ms?} -> SearchResponse
@@ -29,6 +32,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -36,7 +40,7 @@ from mcp.server import MCPServer
 from pydantic import BaseModel, ConfigDict, ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import BaseRoute, Mount, Route
 
 from rag.observe import new_request_id
@@ -50,6 +54,26 @@ from rag.types import ErrorCategory
 logger = logging.getLogger(__name__)
 
 REQUEST_ID_HEADER = "X-Request-Id"
+WEB_DIR = Path(__file__).parent / "web"
+_UI_FILES = {
+    "sse.js": "text/javascript",
+    "render.js": "text/javascript",
+    "app.js": "text/javascript",
+    "app.css": "text/css",
+}
+# The page loads only its own files and runs no inline code, so a script that got into the
+# page through an answer or a document could not run and could not send anything out.
+_PAGE_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; "
+        "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; "
+        "frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+    "Cache-Control": "no-cache",
+}
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 RETRY_AFTER_S = 10
 TRANSPORT = "http"
@@ -155,6 +179,20 @@ def build_http_app(
     """The app over `service`; its lifespan starts the service's load (and the MCP session
     manager when `mcp` is given, mounted at `/mcp`). `host` is where it listens: on 127.0.0.1
     the MCP endpoint checks Host and Origin headers (DNS rebinding protection of the SDK)."""
+
+    def web_file(name: str, media_type: str) -> Response:
+        return Response(
+            (WEB_DIR / name).read_text("utf-8"), media_type=media_type, headers=_PAGE_HEADERS
+        )
+
+    async def page(request: Request) -> Response:
+        return web_file("index.html", "text/html")
+
+    async def ui_file(request: Request) -> Response:
+        name = request.path_params["name"]
+        if name not in _UI_FILES:
+            return Response("Not Found", status_code=404, media_type="text/plain")
+        return web_file(name, _UI_FILES[name])
 
     async def healthz(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
@@ -277,6 +315,8 @@ def build_http_app(
         return await _call(service.list_knowledge_bases, _request_id(request))
 
     routes: list[BaseRoute] = [
+        Route("/", page, methods=["GET"]),
+        Route("/ui/{name}", ui_file, methods=["GET"]),
         Route("/healthz", healthz, methods=["GET"]),
         Route("/readyz", readyz, methods=["GET"]),
         Route("/v1/search_docs", search_docs, methods=["POST"]),

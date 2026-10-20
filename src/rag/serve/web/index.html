@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Docs Q&amp;A</title>
+  <link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+  <main>
+    <h1>Docs Q&amp;A</h1>
+    <p class="lede">Ask a question about a documentation set. The answer appears as it is written, and each
+      <span class="cite sample">[1]</span> opens the passage it rests on.</p>
+
+    <section class="ask" aria-label="Question">
+      <label for="kb">Knowledge base</label>
+      <select id="kb"></select>
+      <label for="question">Question</label>
+      <textarea id="question" rows="3" maxlength="2000" placeholder="For example: How do I push a model to the Hub?"></textarea>
+      <div class="buttons">
+        <button id="ask" type="button" class="primary">Ask</button>
+        <button id="cancel" type="button" hidden>Cancel</button>
+        <button id="new-chat" type="button" class="quiet">New conversation</button>
+        <span class="hint">Ctrl+Enter asks</span>
+      </div>
+    </section>
+
+    <p id="status" class="status" role="status" aria-live="polite">Ready.</p>
+
+    <section id="live" class="live" aria-label="Answer as it is written" hidden></section>
+    <section id="answer" class="answer" aria-label="Answer" hidden></section>
+    <section id="removed" class="removed" hidden></section>
+    <section id="notice" class="notice" role="note" hidden></section>
+
+    <section id="clarify" class="clarify" hidden>
+      <p><strong>One more detail is needed.</strong></p>
+      <p id="clarify-question"></p>
+      <textarea id="clarify-reply" rows="2" maxlength="1000" aria-label="Your reply"></textarea>
+      <div class="buttons"><button id="clarify-send" type="button" class="primary">Send reply</button></div>
+    </section>
+
+    <section id="error" class="error" role="alert" hidden></section>
+
+    <section id="sources" class="sources" aria-label="Sources" hidden></section>
+    <section id="passage" class="passage" aria-label="Source passage" hidden></section>
+
+    <section id="feedback" class="feedback" hidden>
+      <span>Was this answer useful?</span>
+      <button id="useful" type="button">Useful</button>
+      <button id="not-useful" type="button">Not useful</button>
+      <span id="feedback-status" class="hint" role="status"></span>
+    </section>
+  </main>
+  <script src="/ui/sse.js"></script>
+  <script src="/ui/render.js"></script>
+  <script src="/ui/app.js"></script>
+</body>
+</html>
