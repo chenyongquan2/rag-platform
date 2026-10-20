@@ -34,6 +34,7 @@ from rag.ingest.meta import title_parts
 from rag.retrieve.deadline import Deadline
 from rag.retrieve.dedupe import TextDedupe
 from rag.retrieve.hybrid import ROUTES, EsHybridRetriever
+from rag.retrieve.page_groups import PageKeyDedupe
 from rag.retrieve.query import HybridQuery
 from rag.retrieve.rerank import RERANK_SCORE
 from rag.types import Chunk, ContextPiece, RetrievalResult
@@ -261,6 +262,10 @@ def make_hybrid_search(
         retriever,
         acl_groups=acl_groups,
         deadline_ms=settings.search_deadline_ms,
+        postprocessors=[
+            TextDedupe(),
+            *([PageKeyDedupe()] if cfg.retrieval.dedupe_by_page_key else []),
+        ],
         generation=generation,
     )
 

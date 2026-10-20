@@ -1,0 +1,73 @@
+# MetaTrader 5 API manual (CHM, Chinese and English). Design s5-1, s5-2, s8-4; spec P4-01.
+#
+# PRIVATE knowledge base: the manual is a vendor document, used only on this machine. It is
+# declared private by `access.callers` (the local development caller only; `load_kb_config`
+# refuses a knowledge base outside kb/public/ that does not name its callers). This file is
+# configuration only (paths, rule names, limits) and is committed; the unpacked pages, the
+# reports, the docstore and the embedding cache stay in git-ignored folders (data/...).
+#
+# Unpack the two CHM files once (needs 7-Zip or chmlib):
+#   uv run python -m rag.data.chm unpack --chm <MetaTrader5SDK_Chinese.chm> --out data/raw/mt5/zh
+#   uv run python -m rag.data.chm unpack --chm <MetaTrader5SDK_English.chm> --out data/raw/mt5/en
+# Then: uv run python -m rag.ingest.chm_report --kb mt5   (quality report, no model calls)
+#       uv run python -m rag.ingest.job --kb mt5 --all    (writes kb_mt5_v1, alias kb_mt5)
+kb: mt5
+description: >-
+  MetaTrader 5 API manual in Chinese and English (Server, Manager, Admin, Gateway, Report and
+  Web APIs: interfaces, methods, structures, enumerations, configuration and code examples).
+  Every page exists as a zh and an en version that share a page_key.
+source:
+  connector: chm_dir
+  volumes:                      # one folder per language, as `unpack` writes them
+    - {language: zh, path: data/raw/mt5/zh}
+    - {language: en, path: data/raw/mt5/en}
+  limit: null                   # first N pages of each volume; --limit N is for a quick run on a throw-away index
+language: auto                  # the language of a page is its volume's (the reader sets it)
+pipelines:
+  ".htm": &chm
+    reader: chm
+    clean:                      # runs before the IngestionPipeline; remove a line to turn a rule off
+      # No md_markup here: the reader works on the parsed HTML, so a decoded `&lt;b&gt;` in the
+      # text is text; a tag-removing rule would cut it out (design s6-1). No detect_language
+      # either: the volume says which language a page is. Each rule that cuts text has a removal
+      # guard (design s6-3): the run stops when it removes more than the shares given here.
+      - whitespace: {max_page_share: 0.3, max_corpus_share: 0.05}
+      - chm_title_echo: {max_page_share: 0.5, max_corpus_share: 0.05}
+      - skip_empty: {min_chars: 20, max_corpus_share: 0.02}
+      # One copy of a text per language and title path: a page whose text equals another's under
+      # a different title (an Admin API page and its Manager API twin) is kept, so a question
+      # about either API can find its own page (the search-time text dedupe still drops equal
+      # bodies from one result list, and keeps the one that ranks first).
+      - dedupe: {group_by: [language, title_path], max_corpus_share: 0.02}
+      - suspicious_instruction
+    steps:
+      - markdown_split
+      - token_split: {max_tokens: 400}   # reranker tokens for text + title_path + source_rel
+      - merge_tiny: {min_tokens: 50}
+      - suspicious_instruction           # per-chunk flag
+      - assign_chunk_ids
+  ".html": *chm
+metadata:
+  embed: [title_path]               # whitelist: only these keys go into the embedding text
+  llm: [title_path, source_rel]     # whitelist: only these keys go into the prompt
+es:
+  analyzer: standard   # P4-02 compares cjk, IK, smartcn and icu; change it here and rebuild (P2-01)
+retrieval:
+  top_k_per_route: 20
+  num_candidates: 100
+  title_boost: 1.0
+  rrf_k: 60
+  rrf_weights: {bm25: 1.0, vector: 1.0}
+  rerank_n: 30         # design s5-1 example; not tuned for this manual yet (P4-02)
+  final_k: 10
+  threshold: 0.3       # the HF value (P0-13); recheck with the P4-02 question set
+  expand: none
+  expand_window: 1
+  expand_max_tokens: 4000
+  dedupe_by_page_key: true   # the zh and en version of a page are one result group (design s8-4)
+access:
+  callers: ["local"]   # private: only the local development caller (ServiceSettings.service_caller)
+answer:
+  context_tokens: 4000
+  language: auto       # answer in the question's language (s8-4)
+  parse_retries: 1

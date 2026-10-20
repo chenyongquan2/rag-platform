@@ -35,6 +35,8 @@ KEYWORD_FIELDS = (
     "pipeline_version",
     "ingest_run_id",
     "images",  # s5-4: image paths of the unit, returned with the chunk
+    "page_key",  # P4-01: the same page in two languages shares it (s8-4)
+    "links_to",  # P4-01: page keys of the pages this page links to
 )
 INTEGER_FIELDS = ("chunk_index",)
 BOOLEAN_FIELDS = ("has_generated_text", "suspicious_instruction")

@@ -75,6 +75,7 @@ SOURCE_FIELDS = (
     "source_version",
     "doc_type",
     "language",
+    "page_key",  # P4-01: the zh and en version of a page share it (PageKeyDedupe)
     "chunk_index",
     "parent_id",
     "images",

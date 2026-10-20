@@ -12,6 +12,7 @@ from rag.retrieve.dedupe import TextDedupe, dedupe_key
 from rag.retrieve.filters import CALLER_FILTER_KEYS, FilterError, build_es_filter
 from rag.retrieve.fusion import FusedHit, rrf_fuse
 from rag.retrieve.hybrid import BM25, VECTOR, EsHybridRetriever, RetrievalError
+from rag.retrieve.page_groups import PageKeyDedupe, question_language
 from rag.retrieve.pipeline import SearchPipeline, make_search_pipeline, search_config_version
 from rag.retrieve.query import HybridQuery, RetrievalTrace
 from rag.retrieve.rerank import (
@@ -45,6 +46,7 @@ __all__ = [
     "HybridQuery",
     "HybridSearch",
     "IndexEmbedModelError",
+    "PageKeyDedupe",
     "RerankRunner",
     "RerankScaleError",
     "RerankThreshold",
@@ -59,6 +61,7 @@ __all__ = [
     "make_hybrid_search",
     "make_search_pipeline",
     "node_to_chunk",
+    "question_language",
     "rrf_fuse",
     "search_config_version",
 ]
