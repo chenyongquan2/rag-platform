@@ -34,6 +34,7 @@ __all__ = [
     "FrontMatter",
     "HfFirstChar",
     "MdMarkup",
+    "RemovalGuardError",
     "RuleStats",
     "SkipEmpty",
     "SuspiciousInstruction",
@@ -56,14 +57,45 @@ class RuleStats(BaseModel):
     """doc_id of a dropped copy -> doc_id of the copy that was kept (`dedupe`)."""
 
 
+class RemovalGuardError(ValueError):
+    """A rule removed more text than its configured limit allows (design s6-3): the run stops
+    before anything is written. The message names the rule, the page and the shares, never text."""
+
+    def __init__(
+        self, rule: str, scope: str, share: float, limit: float, doc_id: str | None = None
+    ) -> None:
+        self.rule, self.scope, self.share, self.limit, self.doc_id = (
+            rule,
+            scope,
+            share,
+            limit,
+            doc_id,
+        )
+        where = f"page {doc_id}" if doc_id else "the corpus"
+        super().__init__(
+            f"removal guard: rule {rule!r} removed {share:.1%} of the characters of {where} "
+            f"({scope} limit {limit:.1%}); look at the rule or raise the limit in the YAML"
+        )
+
+
 class CleanRule(TransformComponent):
-    """Base class: `enabled: false` turns a rule off without removing it from the YAML."""
+    """Base class: `enabled: false` turns a rule off without removing it from the YAML.
+
+    Removal guard (design s6-3), off by default, set per rule in the YAML: `max_page_share` stops
+    the run when the rule removes a larger share of one page's characters (pages shorter than
+    `guard_min_chars` are not judged: a page title is a big share of a tiny page);
+    `max_corpus_share` when it removes a larger share of all pages it saw. Pages the rule drops
+    count as removed in the corpus share. Raises `RemovalGuardError`.
+    """
 
     name: ClassVar[str] = ""
     context_params: ClassVar[dict[str, str]] = {}
     """Constructor parameter -> processor context key filled in when the YAML does not set it."""
 
     enabled: bool = True
+    max_page_share: float | None = Field(default=None, gt=0, le=1)
+    max_corpus_share: float | None = Field(default=None, gt=0, le=1)
+    guard_min_chars: int = Field(default=100, ge=0)
     _stats: RuleStats = PrivateAttr(default_factory=RuleStats)
 
     @classmethod
@@ -78,7 +110,40 @@ class CleanRule(TransformComponent):
         if not self.enabled:
             return list(nodes)
         self._stats.units_seen += len(nodes)
-        return self.apply(list(nodes))
+        guarded = self.max_page_share is not None or self.max_corpus_share is not None
+        before = (
+            {n.node_id: len(n.get_content(MetadataMode.NONE)) for n in nodes} if guarded else {}
+        )
+        out = self.apply(list(nodes))
+        if guarded:
+            self._check_guard(before, out)
+        return out
+
+    def _check_guard(self, before: dict[str, int], out: Sequence[BaseNode]) -> None:
+        after = {n.node_id: len(n.get_content(MetadataMode.NONE)) for n in out}
+        removed_total = 0
+        for node_id, size in before.items():
+            kept = after.get(node_id)
+            removed = size if kept is None else max(0, size - kept)
+            removed_total += removed
+            if (
+                kept is not None
+                and self.max_page_share is not None
+                and size >= self.guard_min_chars
+                and removed / size > self.max_page_share
+            ):
+                raise RemovalGuardError(
+                    self.class_name(), "page", removed / size, self.max_page_share, node_id
+                )
+        total = sum(before.values())
+        if (
+            self.max_corpus_share is not None
+            and total
+            and removed_total / total > self.max_corpus_share
+        ):
+            raise RemovalGuardError(
+                self.class_name(), "corpus", removed_total / total, self.max_corpus_share
+            )
 
     def apply(self, nodes: list[BaseNode]) -> list[BaseNode]:
         raise NotImplementedError
@@ -486,15 +551,21 @@ class Dedupe(CleanRule):
     The copy with the smallest doc_id is kept, so the choice does not depend on input order.
     Where each dropped copy went is recorded in `stats.duplicate_of` (and the quality report),
     not in the kept Document: its hash must not change when another page appears (s5-4).
+
+    `group_by`: metadata keys that must also be equal for two units to be copies. `[language]`
+    keeps the same text once per language: a code-only page is identical in the Chinese and the
+    English manual, and dropping one of them would hide the page from a search in its language.
     """
 
     name: ClassVar[str] = "dedupe"
+    group_by: list[str] = Field(default_factory=list)
 
     def apply(self, nodes: list[BaseNode]) -> list[BaseNode]:
-        groups: dict[str, list[BaseNode]] = defaultdict(list)
+        groups: dict[tuple[str, ...], list[BaseNode]] = defaultdict(list)
         for node in nodes:
             text = node.get_content(MetadataMode.NONE)
-            groups[hashlib.sha256(text.encode("utf-8")).hexdigest()].append(node)
+            same = tuple(str(node.metadata.get(key)) for key in self.group_by)
+            groups[(*same, hashlib.sha256(text.encode("utf-8")).hexdigest())].append(node)
         kept_id: dict[str, str] = {}
         for group in groups.values():
             first = min(n.node_id for n in group)

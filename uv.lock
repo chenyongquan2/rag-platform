@@ -2220,6 +2220,7 @@ name = "rag-platform"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "beautifulsoup4", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "docling", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "elasticsearch", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "filelock", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -2258,6 +2259,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "docling", specifier = ">=2.50" },
     { name = "elasticsearch", specifier = ">=9,<10" },
     { name = "filelock", specifier = ">=3.12" },

@@ -31,6 +31,8 @@ DESIGN_KEYWORD_FIELDS = {
     "pipeline_version",
     "ingest_run_id",
     "images",  # s5-4: image paths of the unit, returned with the chunk (spec P0-06)
+    "page_key",  # spec P4-01: links the zh and en version of a CHM page (s8-4)
+    "links_to",  # spec P4-01: page keys a page links to
 }
 
 

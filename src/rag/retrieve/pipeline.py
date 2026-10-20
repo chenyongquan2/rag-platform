@@ -36,6 +36,7 @@ from rag.retrieve.context import ContextExpander, ContextMode, ContextReader, To
 from rag.retrieve.deadline import Deadline
 from rag.retrieve.dedupe import TextDedupe
 from rag.retrieve.hybrid import ROUTES, EsHybridRetriever
+from rag.retrieve.page_groups import PageKeyDedupe
 from rag.retrieve.rerank import BatchedTimeoutRerank, RerankRunner, get_rerank_runner
 from rag.retrieve.search import HybridSearch, acl_group_tuple, hybrid_parts
 from rag.retrieve.threshold import RerankThreshold
@@ -49,10 +50,15 @@ def search_config_version(
 ) -> str:
     """First 16 hex digits of the sha256 of what decides a search result besides the data: the
     whole KB config, the embedding model and the reranker (model and input length)."""
+    kb_config = cfg.model_dump(mode="json", exclude={"description", "agent"})
+    if not cfg.retrieval.dedupe_by_page_key:
+        # A setting that is off changes no result: the version of a knowledge base that never
+        # heard of it (the Hugging Face one) stays what it was before the setting existed.
+        kb_config["retrieval"].pop("dedupe_by_page_key")
     payload = {
         # The description only tells callers what the KB holds (spec P0-09); `agent` (rounds of
         # the ask_docs graph, spec P3-01) is not part of a search. Neither changes a result.
-        "kb_config": cfg.model_dump(mode="json", exclude={"description", "agent"}),
+        "kb_config": kb_config,
         "embed_model": embed_model_id,
         "reranker": {
             "model": settings.reranker_model,
@@ -91,6 +97,7 @@ class SearchPipeline(HybridSearch):
         expander: ContextExpander | None = None,
         reader: ContextReader | None = None,
         dedupe: TextDedupe | None = None,
+        page_groups: PageKeyDedupe | None = None,
         generation: Callable[[], int] | None = None,
         config_version: str = "",
         context_window: int = 1,
@@ -101,7 +108,12 @@ class SearchPipeline(HybridSearch):
             retriever,
             acl_groups=acl_groups,
             deadline_ms=deadline_ms,
-            postprocessors=[dedupe or TextDedupe(), reranker, threshold],
+            postprocessors=[
+                dedupe or TextDedupe(),
+                *([page_groups] if page_groups is not None else []),
+                reranker,
+                threshold,
+            ],
             expander=expander,
             generation=generation,
             config_version=config_version,
@@ -192,6 +204,7 @@ def make_search_pipeline(
             include_title=retrieval.rerank_with_title,
         ),
         threshold=RerankThreshold(threshold=retrieval.threshold),
+        page_groups=PageKeyDedupe() if retrieval.dedupe_by_page_key else None,
         expander=expander,
         reader=reader,
         acl_groups=acl_groups,

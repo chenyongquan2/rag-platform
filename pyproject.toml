@@ -43,6 +43,8 @@ dependencies = [
     "openinference-instrumentation-langchain>=0.1.50",
     # Data files (Hugging Face datasets are parquet).
     "pyarrow>=18",
+    # HTML pages of CHM manuals (rag.ingest.chm_html; already installed through docling).
+    "beautifulsoup4>=4.12",
     # HTTP client of the embedding gateway client (already installed through openai/langchain).
     "httpx>=0.27",
 ]

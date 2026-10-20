@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from pathlib import PureWindowsPath
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 ConnectorMode = Literal["snapshot", "changes"]
 """`snapshot`: every document on each run; `changes`: only what changed since last run (s7-4)."""
@@ -54,6 +54,9 @@ class SourceDocument(BaseModel):
     `content` is the raw bytes; the reader picked by `ext` turns it into LlamaIndex Documents.
     `source_version` identifies the exact upstream version (file hash or commit) for audits; it is
     added to chunks at the end of processing, never to Document metadata (s5-4).
+    `extra` holds what the connector knows about the document and the bytes do not say (for a CHM
+    page: language, page key, title path from the contents, charset hint); the reader decides
+    which of it becomes metadata. Empty for connectors that need nothing of the kind.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -65,3 +68,4 @@ class SourceDocument(BaseModel):
     ext: str
     content: bytes
     source_version: str
+    extra: dict[str, Any] = Field(default_factory=dict)

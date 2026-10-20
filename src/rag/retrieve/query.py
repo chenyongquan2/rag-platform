@@ -35,6 +35,8 @@ class RetrievalTrace:
     candidates_after_dedupe: int | None = None
     duplicates: dict[str, str] = field(default_factory=dict)
     """Removed chunk id -> the kept chunk id with the same body (TextDedupe)."""
+    page_key_duplicates: dict[str, str] = field(default_factory=dict)
+    """Removed chunk id -> its page key: the other language version of a page (PageKeyDedupe)."""
     rerank_candidates: int | None = None
     """Candidates sent to the reranker (the first `rerank_n` after dedupe)."""
     rerank: list[RouteHit] = field(default_factory=list)

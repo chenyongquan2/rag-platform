@@ -42,14 +42,26 @@ def pipeline_version(
     payload = {
         "code": INGEST_CODE_VERSION,
         "reader": reader_name_for(ext, pipe),
-        "clean": [s.model_dump() for s in pipe.clean],
-        "steps": [s.model_dump() for s in pipe.steps],
+        "clean": [_hashed(s) for s in pipe.clean],
+        "steps": [_hashed(s) for s in pipe.steps],
         "metadata": cfg.metadata.model_dump(),
         "language": cfg.language,
         "tokenizer": tokenizer_model or ServiceSettings().reranker_model,
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
     return f"v{INGEST_CODE_VERSION}-{digest[:10]}"
+
+
+GUARD_PARAMS = ("max_page_share", "max_corpus_share", "guard_min_chars")
+"""Cleaning-rule parameters that decide whether a run stops (design s6-3), not what it writes."""
+
+
+def _hashed(step: StepConfig) -> dict[str, Any]:
+    """A step as it goes into the pipeline version: the removal-guard limits are left out, so
+    tuning a limit does not make every page look changed."""
+    dumped = step.model_dump()
+    dumped["params"] = {k: v for k, v in dumped["params"].items() if k not in GUARD_PARAMS}
+    return dumped
 
 
 def _pipeline(cfg: KnowledgeBaseConfig, ext: str) -> PipelineConfig:
@@ -195,6 +207,16 @@ class KbProcessor:
                 nodes = list(transform(nodes))
             out.extend(nodes)
         return out
+
+    def reader_stats(self) -> dict[str, dict[str, Any]]:
+        """`pipeline_version -> counts` of every reader that keeps counts (`stats.to_dict()`, as
+        the CHM reader does: encodings, fallbacks, decode errors, read-time noise). No page text."""
+        found: dict[str, dict[str, Any]] = {}
+        for version, group in self._groups.items():
+            stats = getattr(group.reader, "stats", None)
+            if stats is not None and hasattr(stats, "to_dict"):
+                found[version] = stats.to_dict()
+        return found
 
     def rule_stats(self) -> list[tuple[str, RuleStats]]:
         """(rule name, stats) of every cleaning rule; `chunk_rule_stats` has the chunk steps."""

@@ -239,6 +239,11 @@ class IngestReport:
     """Unchanged pages processed again because a failed run had written them (dirty list)."""
     docstore_reset: str | None = None
     """Why the saved docstore was not used, if it was not."""
+    read_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Counts of readers that keep them, by pipeline version (the CHM reader: encodings,
+    fallbacks, decode errors, noise removed while reading; no page text)."""
+    clean_stats: dict[str, dict[str, int]] = field(default_factory=dict)
+    """Per cleaning rule: units seen, units hit, characters removed (design s6-4)."""
     report_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -275,6 +280,8 @@ class IngestReport:
             "reprocessed": self.reprocessed,
             "docstore_reset": self.docstore_reset,
             "docstore": self.docstore,
+            "read_stats": self.read_stats,
+            "clean_stats": self.clean_stats,
         }
 
     def summary_lines(self) -> list[str]:
@@ -634,12 +641,25 @@ class IngestJob:
             swept=plan.orphans,
             reprocessed=plan.reprocessed,
             docstore_reset=plan.docstore_reset,
+            read_stats=self.processor.reader_stats(),
+            clean_stats=_clean_stats(self.processor),
         )
         path = Path(self.settings.ingest_report_dir) / self.cfg.kb / f"ingest-{self.run_id}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(report.to_dict(), indent=2, ensure_ascii=False), "utf-8")
         report.report_path = path.as_posix()
         return report
+
+
+def _clean_stats(processor: KbProcessor) -> dict[str, dict[str, int]]:
+    """`rule name -> {units_seen, units_hit, chars_removed}`, rules of equal name added up."""
+    out: dict[str, dict[str, int]] = {}
+    for name, stats in processor.rule_stats():
+        total = out.setdefault(name, {"units_seen": 0, "units_hit": 0, "chars_removed": 0})
+        total["units_seen"] += stats.units_seen
+        total["units_hit"] += stats.units_hit
+        total["chars_removed"] += stats.chars_removed
+    return out
 
 
 # ---- command line ---------------------------------------------------------------------------
