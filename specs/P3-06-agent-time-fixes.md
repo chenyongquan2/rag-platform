@@ -1,6 +1,6 @@
 # P3-06 Time and evidence fixes found by the P3-05 evaluation
 
-Status: in progress
+Status: review
 Phase: P3
 Depends on: P3-05 (findings), P3-03 (judge, rounds), P3-02 (rewrite), P0-07 / P0-08 (retrieval chain)
 Design sections: s13-4, s13-3, s10-1, s10-2, s16-8, s1-2 (15 s P95 target)
@@ -63,17 +63,20 @@ dropping of searches by time in 1 gives the same bound on round two).
 
 ## Acceptance criteria
 Unit tests in `tests/unit/test_agent_time_fixes.py` unless named.
-- [ ] AC1 `plan_next` table: enough, max rounds, no new query, deadline with the fixed and with the adaptive minimum, token cap — `test_plan_next_table`
-- [ ] AC2 Round two without the minimum search time is not searched, stops `deadline`, no judge call, still answers from round one — `test_round_two_without_search_time_stops_with_deadline`
-- [ ] AC3 Searches that do not fit are dropped, one phrasing per sub-question first — `test_searches_that_do_not_fit_are_dropped_round_robin`
-- [ ] AC4 A round-two search that comes back `rerank_timeout` with no scores is no evidence: round `not_found`, no answer-model call for a no-answer question — `test_unscored_round_two_is_not_found_and_not_answered`
-- [ ] AC5 Partial rerank keeps scored chunks at or above the threshold only; the judge does not count unscored chunks — `test_partial_rerank_keeps_scored_chunks_only`, `test_judge_does_not_count_unscored_chunks` (test_agent_judge.py)
-- [ ] AC6 `RetrievalError` in round two: answers with `coverage_unconfirmed`, `degraded`, `retrieval_timeout` category; in round one it still raises — `test_retrieval_error_in_round_two_still_answers`, `test_retrieval_error_in_round_one_raises`
-- [ ] AC7 The round minimum follows the previous round — `test_round_minimum_follows_previous_round`
-- [ ] AC8 Judge skip: sub-questions with a chunk >= `judge_skip_score` need no model call; the rest are asked; off by default — `test_judge_skip_score` (test_agent_judge.py)
-- [ ] AC9 `declarative: false` makes no rewrite call for a plain question — `test_declarative_off_makes_no_rewrite_call`
-- [ ] AC10 `search_docs` output is identical with and without the new retrieval parameter when time is ample; the vector wait stops early when time is short — `test_rerank_reserve_changes_nothing_with_ample_time`, `test_embedding_wait_leaves_time_for_rerank` (test_retrieve_hybrid.py)
-- [ ] AC11 `hf_docs` config has the new values; defaults are explicit — `test_hf_docs_agent_config`, `test_new_settings_defaults`
+- [x] AC1 `plan_next` table: enough, max rounds, no new query, deadline with the fixed floor and with the adaptive minimum, token cap — `test_plan_next_table`, `test_plan_next_without_a_model_before_the_answer_and_at_the_token_cap`
+- [x] AC2 Round two without the minimum search time is not searched, stops `deadline`, no judge call, still answers from round one — `test_round_two_without_search_time_stops_with_deadline`
+- [x] AC3 Searches that do not fit are dropped, one phrasing per sub-question first — `test_searches_that_do_not_fit_are_dropped_round_robin`
+- [x] AC4 A round-two search that comes back `rerank_timeout` with no scores is no evidence: round `not_found`, no answer-model call — `test_unscored_round_two_is_not_found_and_not_answered`
+- [x] AC5 Partial rerank keeps scored chunks at or above the threshold only; the judge does not count unscored chunks — `test_a_partly_scored_round_two_keeps_what_the_reranker_judged`, `test_judge_does_not_count_unscored_chunks` (test_agent_judge.py)
+- [x] AC6 `RetrievalError` in round two: answers with `coverage_unconfirmed`, `degraded`, `retrieval_timeout` category; in round one it still raises — `test_retrieval_error_in_round_two_still_answers`, `test_retrieval_error_in_round_one_raises`
+- [x] AC7 The round minimum follows the previous round — `test_round_minimum_follows_previous_round`
+- [x] AC8 Judge skip: sub-questions with a chunk >= `judge_skip_score` need no model call; the rest are asked; off by default — `test_judge_skip_score` (test_agent_judge.py)
+- [x] AC9 `declarative: false` makes no rewrite call for a plain question (existing parametrized case in `test_agent_rewrite.py`, unchanged) and `hf_docs` carries it — `test_hf_docs_sets_agent_keys` (test_agent_config.py)
+- [x] AC10 `search_docs` output is identical with and without the new retrieval parameter when time is ample; the vector wait stops early when time is short — `test_rerank_reserve_changes_nothing_with_ample_time`, `test_embedding_wait_leaves_time_for_rerank`, `test_rerank_reserve_is_at_most_half_of_the_time_limit` (test_retrieve_hybrid.py), `test_search_docs_output_is_identical_with_and_without_the_rerank_reserve` (test_retrieve_pipeline.py)
+- [x] AC11 New settings have explicit defaults and checked ranges — `test_time_fix_settings_are_named_keys_with_checked_ranges`, `test_agent_settings_defaults_and_validation` (test_agent_config.py)
+- [x] AC12 The `compare` command reports a new run beside the P3-05 records by group — `tests/unit/test_eval_agentic_subset.py`
+
+Existing tests changed because the spec changed: `test_agent_settings_defaults_and_validation` (answer reserve 6 s) and `test_hf_docs_sets_agent_keys` (the new hf_docs keys). No other existing test needed a change; the helper `_pipeline` / `_retriever` in two retrieval test files got an optional argument.
 
 ## Re-measure (real models, subset of the P3-05 questions)
 Estimate: 5 crashed + 11 needing another round + 12 no-answer + 12 single-hop = 40 questions at
@@ -85,8 +88,10 @@ the old graph alone) does not fit and is a follow-up.
 The colloquial:05 retrieval difference (cause unknown), per-question embedding ledger lines, a
 hold-out set, changing the judge prompt, streaming.
 
-## Handoff (filled at the end)
-- Files:
-- Decisions:
-- Open issues:
-- Review rounds:
+## Handoff
+- Files: `src/rag/agent/{nodes,context,judge,state,graph,result,decisions}.py`, `src/rag/retrieve/{hybrid,search}.py`, `src/rag/config/{settings,kb}.py`, `src/rag/types.py` (`AskResult.retrieval_error`), `src/rag/observe/attributes.py`, `src/rag/eval/agentic/{subset,cli,runner}.py` (new `compare` command), `kb/public/hf_docs.yaml`, `README.md`, `.env.example`, tests `test_agent_time_fixes.py`, `test_eval_agentic_subset.py` and additions to `test_agent_judge.py`, `test_agent_config.py`, `test_retrieve_{hybrid,pipeline,search}.py`; `docs/decisions.md`, `docs/reports/P3-report.md` section 4. Raw records: `data/reports/p3-06{,b}/` (copy in `C:/workspace/rag-platform-data/p3-06/`).
+- Decisions (all in `docs/decisions.md`): search minimum 4 s; after a rerank timeout only scored chunks count (every round, `search_docs` unchanged); the query-vector wait leaves `search_rerank_reserve_ms` (2 s, at most half the limit; 0 = old behaviour) for rerank; a later round's `RetrievalError` is noted and answered from earlier rounds (round one still raises); answer reserve 6 s and the round minimum max(8 s, 0.9 x last round); `hf_docs`: `declarative: false`, `judge_skip_score: 0.98` (chosen on the P3-05 records, not on held-out questions). Not done: merging candidates and reranking once; run-in-parallel searches.
+- Re-measure (40 questions picked from the P3-05 records, graph run twice, 0.98 CNY of the 1.5 CNY budget): crashes 5 -> 0 in both runs; no-answer questions reaching the answer model 12/12 -> 7/12 (standard 5/12); round-two searches without any rerank score 21 -> 5 and 1; single-hop cost 0.0121 -> 0.0057 CNY, median 12.1 -> 6.4/7.5 s; the 11 "needs another round" questions cut by the deadline 8 -> 2 and 0; judge-3 answers on the 23 answerable ones 16 -> 19 and 18 (standard 18). P95 of the whole subset got longer (20.7 -> 27 s) and the 15 s target is still missed.
+- Open issues: the machine was busy (CPU 42-64% before, median 98%/85% during the runs; rerank batch of 8 took 6.5-9.8 s), so timings are directions only; the second run had gateway trouble (3 answer-model and 14 small-model timeouts, which broke three two-hop questions); the judge fallback to rules still says "enough" for any chunk above the threshold when the model has no time (no-answer:03, :18, :19 reach the answer model that way); the `retrieval_error` path was only exercised by unit tests; the full 150-question rerun on a quiet machine is a follow-up (about 1.5 CNY plus judge).
+- Not verified: headline accuracy (the subset was picked from the questions that went wrong, the skip threshold was chosen on the same records); run-to-run variation beyond two runs; quiet-machine latency.
+- Review rounds: 0 (author only).
