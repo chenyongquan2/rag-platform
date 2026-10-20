@@ -2,7 +2,8 @@
 """Command line of the Agentic RAG comparison (spec P3-05, design s13-5).
 
 uv run python -m rag.eval.agentic run --kb hf_docs --out DIR [--system standard|agentic|both]
-    [--types T,...] [--take TYPE=N ...] [--max-cny 5.0] [--index-prefix P]
+    [--types T,...] [--take TYPE=N ...] [--qids ID,...] [--deadline-ms MS] [--retry-errors]
+    [--max-cny 5.0] [--index-prefix P]
 uv run python -m rag.eval.agentic judge --out DIR [--runs 2] [--model M] [--concurrency 4]
 uv run python -m rag.eval.agentic report --out DIR [--md FILE]
 uv run python -m rag.eval.agentic human-sheet --out DIR [--n 30] [--seed 0]
