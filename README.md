@@ -63,6 +63,35 @@ report goes to `data/reports/<kb>/ingest-<run>.json`. A run stops without changi
 more than 5% of the documents fail to read, when it would pass fewer than half of the docstore's
 documents (`--allow-mass-delete` to confirm), or when the estimate does not fit the budget.
 
+### Private knowledge base: the MetaTrader 5 manual (CHM)
+
+`kb/private/mt5.yaml` (spec P4-01) holds the MT5 API manual in Chinese and English. It is private:
+only the caller named in `access.callers` may use it, and nothing extracted from the manual is
+committed (`data/raw/`, `data/reports/`, the docstore and the cache are git-ignored).
+
+```bash
+# once: unpack the two CHM files (needs 7-Zip, `7z` on PATH or in C:/Program Files/7-Zip; or chmlib)
+uv run python -m rag.data.chm unpack --chm MetaTrader5SDK_Chinese.chm --out data/raw/mt5/zh
+uv run python -m rag.data.chm unpack --chm MetaTrader5SDK_English.chm --out data/raw/mt5/en
+uv run python -m rag.ingest.chm_report --kb mt5 [--limit 50]   # read, clean, chunk; counts only; no model calls
+uv run python -m rag.ingest.job --kb mt5 --limit 50 --fake-embed
+uv run python -m rag.ingest.job --kb mt5 --all                 # real embeddings: costs money (ledger)
+```
+
+Pages are read from the parsed HTML (code, tables, lists kept; navigation, empty paragraphs and
+anchors counted and dropped); each page has a `language` and a `page_key` shared by its two
+versions, and `retrieval.dedupe_by_page_key: true` keeps one language version per page in a
+search result. A cleaning rule can carry `max_page_share` / `max_corpus_share`: the run stops
+before writing anything when the rule removes more than that.
+
+Warning: a run deletes every page of the index that the run's source does not deliver. A narrower
+`sections` in a volume, or `--limit`, run against the real `kb_mt5` index removes the left-out
+pages; use them only with `--index-prefix` on a throw-away index. The full, reproducible ingest is
+`uv run python -m rag.ingest.job --kb mt5 --all` with the committed `kb/private/mt5.yaml`
+(21,913 chunks; the real embeddings cost about 2.07 CNY in total, and a finished page is not
+paid for twice because the embedding cache and docstore are reused: set `DOCSTORE_URL` and
+`EMBED_INGEST_CACHE_URL` as in `docs/reports/P4-report.md` section 1.9).
+
 ## Embeddings and cost
 
 `rag.embed.make_embedding("ingest" | "query")` builds every embedding model: the same gateway
