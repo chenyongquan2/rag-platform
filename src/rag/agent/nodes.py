@@ -19,6 +19,7 @@ when less than the answer's time plus one round's is left) and at the token cap.
 """
 
 import asyncio
+import contextlib
 import inspect
 import time
 from typing import Any
@@ -29,6 +30,7 @@ from langgraph.types import Overwrite, interrupt
 from rag.agent.budget import RequestTokenCapExceeded
 from rag.agent.context import AgentContext
 from rag.agent.decisions import JudgeOutcome
+from rag.agent.events import progress, retrieve_detail, streamed, write
 from rag.agent.result import (
     answer_question,
     compose_result,
@@ -38,7 +40,8 @@ from rag.agent.result import (
 from rag.agent.routing import CLARIFY, TWO_HOP
 from rag.agent.rules import default_clarification
 from rag.agent.state import AgentState, RetrievalRound, SearchQuery, working_question
-from rag.answer import build_context, generate_answer
+from rag.answer import build_context
+from rag.answer.generate import AnswerDelta, AnswerDone, AnswerRetry, stream_answer
 from rag.answer.prompts import answer_language
 from rag.observe import attributes as attr
 from rag.observe import layer_span
@@ -68,6 +71,38 @@ def _search_plan(state: AgentState) -> list[SearchQuery]:
 _STOP_FOR = {"token_cap": "token_cap", "no_time": "deadline"}
 
 
+def _route_detail(state: AgentState, update: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "retrieve": update["needs_retrieval"],
+        "clarify": update["needs_clarification"],
+    }
+
+
+def _rewrite_detail(state: AgentState, update: dict[str, Any]) -> dict[str, Any]:
+    return {"queries": len(_search_plan({**state, **update}))}
+
+
+def _judge_detail(state: AgentState, update: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {"loop": update["loop"]}
+    if update["sufficiency"] is not None:
+        fields["verdict"] = update["sufficiency"]
+    return fields
+
+
+def _answer_detail(state: AgentState, update: dict[str, Any]) -> dict[str, Any]:
+    answer = update["answer"]
+    return {"found": answer.found, "status": str(answer.status)}
+
+
+def _next_round(state: AgentState) -> int:
+    return state.get("round", 0) + 1
+
+
+def _this_round(state: AgentState) -> int:
+    return state.get("round", 0)
+
+
+@streamed("route", detail=_route_detail)
 async def route_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
     """Rules first, no model. Only for what the rules leave `undecided` or `maybe`, and only
     when the knowledge base's `agent` settings allow it, the small model is asked
@@ -143,6 +178,7 @@ async def route_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[
     }
 
 
+@streamed("clarify")
 async def clarify_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
     """Asks the caller back, once per request. The hook only names the question (the node runs
     again when the caller answers, so the hook must be cheap and make no model call); the node
@@ -176,6 +212,7 @@ async def clarify_node(state: AgentState, runtime: Runtime[AgentContext]) -> dic
     }
 
 
+@streamed("rewrite", round_of=_next_round, detail=_rewrite_detail)
 async def rewrite_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
     """The rewrite hook (standalone question, declarative query, sub-questions; from round two on
     the new phrasings of what is missing). The hook falls back to the original question itself
@@ -223,6 +260,7 @@ async def rewrite_node(state: AgentState, runtime: Runtime[AgentContext]) -> dic
     return update
 
 
+@streamed("retrieve", round_of=_next_round, detail=retrieve_detail)
 async def retrieve_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
     """One search per planned query (the retrieval layer is blocking: a worker thread; the
     request context and span follow it): round one searches each sub-question, a later round
@@ -305,6 +343,7 @@ def plan_next(
     return True, None
 
 
+@streamed("judge", round_of=_this_round, detail=_judge_detail)
 async def judge_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
     """The judge hook (is what was found enough, and which sub-questions are missing), then the
     guards (`plan_next`) that decide whether another round runs. A judgement that fell back to
@@ -343,6 +382,7 @@ async def judge_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[
     return update
 
 
+@streamed("answer", round_of=_this_round, detail=_answer_detail)
 async def answer_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
     """The answer layer over the chunks of every round (deduplicated by chunk id, budget split
     per sub-question: s10-3). Nothing found: the fixed not-found answer, no model call. A greeting
@@ -359,21 +399,37 @@ async def answer_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict
                 cfg.answer.context_tokens,
                 metadata_keys=cfg.metadata.llm,
             )
-            answer = await generate_answer(
-                answer_question(
-                    working_question(state), state.get("standalone_question"), cfg.answer.language
-                ),
-                context,
-                kb=cfg.kb,
-                config=cfg.answer,
-                model=ctx.answer_model() if context.fragments else None,
-                request_id=ctx.request_id,
-                settings=ctx.settings,
-            )
+            answer = None
+            async with contextlib.aclosing(
+                stream_answer(
+                    answer_question(
+                        working_question(state),
+                        state.get("standalone_question"),
+                        cfg.answer.language,
+                    ),
+                    context,
+                    kb=cfg.kb,
+                    config=cfg.answer,
+                    model=ctx.answer_model() if context.fragments else None,
+                    request_id=ctx.request_id,
+                    settings=ctx.settings,
+                )
+            ) as events:
+                async for event in events:
+                    # The text goes to the stream as the model writes it; the answer node is the
+                    # only one that writes `token` events (`rag.agent.events`).
+                    if isinstance(event, AnswerDelta):
+                        write(runtime, "token", {"text": event.text, "attempt": event.attempt})
+                    elif isinstance(event, AnswerRetry):
+                        progress(runtime, "answer", "retry", attempt=event.attempt)
+                    elif isinstance(event, AnswerDone):
+                        answer = event.answer
+            assert answer is not None  # `stream_answer` always ends with `AnswerDone`
         span.set_attribute(attr.AGENT_TOKENS, ctx.budget.spent)
     return {"answer": answer, "timings_ms": {"answer": _ms(began)}}
 
 
+@streamed("verify")
 async def verify_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
     """Citation check level 1 ran inside the answer layer; this node records and passes on what
     the run found out: retrieval flags, answer flags, stop reason, tokens (s11-2, s16-8)."""

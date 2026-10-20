@@ -54,6 +54,7 @@ from langgraph.types import Command
 
 from rag.agent.budget import TokenBudget
 from rag.agent.context import AgentContext, AgentRetriever
+from rag.agent.events import StreamEmit, safe_emit
 from rag.agent.graph import build_graph
 from rag.agent.hooks import AgentHooks
 from rag.agent.result import compose_result
@@ -73,6 +74,8 @@ from rag.retrieve.deadline import Deadline
 from rag.types import AnswerStatus, AskResult, ErrorCategory, StopReason
 
 logger = logging.getLogger(__name__)
+
+INTERRUPT = "__interrupt__"  # the key under which LangGraph reports a run stopped by `interrupt`
 
 
 def _first(*candidates: Any) -> Any:
@@ -217,6 +220,7 @@ class AgentRuntime:
         run_id: str | None = None,
         resume_token: str | None = None,
         answer: str | None = None,
+        emit: StreamEmit | None = None,
     ) -> AskResult:
         """Run one request, or continue one that asked the caller back (see the module doc).
 
@@ -227,11 +231,15 @@ class AgentRuntime:
         and session (or at all). `run_id` names the checkpoint thread of a new run (default: a
         new one); `helper_model` is the small model of the route and rewrite steps, and
         `judge_model` the one of the sufficiency judge (default: `helper_model` when given,
-        else the model of `agent_judge_profile`)."""
+        else the model of `agent_judge_profile`). `emit(name, data)` receives the run's
+        `progress` and `token` events as they happen (`rag.agent.events`; the streaming
+        endpoint's source); it is called on the event loop and must not block, and a call that
+        raises is logged and the later events are dropped. The run does not depend on it."""
         if (resume_token is None) != (answer is None):
             raise ValueError("resume_token and answer go together")
         request_id = request_id or new_request_id()
         resuming = resume_token is not None
+        emit = safe_emit(emit)
         settings = self.settings
         total_ms = deadline_ms if deadline_ms is not None else settings.agent_deadline_ms
         began = time.perf_counter()
@@ -258,7 +266,7 @@ class AgentRuntime:
             key = ""
             if session_id is not None:
                 key = self.session_key(caller_id, cfg.kb, session_id)
-                await self._hold_session(stack, key, deadline)
+                await self._hold_session(stack, key, deadline, emit)
                 if not resuming:
                     history = await self.store.load(key)
             claimed: tuple[str, str] | None = None  # the token and the id of our claim
@@ -278,7 +286,7 @@ class AgentRuntime:
                         "history": history,
                     }
                 ctx.used_history = bool(history)
-                result, values = await self._run(inputs, ctx)
+                result, values = await self._run(inputs, ctx, emit)
                 if claimed is not None:  # the run ended, whatever it ended with: used up
                     await self.resumes.finish(*claimed)
                     claimed = None
@@ -415,8 +423,12 @@ class AgentRuntime:
         inputs = Command(resume=answer) if waiting else None
         return list(values.get("history") or []), inputs, record.claim_id
 
-    async def _hold_session(self, stack: AsyncExitStack, key: str, deadline: Deadline) -> None:
-        """Take the session's lock within the request's deadline."""
+    async def _hold_session(
+        self, stack: AsyncExitStack, key: str, deadline: Deadline, emit: StreamEmit | None
+    ) -> None:
+        """Take the session's lock within the request's deadline; say so when it has to wait."""
+        if emit is not None and self.locks.busy(key):
+            emit("progress", {"node": "queued", "phase": "waiting"})
         waiting = asyncio.timeout(deadline.remaining_s())
         try:
             async with waiting:
@@ -429,19 +441,18 @@ class AgentRuntime:
             ) from None
 
     async def _run(
-        self, inputs: Mapping[str, Any] | Command | None, ctx: AgentContext
+        self, inputs: Mapping[str, Any] | Command | None, ctx: AgentContext, emit: StreamEmit | None
     ) -> tuple[AskResult, Mapping[str, Any]]:
-        """Run (or continue) the graph; the result and the state it was made from."""
+        """Run (or continue) the graph; the result and the state it was made from. The one
+        implementation behind `ask` and the stream: the graph's `custom` events go to `emit`
+        (when there is one), the rest of the loop is `ainvoke`'s own."""
         async with self.checkpointers.open() as saver:
             graph = build_graph(saver)
             config = self.run_config(ctx.thread_id)
             running = asyncio.timeout(ctx.deadline.remaining_s())
             try:
                 async with running:
-                    # "sync": each step's checkpoint is written before the next step starts, so
-                    # a run cut off by the deadline leaves every finished step (and its chunks)
-                    # in the checkpoint that `_salvage` reads. LangGraph's default is "async".
-                    final = await graph.ainvoke(inputs, config, context=ctx, durability="sync")
+                    final = await self._stream_graph(graph, inputs, config, ctx, emit)
             except TimeoutError:
                 if not running.expired():
                     raise
@@ -463,6 +474,39 @@ class AgentRuntime:
                 values,
             )
         return result, final
+
+    @staticmethod
+    async def _stream_graph(
+        graph: Any,
+        inputs: Mapping[str, Any] | Command | None,
+        config: Mapping[str, Any],
+        ctx: AgentContext,
+        emit: StreamEmit | None,
+    ) -> dict[str, Any]:
+        """The graph's final state, with its interrupts under `__interrupt__` as `ainvoke`
+        returns it (it is built the same way: from the `values` and `updates` streams), while
+        the nodes' `custom` events are passed to `emit`. "sync": each step's checkpoint is
+        written before the next step starts, so a run cut off by the deadline or by a closed
+        client leaves every finished step (and its chunks) in the checkpoint that `_salvage`
+        reads. LangGraph's default is "async"."""
+        latest: dict[str, Any] = {}
+        interrupts: list[Any] = []
+        async for mode, payload in graph.astream(
+            inputs,
+            config,
+            context=ctx,
+            stream_mode=["custom", "updates", "values"],
+            durability="sync",
+        ):
+            if mode == "custom":
+                if emit is not None:
+                    emit(payload["event"], payload["data"])
+            elif mode == "updates":
+                if isinstance(payload, dict) and payload.get(INTERRUPT) is not None:
+                    interrupts.extend(payload[INTERRUPT])
+            else:
+                latest = payload
+        return {**latest, INTERRUPT: interrupts} if interrupts else latest
 
     async def _salvage(
         self, graph: Any, config: Mapping[str, Any], ctx: AgentContext, reason: StopReason
@@ -494,6 +538,7 @@ async def ask_docs(
     run_id: str | None = None,
     resume_token: str | None = None,
     answer: str | None = None,
+    emit: StreamEmit | None = None,
 ) -> AskResult:
     """Answer `question` from knowledge base `cfg` with the ask_docs graph (see the module doc).
     A run that asked the caller back continues with `resume_token` and the caller's `answer`.
@@ -518,4 +563,5 @@ async def ask_docs(
         run_id=run_id,
         resume_token=resume_token,
         answer=answer,
+        emit=emit,
     )

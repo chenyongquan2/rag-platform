@@ -207,6 +207,11 @@ class SessionLocks:
     def __len__(self) -> int:
         return len(self._entries)
 
+    def busy(self, session_id: str) -> bool:
+        """Someone in this process holds or waits for the session's lock: a request that asks
+        now has to wait (a lock held by another process is not seen)."""
+        return session_id in self._entries
+
     @asynccontextmanager
     async def hold(self, session_id: str) -> AsyncIterator[None]:
         entry = self._entries.get(session_id)
