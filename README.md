@@ -226,8 +226,8 @@ authentication until P8, so keep `SERVICE_HOST` on 127.0.0.1.
 `ask_docs` is our own LangGraph `StateGraph` (`rag.agent`): `route` (rules first, the small model
 only for what rules cannot decide) -> `clarify` (ask the caller back) -> `rewrite` -> `retrieve`
 -> `judge` -> `answer` (the `rag.answer` layer) -> `verify`. What each step does is a function
-in `AgentHooks` (`rag.agent.hooks`); the sufficiency judge is still a stub that P3-03 fills in,
-the edges, the loop guards and the state exist. It is exposed as the MCP tool
+in `AgentHooks` (`rag.agent.hooks`); the sufficiency judge and the correction rounds are in
+`rag.agent.judge` and `rag.agent.correction` (below). It is exposed as the MCP tool
 `ask_docs(kb, question, session_id, deadline_ms, resume_token, answer)` and `POST /v1/ask_docs`
 (JSON body `{kb, question, session_id?, deadline_ms?, resume_token?, answer?}`), non-streaming,
 with the caller, ACL, error categories, spans and business record line of `search_docs`.
@@ -323,6 +323,47 @@ is called only where it can change something, and only if the KB's `agent` secti
   returned, with `degraded` and `history:write_failed`). The request's token cap counts both
   calls.
 
+### Sufficiency judge and correction rounds (P3-03)
+
+With `agent.judge` on, the `judge` step sorts what each round found into three tiers (design
+13.4) per sub-question: **enough** (a chunk at or above the rerank threshold, and the small
+model says the chunks hold what the sub-question asks for), **partly enough** (some chunk passed
+but a sub-question is still without grounds; `missing` names which) and **not enough** (nothing
+passed the threshold in any round). Rules come first: a sub-question whose chunks are all below
+the threshold is missing without asking, and when that is true of all of them the model is not
+called. The model (`AGENT_JUDGE_PROFILE`, default `cheap`; `ask_docs(judge_model=...)`) sees the
+chunks that passed, best first, capped to `AGENT_JUDGE_CONTEXT_TOKENS`, in a marked untrusted
+block, and answers grounded or not per numbered sub-question. A failure, timeout, refused call or
+an answer that does not name every sub-question makes the rules decide alone: `judge:<reason>`
+in `fallbacks`, `degraded` set, the request still answered.
+
+Then the loop (at most `agent.max_rounds`, three): round 2 asks the missing sub-questions only,
+in `agent.multi_queries` other phrasings each (multi-query); round 3 searches a hypothetical
+answer passage (HyDE, `agent.hyde`). The phrasings pass the rewrite's rules (identifiers whole,
+same language, no instruction-like text, on topic, nothing searched twice) and a HyDE passage is
+a search query only: it is never shown to the judge or the answer. Results of all rounds
+accumulate and are deduplicated by chunk id. No round starts that cannot finish
+(`AGENT_ROUND_MIN_MS` plus the answer's time must be left, else `stop_reason: deadline`); when no
+new phrasing can be made (model failure, every phrasing refused, or `agent.rewrite` off) the run
+stops with `stop_reason: no_new_query`. Three rounds with nothing above the threshold are a plain
+`not_found` (no stop reason) with `nearest`, the closest chunks of all rounds; part of the
+question still missing after the last round is answered from what was found with
+`stop_reason: max_rounds`. Switching knowledge base after a failed round is not built (one call
+serves one KB); `correction.py` documents the extension point.
+
+The result has `sufficiency`, `missing` and `nearest`. How often the judge agrees with a label
+made from the question sets (the gold page is already among the chunks round one returned; a
+no-answer question is never enough):
+
+```bash
+uv run python -m rag.eval.judge_accuracy run --kb hf_docs --set dev=evals/datasets/hf_docs/synthetic_dev.jsonl     --set na=evals/datasets/hf_docs/no_answer_extra.jsonl --out data/reports/p3-03/run [--limit N] [--max-cny 2.0] [--rescue]
+uv run python -m rag.eval.judge_accuracy report data/reports/p3-03/run/records.json
+```
+
+It prints accuracy, precision and recall of "enough" with Wilson intervals, the confusion matrix,
+the split by set and question type, and the comparison with the rules alone and with always
+running two rounds. `--rescue` also runs rounds two and three for questions that were not enough.
+
 | Setting (env var) | Default | Meaning |
 |---|---|---|
 | `AGENT_DEADLINE_MS` | 30000 | Total time of one request; at most `SEARCH_MAX_DEADLINE_MS` |
@@ -336,6 +377,10 @@ is called only where it can change something, and only if the KB's `agent` secti
 | `AGENT_REWRITE_HISTORY_TURNS` | 3 | Earlier turns shown to the small model; 0 = none |
 | `AGENT_REWRITE_HISTORY_CHARS` | 400 | Characters of each question or answer shown to it |
 | `AGENT_RESUME_TTL_S` | 1800 | How long a question asked back waits for its answer |
+| `AGENT_JUDGE_PROFILE` | `cheap` | Chat profile of the sufficiency judge |
+| `AGENT_JUDGE_TIMEOUT_MS` | 9000 | Longest one judge call (never into the answer's time) |
+| `AGENT_JUDGE_CONTEXT_TOKENS` | 1500 | Estimated tokens of fragments shown to the judge |
+| `AGENT_ROUND_MIN_MS` | 8000 | Time one more round needs, on top of the answer's time |
 | `CHECKPOINT_URL` | `sqlite://data/checkpoints/langgraph.db` | Checkpoints (`memory://` for tests) |
 | `SESSION_STORE_URL` | `sqlite://data/sessions/sessions.db` | Session history and resume tokens (`memory://` for tests) |
 | `SESSION_LOCK_URL` | `memory://` | Session locks (`file://data/locks` for several processes) |
@@ -345,6 +390,9 @@ is called only where it can change something, and only if the KB's `agent` secti
 | KB config `agent.max_sub_questions` | 3 | Most searches of a split question (1: never split) |
 | KB config `agent.clarify` | false (`hf_docs`: true) | Ask the caller back when the question is too vague |
 | KB config `agent.route_model` | false (`hf_docs`: true) | The route may ask the small model about what rules leave open |
+| KB config `agent.judge` | false (`hf_docs`: true) | Judge after each round, correct with more rounds |
+| KB config `agent.multi_queries` | 3 | Phrasings of each missing sub-question in round 2 |
+| KB config `agent.hyde` | true | Round 3 searches a hypothetical answer passage |
 
 ## Retrieval evaluation
 

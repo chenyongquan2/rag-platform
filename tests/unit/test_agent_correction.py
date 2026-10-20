@@ -527,3 +527,23 @@ def test_pages_result_helper_default_still_passes_the_judge_rules() -> None:
     judge = FakeChatModel(responses=[judge_reply(True)])
     result = _ask("gamma delta", backend, judge=judge)
     assert result.sufficiency == "enough" and result.rounds == 1
+
+
+def test_a_sub_question_searched_more_than_once_is_merged_best_first_for_the_answer() -> None:
+    from rag.agent.result import group_by_sub_question
+    from rag.agent.state import RetrievalRound
+
+    first = RetrievalRound.from_result(1, "A", scored_result(KB, [0.5, 0.4], pages=[1, 2]))
+    again = RetrievalRound.from_result(
+        2, "A", scored_result(KB, [0.9, 0.5], pages=[3, 1]), query="other words"
+    )
+    other = RetrievalRound.from_result(1, "B", scored_result(KB, [0.45, 0.8], pages=[4, 5]))
+    lists = group_by_sub_question([first, again, other])
+    # A: both searches merged, page 1 once, best rerank score first; B searched once keeps the
+    # retrieval layer's order (the chain's tie-breaks are not ours to redo).
+    assert [[c.doc_id[-5:] for c in group] for group in lists] == [
+        ["p3.md", "p1.md", "p2.md"],
+        ["p4.md", "p5.md"],
+    ]
+    # The text searched is kept only when it is not the sub-question itself.
+    assert (first.query, again.query) == ("", "other words")

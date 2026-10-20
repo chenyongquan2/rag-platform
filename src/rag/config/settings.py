@@ -374,11 +374,13 @@ class ServiceSettings(BaseSettings):
     # time kept for the answer); `agent_judge_context_tokens` caps the fragments sent to it
     # (estimated tokens, shared between the sub-questions); `agent_round_min_ms` is the time one
     # more round needs (a small-model call, a search, a judgement): no round starts when less
-    # than this, plus the answer's time, is left.
+    # than this, plus the answer's time, is left. Measured on the `cheap` model (pilot of 10
+    # judgements): 3.0 to 5.6 s per judgement, so 6 s timed out half of the calls and the retry
+    # still billed them (0.02 CNY each against 0.003 for a call that finished): hence 9 s.
     agent_judge_profile: ChatProfileName = "cheap"
-    agent_judge_timeout_ms: int = Field(default=6_000, gt=0)
+    agent_judge_timeout_ms: int = Field(default=9_000, gt=0)
     agent_judge_context_tokens: int = Field(default=1_500, gt=0)
-    agent_round_min_ms: int = Field(default=6_000, ge=0)
+    agent_round_min_ms: int = Field(default=8_000, ge=0)
     session_store_url: str = "sqlite://data/sessions/sessions.db"
     session_lock_url: str = "memory://"
 

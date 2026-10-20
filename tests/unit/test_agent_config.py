@@ -104,8 +104,8 @@ def test_judge_and_correction_config(monkeypatch: pytest.MonkeyPatch) -> None:
     limits are named keys with checked ranges."""
     s = observe_settings()
     assert s.agent_judge_profile == "cheap"
-    assert (s.agent_judge_timeout_ms, s.agent_judge_context_tokens) == (6_000, 1_500)
-    assert s.agent_round_min_ms == 6_000
+    assert (s.agent_judge_timeout_ms, s.agent_judge_context_tokens) == (9_000, 1_500)
+    assert s.agent_round_min_ms == 8_000
     assert observe_settings(agent_judge_profile="online").agent_judge_profile == "online"
     assert observe_settings(agent_round_min_ms=0).agent_round_min_ms == 0
     for bad in (

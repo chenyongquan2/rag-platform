@@ -232,15 +232,16 @@ def test_the_rescue_run_asks_round_two_and_three_for_questions_that_were_not_eno
         ]
     )
     file = collect_records(
-        [s for s in _specs() if s.question.qid in {"d2", "d4"}],
+        [s for s in _specs() if s.question.qid in {"d1", "d2", "d4"}],
         retriever=MapRetriever(results),
         cfg=kb_config(KB, judge=True, rewrite=True),
         settings=observe_settings(),
-        judge_model=FakeChatModel(responses=[judge_reply(True)]),
+        judge_model=FakeChatModel(responses=[judge_reply(True), judge_reply(True)]),
         helper_model=helper,
         rescue=True,
     )
     by_qid = {r.qid: r for r in file.records}
+    assert by_qid["d1"].label_enough and by_qid["d1"].rescue is None  # enough: no rescue run
     assert by_qid["d2"].rescue is not None and by_qid["d2"].rescue.round2_found is True
     assert by_qid["d2"].rescue.round3_found is None  # no round three needed
     assert by_qid["d4"].rescue is not None
