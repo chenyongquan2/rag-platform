@@ -68,6 +68,8 @@ class JudgeFile(BaseModel):
     kb: str
     threshold: float
     k: int
+    max_rounds: int = 3
+    """The KB's `agent.max_rounds`: the most rounds the real loop runs."""
     judge_profile: str = ""
     provenance: Provenance | None = None
     question_sets: list[SetInfo] = Field(default_factory=list)

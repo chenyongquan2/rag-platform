@@ -77,6 +77,8 @@ class RetrievalRound(BaseModel):
     sub_question: str
     query: str = ""
     """The text searched, when it is not the sub-question (a phrasing, a HyDE passage)."""
+    kind: QueryKind = "original"
+    """How `query` was made; a `hyde` text is generated and is kept out of prompts and spans."""
     chunks: list[Chunk] = Field(default_factory=list)
     below_threshold: list[Chunk] = Field(default_factory=list)
     """With `not_found`: the nearest chunks the retrieval layer kept apart (s10-2)."""
@@ -91,13 +93,20 @@ class RetrievalRound(BaseModel):
 
     @classmethod
     def from_result(
-        cls, round_no: int, sub_question: str, result: RetrievalResult, *, query: str = ""
+        cls,
+        round_no: int,
+        sub_question: str,
+        result: RetrievalResult,
+        *,
+        query: str = "",
+        kind: QueryKind = "original",
     ) -> Self:
         scores = [h.score for h in result.rerank if h.score is not None]
         return cls(
             round=round_no,
             sub_question=sub_question,
             query=query if query != sub_question else "",
+            kind=kind,
             chunks=list(result.chunks),
             below_threshold=list(result.below_threshold),
             not_found=result.not_found,

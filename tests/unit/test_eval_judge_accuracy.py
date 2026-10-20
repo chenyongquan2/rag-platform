@@ -1,5 +1,6 @@
-"""Spec P3-03 AC27-AC34: the judge-accuracy script (labels from the question sets, confusion
-matrix, Wilson intervals, per question type, the fixed-two-rounds comparison, the spend limit).
+"""Spec P3-03 AC24-AC30, AC37-AC38: the judge-accuracy script (labels from the question sets,
+confusion matrix, Wilson intervals, per question type, the fixed-two-rounds comparison, the
+spend limit).
 
 A fake retriever with scripted results and scripted judge and helper models: no network, no
 Elasticsearch, no real model.
@@ -17,7 +18,7 @@ from rag.eval.judge_accuracy import cli, metrics
 from rag.eval.judge_accuracy.records import JudgeFile, load_records
 from rag.eval.judge_accuracy.runner import QuestionSpec, collect_records
 from rag.eval.questions import LabeledQuestion, load_question_set
-from rag.eval.stats import wilson_interval
+from rag.eval.stats import mcnemar_exact, wilson_interval
 from rag.testing import FakeChatModel, observe_settings
 from rag.testing.agent import (
     hyde_reply,
@@ -194,15 +195,34 @@ def test_the_judge_is_compared_with_the_rules_alone_and_with_fixed_two_rounds() 
     assert rows["rules_only"].wasted_rounds == 0
     # The model judge: one wasted round (q3), one missed correction (q2).
     assert (rows["judge"].accuracy.successes, rows["judge"].wasted_rounds) == (6, 1)
-    assert rows["judge"].missed_corrections == 1 and rows["judge"].rounds == 13
-    # Fixed two rounds: every question gets the second round; the three that were already
-    # enough waste it, nothing is missed.
+    assert rows["judge"].missed_corrections == 1
+    # Rounds are a range: the 5 questions the judge sends on stop after round two at the
+    # earliest and run to max_rounds (3) at the latest.
+    assert (rows["judge"].rounds_min, rows["judge"].rounds_max) == (8 + 5, 8 + 5 * 2)
+    assert (rows["rules_only"].rounds_min, rows["rules_only"].rounds_max) == (8 + 2, 8 + 2 * 2)
+    # Fixed two rounds: every question gets exactly the second round; the three that were
+    # already enough waste it, nothing is missed. A policy that never stops scores exactly the
+    # share of "not enough" labels, which says nothing about judging: no accuracy is reported.
     fixed = rows["fixed_two_rounds"]
-    assert (fixed.wasted_rounds, fixed.missed_corrections, fixed.rounds) == (3, 0, 16)
-    assert fixed.accuracy.successes == 5
+    assert (fixed.wasted_rounds, fixed.missed_corrections) == (3, 0)
+    assert (fixed.rounds_min, fixed.rounds_max) == (16, 16)
+    assert fixed.accuracy is None
     text = metrics.render_report(file)
     for needle in ("accuracy", "precision", "recall", "fixed_two_rounds", "single_hop", "d2"):
         assert needle in text
+    fixed_line = next(line for line in text.splitlines() if line.startswith("| fixed_two_rounds"))
+    assert "n/a" in fixed_line and "%" not in fixed_line
+    assert "5 / 8" not in text and "label share" in text.lower()
+
+
+def test_the_judge_and_the_rules_are_compared_on_the_same_questions() -> None:
+    file, _, _ = _collect()
+    paired = metrics.paired_policies(file.records, "judge", "rules_only")
+    # The judge is right where the rules are wrong on n1 and h1, the rules where the judge is
+    # wrong on d3: 2 against 1, exact McNemar p = 1.0 (nothing can be said on eight questions).
+    assert (paired.a_only, paired.b_only, paired.both_right, paired.both_wrong) == (2, 1, 4, 1)
+    assert paired.p_value == pytest.approx(mcnemar_exact(2, 1)) == pytest.approx(1.0)
+    assert "McNemar" in metrics.render_report(file)
 
 
 def test_wilson_interval_is_the_one_of_the_stats_module() -> None:

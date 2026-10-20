@@ -135,11 +135,13 @@ def _owners(rounds: Sequence[RetrievalRound]) -> list[str]:
     return list(dict.fromkeys(r.sub_question for r in rounds))
 
 
-def _tried(rounds: Sequence[RetrievalRound], owner: str) -> list[str]:
-    """What was already searched for `owner`: its own query and every other text."""
+def _tried(rounds: Sequence[RetrievalRound], owner: str, *, shown: bool = False) -> list[str]:
+    """What was already searched for `owner`: its own query and every other text. For the
+    prompt (`shown`) the HyDE passages are left out: they are generated text, not queries a
+    user could have typed, and the correction model does not need to read them."""
     texts = [owner]
     for found in rounds:
-        if found.sub_question == owner and found.query:
+        if found.sub_question == owner and found.query and not (shown and found.kind == "hyde"):
             texts.append(found.query)
     return list(dict.fromkeys(texts))
 
@@ -159,7 +161,7 @@ def _messages(
     for n, owner in enumerate(owners, 1):
         item: dict[str, object] = {"n": n, "sub_question": normalise(owner)[:limit]}
         if technique == "multi_query":
-            tried = [normalise(t)[:300] for t in _tried(rounds, owner)[:_TRIED_SHOWN]]
+            tried = [normalise(t)[:300] for t in _tried(rounds, owner, shown=True)[:_TRIED_SHOWN]]
             item["already_searched"] = tried
         items.append(item)
     tokens = {str(n): protected_tokens(owner) for n, owner in enumerate(owners, 1)}

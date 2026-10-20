@@ -1,4 +1,4 @@
-"""Spec P3-03 AC38: the sufficiency judge with the real `cheap` model on three hand-made cases.
+"""Spec P3-03 AC35: the sufficiency judge with the real `cheap` model on three hand-made cases.
 
 Run once when a spec says so: `uv run pytest -m llm tests/llm/test_sufficiency_gateway.py -s`.
 Reads the gateway URL and key from `.env`, appends every call to the real cost ledger, prints

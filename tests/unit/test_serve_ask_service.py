@@ -377,7 +377,7 @@ def test_rewrite_in_the_business_record(tmp_path: Path) -> None:
 
 
 def test_the_judge_result_reaches_the_response_and_the_business_record(tmp_path: Path) -> None:
-    """Spec P3-03 AC26: sufficiency, missing and the nearest chunks are part of the response,
+    """Spec P3-03 AC23: sufficiency, missing and the nearest chunks are part of the response,
     and the record names the verdict."""
     from rag.config import AgentConfig
     from rag.testing.agent import judge_reply, scored_result

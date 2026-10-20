@@ -206,7 +206,11 @@ async def rewrite_node(state: AgentState, runtime: Runtime[AgentContext]) -> dic
                 span.set_attribute(attr.AGENT_STOP_REASON, update["stop_reason"])
             if outcome.technique:
                 span.set_attribute(attr.REWRITE_TECHNIQUE, outcome.technique)
-            texts = [q.text for q in outcome.queries] or list(outcome.sub_questions)
+            # A HyDE passage is generated text: the span says what kind and how long, not what.
+            texts = [
+                f"hyde passage, {len(q.text)} chars" if q.kind == "hyde" else q.text
+                for q in outcome.queries
+            ] or list(outcome.sub_questions)
             span.set_attributes(
                 {
                     attr.REWRITE_MODEL_USED: outcome.used_model,
@@ -255,7 +259,11 @@ async def retrieve_node(state: AgentState, runtime: Runtime[AgentContext]) -> di
             )
             span.set_attribute(attr.HITS, len(result.chunks))
         observe_retrieval(result, ctx.cfg.kb, TOOL)
-        found.append(RetrievalRound.from_result(round_no, query.owner, result, query=query.text))
+        found.append(
+            RetrievalRound.from_result(
+                round_no, query.owner, result, query=query.text, kind=query.kind
+            )
+        )
     return {"rounds": found, "round": round_no, "timings_ms": {"retrieve": _ms(began)}}
 
 

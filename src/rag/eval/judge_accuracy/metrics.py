@@ -16,8 +16,12 @@ stop" or "not enough, run another round"):
 
 A wrong "stop" (`missed_corrections`: label not enough, policy enough) skips a round that was
 needed; a wrong "go on" (`wasted_rounds`: label enough, policy not enough) pays for a round that
-was not. `rounds` is the retrieval rounds the policy runs on these questions (one each, plus one
-for every question it does not stop at).
+was not. Rounds are a range: every question is searched once, and a question the policy sends on
+runs at least one more round and, in the real loop (judged again after every round), up to
+`max_rounds`; the fixed policy runs exactly two. `fixed_two_rounds` reports no accuracy: a
+policy that never stops scores exactly the share of "not enough" labels by construction, so the
+number says nothing about judging; compare policies on wasted rounds, missed corrections and
+rounds, and the judge with the rules alone by the paired test (`paired_policies`).
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ from dataclasses import dataclass
 
 from rag.eval.judge_accuracy.records import JudgeFile, JudgeRecord
 from rag.eval.questions import LabeledQuestion
-from rag.eval.stats import wilson_interval
+from rag.eval.stats import mcnemar_exact, wilson_interval
 
 Predict = Callable[[JudgeRecord], bool]
 """True: the policy stops after round one (it calls what was found enough)."""
@@ -138,27 +142,67 @@ TIERS = ("enough", "partly_enough", "not_enough")
 @dataclass(frozen=True)
 class PolicyRow:
     policy: str
-    accuracy: Rate
+    accuracy: Rate | None
+    """None for a policy that never stops after round one: it scores exactly the share of
+    "not enough" labels, which says nothing about judging."""
     wasted_rounds: int
     missed_corrections: int
-    rounds: int
+    rounds_min: int
+    rounds_max: int
+    """Retrieval rounds in all. A question a policy sends on runs round two at least and, in
+    the real loop (the judge decides again after each round), up to `max_rounds`; the fixed
+    policy runs exactly two."""
 
 
-def policy_rows(records: Sequence[JudgeRecord]) -> list[PolicyRow]:
+def policy_rows(records: Sequence[JudgeRecord], *, max_rounds: int = 3) -> list[PolicyRow]:
     rows = []
+    n = len(records)
     for name, predict in POLICIES.items():
         c = confusion(records, predict)
-        stops = c.tp + c.fp
+        sent_on = n - (c.tp + c.fp)
+        fixed = name == "fixed_two_rounds"
         rows.append(
             PolicyRow(
                 policy=name,
-                accuracy=rate(c.tp + c.tn, len(records)),
+                accuracy=None if fixed else rate(c.tp + c.tn, n),
                 wasted_rounds=c.fn,
                 missed_corrections=c.fp,
-                rounds=len(records) + len(records) - stops,
+                rounds_min=n + sent_on,
+                rounds_max=n + sent_on * (1 if fixed else max(1, max_rounds - 1)),
             )
         )
     return rows
+
+
+@dataclass(frozen=True)
+class PairedPolicies:
+    """Two policies on the same questions: where one is right and the other wrong."""
+
+    a: str
+    b: str
+    a_only: int
+    b_only: int
+    both_right: int
+    both_wrong: int
+    p_value: float
+    """Exact McNemar test of `a_only` against `b_only` (design s14-4)."""
+
+
+def paired_policies(records: Sequence[JudgeRecord], a: str, b: str) -> PairedPolicies:
+    right_a = [POLICIES[a](r) == r.label_enough for r in records]
+    right_b = [POLICIES[b](r) == r.label_enough for r in records]
+    a_only = sum(1 for x, y in zip(right_a, right_b, strict=True) if x and not y)
+    b_only = sum(1 for x, y in zip(right_a, right_b, strict=True) if y and not x)
+    both = sum(1 for x, y in zip(right_a, right_b, strict=True) if x and y)
+    return PairedPolicies(
+        a,
+        b,
+        a_only,
+        b_only,
+        both,
+        len(records) - a_only - b_only - both,
+        mcnemar_exact(a_only, b_only),
+    )
 
 
 @dataclass(frozen=True)
@@ -187,6 +231,20 @@ def _pct(r: Rate | None) -> str:
     if r is None:
         return "n/a"
     return f"{r.value * 100:.1f}% ({r.successes}/{r.n}; {r.low * 100:.1f}-{r.high * 100:.1f})"
+
+
+def _rounds(row: PolicyRow) -> str:
+    if row.rounds_min == row.rounds_max:
+        return str(row.rounds_min)
+    return f"{row.rounds_min} to {row.rounds_max}"
+
+
+def _paired_line(p: PairedPolicies) -> str:
+    return (
+        f"{p.a} right and {p.b} wrong on {p.a_only} questions, the reverse on {p.b_only}; both "
+        f"right on {p.both_right}, both wrong on {p.both_wrong}. Exact McNemar test (design "
+        f"s14-4): p = {p.p_value:.2g}."
+    )
 
 
 def _summary_row(name: str, s: Summary) -> str:
@@ -246,15 +304,23 @@ def render_report(file: JudgeFile) -> str:
         "## The judge against the fallbacks",
         "",
         "`wasted rounds`: round one was enough but the policy went on; `missed corrections`: round "
-        "one was not enough but the policy stopped; `rounds`: retrieval rounds run in all.",
+        "one was not enough but the policy stopped; `rounds`: retrieval rounds run in all, as a "
+        f"range (a question sent on runs round two at least, up to {file.max_rounds} rounds in "
+        "the real loop). `fixed_two_rounds` never stops, so by construction its accuracy is the "
+        f"label share of 'not enough' ({sum(1 for r in records if not r.label_enough)}/"
+        f"{len(records)}); it is not reported as an accuracy.",
         "",
         "| policy | accuracy | wasted rounds | missed corrections | rounds |",
         "|---|---|---|---|---|",
         *(
             f"| {row.policy} | {_pct(row.accuracy)} | {row.wasted_rounds} "
-            f"| {row.missed_corrections} | {row.rounds} |"
-            for row in policy_rows(records)
+            f"| {row.missed_corrections} | {_rounds(row)} |"
+            for row in policy_rows(records, max_rounds=file.max_rounds)
         ),
+        "",
+        "## The judge against the rules alone (paired, same questions)",
+        "",
+        _paired_line(paired_policies(records, "judge", "rules_only")),
     ]
     sensitivity = sum(1 for r in records if r.label_in_rerank_top_k != r.label_enough)
     lines += [

@@ -100,7 +100,7 @@ def test_rewrite_and_clarify_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_judge_and_correction_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Spec P3-03 AC25: the judge's switch, profile, timeout, context size and the correction's
+    """Spec P3-03 AC22: the judge's switch, profile, timeout, context size and the correction's
     limits are named keys with checked ranges."""
     s = observe_settings()
     assert s.agent_judge_profile == "cheap"

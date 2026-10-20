@@ -356,13 +356,14 @@ made from the question sets (the gold page is already among the chunks round one
 no-answer question is never enough):
 
 ```bash
-uv run python -m rag.eval.judge_accuracy run --kb hf_docs --set dev=evals/datasets/hf_docs/synthetic_dev.jsonl     --set na=evals/datasets/hf_docs/no_answer_extra.jsonl --out data/reports/p3-03/run [--limit N] [--max-cny 2.0] [--rescue]
+uv run python -m rag.eval.judge_accuracy run --kb hf_docs     --set dev=evals/datasets/hf_docs/synthetic_dev.jsonl     --set na=evals/datasets/hf_docs/no_answer_extra.jsonl     --out data/reports/p3-03/run [--limit N] [--max-cny 2.0] [--rescue]
 uv run python -m rag.eval.judge_accuracy report data/reports/p3-03/run/records.json
 ```
 
 It prints accuracy, precision and recall of "enough" with Wilson intervals, the confusion matrix,
-the split by set and question type, and the comparison with the rules alone and with always
-running two rounds. `--rescue` also runs rounds two and three for questions that were not enough.
+the split by set and question type, and the comparison with the rules alone (an exact paired McNemar
+test) and with always running two rounds (wasted rounds, missed corrections and the range of rounds;
+no accuracy, which would only be the share of "not enough" labels). `--rescue` also runs rounds two and three for questions that were not enough.
 
 | Setting (env var) | Default | Meaning |
 |---|---|---|

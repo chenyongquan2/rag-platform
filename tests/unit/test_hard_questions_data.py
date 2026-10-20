@@ -1,4 +1,4 @@
-"""Spec P3-03 AC35-AC37: the hand-written two-hop and no-answer questions (data checks).
+"""Spec P3-03 AC31-AC33, AC36: the hand-written two-hop and no-answer questions (data checks).
 
 The shape checks always run. The checks against the corpus text need the downloaded Hugging Face
 corpus (`data/raw/`, git-ignored): they are skipped without it and run when it is there.
@@ -98,4 +98,30 @@ def test_every_gold_page_exists_and_its_evidence_is_in_its_text() -> None:
     for q in load_question_set(TWO_HOP, kb="hf_docs").questions:
         for fact in q.meta["facts"]:
             assert fact["page"] in corpus, (q.qid, fact["page"])
-            assert _words(fact["evidence"]) in _words(corpus[fact["page"]]), (q.qid, fact["page"])
+            page = _words(corpus[fact["page"]])
+            for excerpt in [fact["evidence"], *fact.get("evidence_also", [])]:
+                assert _words(excerpt) in page, (q.qid, fact["page"], excerpt)
+
+
+def test_every_no_answer_question_records_at_least_six_patterns() -> None:
+    """Review round 1: a question checked with three spellings missed 'storing logs for 30 days'.
+    Each question records its regular expressions and its inflection-aware concept pairs."""
+    for q in load_question_set(HARD, kb="hf_docs").questions:
+        checks, concepts = q.meta.get("checks", []), q.meta.get("concepts", [])
+        assert len(checks) + len(concepts) >= 6, q.qid
+        assert all(len(pair) == 2 and all(pair) for pair in concepts), q.qid
+
+
+@pytest.mark.skipif(CORPUS is None, reason="the Hugging Face corpus is not downloaded")
+def test_no_answer_hard_questions_match_no_page_by_their_recorded_patterns() -> None:
+    """The recorded patterns are searched again over the whole corpus: none may match a page
+    (inflections, hyphen, space and underscore variants and either word order included)."""
+    from rag.eval.absence import concept_pages, lowered, pages_matching
+
+    corpus = lowered(_corpus())
+    for q in load_question_set(HARD, kb="hf_docs").questions:
+        for pattern in q.meta["checks"]:
+            assert not pages_matching(pattern, corpus, is_lowered=True), (q.qid, pattern)
+        for anchor, fact in q.meta["concepts"]:
+            hits = concept_pages(anchor, fact, corpus, is_lowered=True)
+            assert not hits, (q.qid, anchor, fact, hits[:3])

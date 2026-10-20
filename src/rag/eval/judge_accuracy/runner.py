@@ -112,7 +112,9 @@ async def _rescue(
         for query in outcome.queries:
             result = retriever.retrieve(query.text, kb=cfg.kb, top_k=cfg.retrieval.final_k)
             state["rounds"].append(
-                RetrievalRound.from_result(round_no, query.owner, result, query=query.text)
+                RetrievalRound.from_result(
+                    round_no, query.owner, result, query=query.text, kind=query.kind
+                )
             )
             queries.append(query.text)
         state["round"] = round_no
@@ -223,6 +225,7 @@ async def _collect(
         kb=cfg.kb,
         threshold=cfg.retrieval.threshold,
         k=cfg.retrieval.final_k,
+        max_rounds=cfg.agent.max_rounds,
         judge_profile=settings.agent_judge_profile,
         partial=partial,
         spent_cny=round(end - start, 8),

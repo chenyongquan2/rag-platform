@@ -1,4 +1,5 @@
-"""Spec P3-03 AC9-AC24: the correction loop of the ask_docs graph (judge, multi-query, HyDE).
+"""Spec P3-03 AC9-AC21, AC40-AC41: the correction loop of the ask_docs graph (judge, multi-query,
+HyDE).
 
 Scripted models and scripted retrieval only: the judge model, the helper model (rewrite and
 correction) and the answer model are separate fakes, so a test says which one was asked.
@@ -547,3 +548,62 @@ def test_a_sub_question_searched_more_than_once_is_merged_best_first_for_the_ans
     ]
     # The text searched is kept only when it is not the sub-question itself.
     assert (first.query, again.query) == ("", "other words")
+
+
+def test_a_hyde_passage_is_not_written_to_span_attributes() -> None:
+    """Review round 1: the span of the rewrite step carried every query, HyDE passage included.
+    A passage is generated text: the span names its kind and length, never the text."""
+    backend = ScriptedSearchBackend(KB, default=BELOW)
+    helper = FakeChatModel(
+        responses=[multi_query_reply((1, ["gamma epsilon"])), hyde_reply((1, PASSAGE))]
+    )
+    with memory_observability() as obs:
+        _ask("gamma delta", backend, helper=helper)
+        spans = obs.span_exporter.get_finished_spans()
+    assert _asked(backend)[-1] == PASSAGE  # it was searched
+    for span in spans:
+        for key, value in (span.attributes or {}).items():
+            assert "ZEBRAMARK" not in str(value), (span.name, key)
+    third = max(
+        (s for s in spans if s.name == "rewrite"), key=lambda s: s.attributes[attr.AGENT_ROUND]
+    )
+    assert third.attributes[attr.REWRITE_TECHNIQUE] == "hyde"
+    assert list(third.attributes[attr.REWRITE_QUERIES]) == [f"hyde passage, {len(PASSAGE)} chars"]
+    # A phrasing (a short query the user could have typed) is still named in full.
+    second = next(s for s in spans if s.name == "rewrite" and s.attributes[attr.AGENT_ROUND] == 2)
+    assert list(second.attributes[attr.REWRITE_QUERIES]) == ["gamma epsilon"]
+
+
+def test_the_hyde_passage_is_not_listed_as_an_earlier_search_for_later_rounds() -> None:
+    """With more than three rounds, the multi-query prompt lists what was already searched; a
+    HyDE passage is generated text and stays out of that list (review round 1)."""
+    from rag.agent.correction import _messages
+    from rag.agent.state import RetrievalRound
+    from rag.testing.agent import make_context
+
+    ctx = make_context(cfg=kb_config(KB, judge=True, rewrite=True))
+    rounds = [
+        RetrievalRound.from_result(1, "gamma delta", BELOW),
+        RetrievalRound.from_result(
+            2, "gamma delta", BELOW, query="gamma epsilon", kind="multi_query"
+        ),
+        RetrievalRound.from_result(3, "gamma delta", BELOW, query=PASSAGE, kind="hyde"),
+    ]
+    prompt = "\n".join(
+        str(m.content) for m in _messages(["gamma delta"], rounds, ctx, "multi_query")
+    )
+    assert "gamma epsilon" in prompt and "ZEBRAMARK" not in prompt
+
+
+def test_a_hyde_round_asks_for_one_passage_per_sub_question_whatever_the_model_sent() -> None:
+    backend = ScriptedSearchBackend(KB, default=BELOW)
+    second = PASSAGE.replace("ZEBRAMARK", "OTHERMARK")
+    helper = FakeChatModel(
+        responses=[
+            multi_query_reply((1, ["gamma epsilon"])),
+            hyde_reply((1, PASSAGE), (1, second)),  # two passages for sub-question 1
+        ]
+    )
+    _ask("gamma delta", backend, helper=helper)
+    searched = _asked(backend)
+    assert PASSAGE in searched and second not in searched
