@@ -445,6 +445,25 @@ latencies and the ledger's tokens and CNY, plus format compliance with Wilson in
 judge (`qwen/qwen3.6-flash`, thinking off, temperature 0, prompt `p1-04-hf-v1`) uses the HF
 rag_evaluation (1-5) and agent_rag (1-3) rubrics; answers that are not given score 1 by rule.
 
+## Agentic RAG against standard RAG
+
+Spec P3-05 (design s13-5): the same 150 questions (65 public single-hop, 20 two-hop, 15 colloquial
+rewrites in `colloquial.jsonl`, 50 no-answer) go through standard RAG and the real `ask_docs`
+graph, are scored with the P1-04 judge (1-3 scale), and compared pairwise per question type
+(exact McNemar, permutation test, Wilson intervals, smallest detectable difference), with cost,
+latency and what the correction loop did. `run` and `judge` call real models; each question is
+appended to `data/reports/p3-05/<system>/records.jsonl` and a second run skips finished ones.
+
+```bash
+uv run python -m rag.eval.agentic run --system both --take single_hop=4 --take two_hop=2 \
+    --take colloquial=2 --take no_answer=2          # a pilot of 10 questions first
+uv run python -m rag.eval.agentic project            # cost of the full run from the records so far
+uv run python -m rag.eval.agentic run --system both --max-cny 4.3   # continues the pilot
+uv run python -m rag.eval.agentic judge --runs 2
+uv run python -m rag.eval.agentic report --md data/reports/p3-05/report.md
+uv run python -m rag.eval.agentic human-sheet --n 30   # blind A/B sheet for the owner
+```
+
 ## Synthetic question sets
 
 Dev and holdout sets generated from the corpus (spec P1-05, design s14-2): random spans of the
