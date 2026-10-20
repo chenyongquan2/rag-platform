@@ -61,6 +61,9 @@ class AgentContext:
     """Earlier turns of the session were loaded into this run (set by the runtime)."""
     resumed: bool = False
     """This call continues a run that stopped to ask the caller (set by the runtime)."""
+    judge_model: Any = None
+    """The model of the sufficiency judge (P3-03), same kinds of value as `helper_model`; None:
+    the helper model serves."""
 
     @property
     def reserve_ms(self) -> int:
@@ -79,10 +82,18 @@ class AgentContext:
         model = self.model if hasattr(self.model, "astream") else self.model()
         return guard_model(model, self.budget)
 
+    @staticmethod
+    def model_instance(source: Any) -> Any:
+        """A chat model from a model or from the function that makes one."""
+        return source if hasattr(source, "with_structured_output") else source()
+
     def helper_model_instance(self) -> Any:
         """The small model (not yet counted against the cap: `guard` does that)."""
-        model = self.helper_model
-        return model if hasattr(model, "with_structured_output") else model()
+        return self.model_instance(self.helper_model)
+
+    def judge_model_source(self) -> Any:
+        """The judge's model, or the function that makes it: its own when there is one."""
+        return self.judge_model if self.judge_model is not None else self.helper_model
 
     def guard(self, model: Any, *, auxiliary: bool = True) -> Any:
         """`model` (a chat model, or a runnable built on one) counted against the token cap. A

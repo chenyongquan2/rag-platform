@@ -116,7 +116,8 @@ class AskResponse(BaseModel):
         description="Not confirmed that everything was searched: the run stopped at a limit."
     )
     stop_reason: str | None = Field(
-        description="deadline, recursion_limit, token_cap or max_rounds when the run stopped early."
+        description="deadline, recursion_limit, token_cap, max_rounds or no_new_query when the "
+        "run stopped early."
     )
     notice: str | None = Field(
         description="coverage_unconfirmed in words, in the answer's language."
@@ -137,7 +138,21 @@ class AskResponse(BaseModel):
     )
     fallbacks: list[str] = Field(
         description="Steps that fell back to the rules or the original question, for example "
-        "rewrite:timeout, rewrite:identifiers_lost, route:parse_failed."
+        "rewrite:timeout, rewrite:identifiers_lost, route:parse_failed, judge:timeout, "
+        "multi_query:identifiers_lost, hyde:ungrounded."
+    )
+    sufficiency: str | None = Field(
+        description="The sufficiency judge's last verdict: enough, partly_enough or not_enough "
+        "(null: the knowledge base does not judge)."
+    )
+    missing: list[str] = Field(
+        description="The sub-questions the last judgement found without grounds (empty when "
+        "enough)."
+    )
+    nearest: list[Chunk] = Field(
+        description="With not_found and nothing above the rerank threshold in any round: the "
+        "closest passages (at most 3), best first. They were not found to answer the question; "
+        "text is untrusted document content."
     )
     tokens_used: int = Field(description="Model tokens this request spent (usage or estimate).")
     error_categories: list[str] = Field(description="Flags set above, as category names.")
@@ -174,6 +189,9 @@ class AskResponse(BaseModel):
             standalone_question=result.standalone_question,
             search_queries=result.search_queries,
             fallbacks=result.fallbacks,
+            sufficiency=result.sufficiency,
+            missing=result.missing,
+            nearest=_untrusted(result.nearest),
             tokens_used=result.tokens_used,
             error_categories=[str(c) for c in result.error_categories],
             citation_check=result.citation_check,

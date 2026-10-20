@@ -54,6 +54,9 @@ def test_hf_docs_sets_agent_keys() -> None:
         max_sub_questions=3,
         clarify=True,
         route_model=True,
+        judge=True,
+        multi_queries=3,
+        hyde=True,
     )
 
 
@@ -94,3 +97,35 @@ def test_rewrite_and_clarify_config(monkeypatch: pytest.MonkeyPatch) -> None:
             AgentConfig.model_validate(bad_kb)
     with pytest.raises(ValidationError):
         AgentConfig.model_validate({"clarifiy": True})  # a typo is an error, not a no-op
+
+
+def test_judge_and_correction_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spec P3-03 AC25: the judge's switch, profile, timeout, context size and the correction's
+    limits are named keys with checked ranges."""
+    s = observe_settings()
+    assert s.agent_judge_profile == "cheap"
+    assert (s.agent_judge_timeout_ms, s.agent_judge_context_tokens) == (6_000, 1_500)
+    assert s.agent_round_min_ms == 6_000
+    assert observe_settings(agent_judge_profile="online").agent_judge_profile == "online"
+    assert observe_settings(agent_round_min_ms=0).agent_round_min_ms == 0
+    for bad in (
+        {"agent_judge_profile": "huge"},
+        {"agent_judge_timeout_ms": 0},
+        {"agent_judge_context_tokens": 0},
+        {"agent_round_min_ms": -1},
+    ):
+        with pytest.raises(ValueError):
+            observe_settings(**bad)
+    monkeypatch.setenv("AGENT_JUDGE_TIMEOUT_MS", "2500")
+    from rag.config import ServiceSettings
+
+    env = ServiceSettings(_env_file=None)  # type: ignore[call-arg]
+    assert env.agent_judge_timeout_ms == 2_500
+
+    # Per knowledge base: the judge is off unless the KB's file switches it on.
+    default = AgentConfig()
+    assert (default.judge, default.multi_queries, default.hyde) == (False, 3, True)
+    assert AgentConfig(judge=True, multi_queries=1, hyde=False).multi_queries == 1
+    for bad_kb in ({"multi_queries": 0}, {"multi_queries": 7}, {"judge": "maybe"}):
+        with pytest.raises(ValidationError):
+            AgentConfig.model_validate(bad_kb)

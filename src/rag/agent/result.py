@@ -71,14 +71,46 @@ def smalltalk_answer(question: str, language_setting: Any) -> Answer:
     )
 
 
+def _score(chunk: Chunk) -> float:
+    return chunk.rerank_score if chunk.rerank_score is not None else -1.0
+
+
 def group_by_sub_question(rounds: Sequence[RetrievalRound]) -> list[list[Chunk]]:
     """One chunk list per sub-question, in the order the sub-questions first appeared: later
-    rounds of the same sub-question add to its list, so the context budget (s10-3) is split
-    between different sub-questions, not between rounds."""
-    lists: dict[str, list[Chunk]] = {}
+    rounds (and the several phrasings of a round) of the same sub-question add to its list, so
+    the context budget (s10-3) is split between different sub-questions, not between rounds.
+    A sub-question searched more than once has its chunks merged, once each, best rerank score
+    first (otherwise the first phrasing's chunks would use the whole share); one searched
+    once keeps the retrieval layer's order."""
+    searches: dict[str, list[list[Chunk]]] = {}
     for r in rounds:
-        lists.setdefault(r.sub_question, []).extend(r.chunks)
-    return list(lists.values())
+        searches.setdefault(r.sub_question, []).append(r.chunks)
+    lists: list[list[Chunk]] = []
+    for parts in searches.values():
+        if len(parts) == 1:
+            lists.append(list(parts[0]))
+            continue
+        best: dict[str, Chunk] = {}
+        for chunk in (c for part in parts for c in part):
+            known = best.get(chunk.chunk_id)
+            if known is None or _score(chunk) > _score(known):
+                best[chunk.chunk_id] = chunk
+        lists.append(sorted(best.values(), key=lambda c: -_score(c)))
+    return lists
+
+
+NEAREST = 3
+"""How many of the closest chunks a not-found result carries (the retrieval layer's number)."""
+
+
+def closest_chunks(rounds: Sequence[RetrievalRound]) -> list[Chunk]:
+    """The best below-threshold chunks of every round, once each, best rerank score first."""
+    best: dict[str, Chunk] = {}
+    for chunk in (c for r in rounds for c in r.below_threshold):
+        known = best.get(chunk.chunk_id)
+        if known is None or _score(chunk) > _score(known):
+            best[chunk.chunk_id] = chunk
+    return sorted(best.values(), key=lambda c: -_score(c))[:NEAREST]
 
 
 def _unique_chunks(rounds: Sequence[RetrievalRound]) -> list[Chunk]:
@@ -126,7 +158,10 @@ def compose_result(
         "standalone_question": values.get("standalone_question"),
         "search_queries": list(values.get("sub_questions") or []),
         "fallbacks": fallbacks,
+        "sufficiency": values.get("sufficiency"),
     }
+    if values.get("sufficiency") in ("partly_enough", "not_enough"):
+        meta["missing"] = list(values.get("missing") or [])
 
     clarification = values.get("clarification")
     if clarification:  # the run stopped with a question for the caller (the runtime adds the
@@ -159,6 +194,10 @@ def compose_result(
             "generation_error": generation_error,
             "citation_check": answer.citation_check,
         }
+    if not fields["sources"] and fields["status"] == AnswerStatus.NOT_FOUND:
+        # Nothing passed the rerank threshold in any round: the closest chunks, apart from the
+        # sources (nothing was written from them), as the retrieval layer does (s10-2, s13-4).
+        fields["nearest"] = closest_chunks(rounds)
     notice = None
     if stop_reason is not None:
         notice = NOTICE[answer_language(question, ctx.cfg.answer.language)]

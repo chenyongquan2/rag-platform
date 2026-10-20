@@ -374,3 +374,50 @@ def test_rewrite_in_the_business_record(tmp_path: Path) -> None:
     assert ok["extra"]["standalone_question"] is None and ok["extra"]["fallbacks"] == []
     assert ok["extra"]["tokens_used"] > 0
     assert bad["extra"]["fallbacks"] == ["rewrite:parse_failed"] and bad["flags"] == ["degraded"]
+
+
+def test_the_judge_result_reaches_the_response_and_the_business_record(tmp_path: Path) -> None:
+    """Spec P3-03 AC26: sufficiency, missing and the nearest chunks are part of the response,
+    and the record names the verdict."""
+    from rag.config import AgentConfig
+    from rag.testing.agent import judge_reply, scored_result
+
+    cfg = KnowledgeBaseConfig(
+        kb="hf_docs",
+        description="hf_docs pages",
+        language="en",
+        access=AccessConfig(callers=["*"]),
+        agent=AgentConfig(judge=True),
+    )
+    question = "How do I push a model?"
+    backend = ScriptedSearchBackend(
+        "hf_docs",
+        by_question={question: scored_result("hf_docs", [0.1, 0.05])},
+        default=scored_result("hf_docs", [0.9]),
+    )
+    helper = FakeChatModel(responses=[judge_reply(True)])
+    path = tmp_path / "records.jsonl"
+    with memory_observability(business_record_path=str(path)):
+        service = SearchService(
+            agent_settings(business_record_path=str(path)),
+            configs={"hf_docs": cfg},
+            builder=FakePipelineBuilder({"hf_docs": backend}),
+            answer_model=StreamingFakeChatModel(default_response=REPLY),
+            helper_model=helper,
+        )
+        service.load()
+        nothing = _ask(service, question=question, request_id="req-n")
+        found = _ask(service, question="Where is the cache?", request_id="req-f")
+
+    # Nothing passed the threshold: not enough, the closest passages are returned apart from
+    # the sources. (The KB allows no rewrite, so no new phrasing: the run says why it stopped.)
+    assert nothing.status == "not_found" and nothing.sufficiency == "not_enough"
+    assert nothing.missing == [question] and nothing.sources == []
+    assert [c.chunk_id for c in nothing.nearest] == ["hf_docs:p1.md#0", "hf_docs:p2.md#0"]
+    assert all(c.untrusted for c in nothing.nearest)
+    assert nothing.stop_reason == "no_new_query" and nothing.coverage_unconfirmed
+    assert found.status == "answered" and found.sufficiency == "enough" and found.nearest == []
+    assert len(helper.calls) == 1  # only the question with chunks above the threshold was judged
+    bad, good = _records(path)
+    assert bad["extra"]["sufficiency"] == "not_enough" and bad["extra"]["missing"] == [question]
+    assert good["extra"]["sufficiency"] == "enough" and good["extra"]["missing"] == []

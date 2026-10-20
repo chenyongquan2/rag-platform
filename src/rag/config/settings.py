@@ -368,6 +368,17 @@ class ServiceSettings(BaseSettings):
     agent_rewrite_history_turns: int = Field(default=3, ge=0)
     agent_rewrite_history_chars: int = Field(default=400, gt=0)
     agent_resume_ttl_s: int = Field(default=1_800, gt=0)
+    # Sufficiency judge and correction rounds (spec P3-03, design s13-4): `agent_judge_profile` is
+    # the chat profile of the model that says whether every sub-question has grounds in what
+    # was found; `agent_judge_timeout_ms` the longest one such call may take (it never uses the
+    # time kept for the answer); `agent_judge_context_tokens` caps the fragments sent to it
+    # (estimated tokens, shared between the sub-questions); `agent_round_min_ms` is the time one
+    # more round needs (a small-model call, a search, a judgement): no round starts when less
+    # than this, plus the answer's time, is left.
+    agent_judge_profile: ChatProfileName = "cheap"
+    agent_judge_timeout_ms: int = Field(default=6_000, gt=0)
+    agent_judge_context_tokens: int = Field(default=1_500, gt=0)
+    agent_round_min_ms: int = Field(default=6_000, ge=0)
     session_store_url: str = "sqlite://data/sessions/sessions.db"
     session_lock_url: str = "memory://"
 

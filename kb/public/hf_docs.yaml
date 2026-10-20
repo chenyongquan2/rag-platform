@@ -64,3 +64,6 @@ agent:
   max_sub_questions: 3   # a two-hop question makes at most this many searches
   clarify: true          # ask the caller back once when the question names nothing to search
   route_model: true      # the small model decides what the rules leave open
+  judge: true            # after each round: enough / partly enough / not enough (s13-4); off = one round
+  multi_queries: 3       # round 2 asks each missing sub-question in this many other phrasings
+  hyde: true             # round 3 searches with a hypothetical answer passage

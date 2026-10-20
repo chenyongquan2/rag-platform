@@ -17,7 +17,11 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from pydantic import PrivateAttr
 
+from rag.agent.budget import TokenBudget
+from rag.agent.context import AgentContext
+from rag.agent.hooks import AgentHooks
 from rag.config import AccessConfig, AgentConfig, KnowledgeBaseConfig, ServiceSettings
+from rag.retrieve.deadline import Deadline
 from rag.testing.fakes import FakeChatModel, StreamingFakeChatModel
 from rag.testing.observe import observe_settings
 from rag.testing.serve import FakeSearchPipeline, fake_chunk
@@ -53,6 +57,48 @@ def pages_result(
         ],
         threshold=ThresholdDecision(
             threshold=0.3, top_score=chunks[0].rerank_score if chunks else None, kept=len(chunks)
+        ),
+        config_version="cfg-fake",
+    )
+
+
+def scored_result(
+    kb: str,
+    scores: Sequence[float],
+    *,
+    pages: Sequence[int] | None = None,
+    texts: Sequence[str] | None = None,
+    threshold: float = 0.3,
+) -> RetrievalResult:
+    """A retrieval result for candidates with the given rerank `scores` (best first), cut by
+    `threshold` the way the real chain does it: chunks at or above it are `chunks`; when none
+    is, `not_found` is set and the best three are in `below_threshold`. `pages` names the page
+    of each candidate (default 1, 2, ...), `texts` their text."""
+    numbers = list(pages) if pages is not None else list(range(1, len(scores) + 1))
+    candidates = [fake_chunk(kb, n, rerank_score=s) for n, s in zip(numbers, scores, strict=True)]
+    if texts is not None:
+        candidates = [
+            c.model_copy(update={"text": t}) for c, t in zip(candidates, texts, strict=True)
+        ]
+    kept = [c for c in candidates if (c.rerank_score or 0.0) >= threshold]
+    return RetrievalResult(
+        request_id="",
+        kb=kb,
+        index_version=f"kb_{kb}_v1",
+        data_generation=7,
+        timings_ms={"search": 1.0, "rerank": 2.0, "total": 3.0},
+        chunks=kept,
+        below_threshold=[] if kept else candidates[:3],
+        not_found=not kept,
+        rerank=[
+            RouteHit(chunk_id=c.chunk_id, doc_id=c.doc_id, rank=r, score=c.rerank_score)
+            for r, c in enumerate(candidates, 1)
+        ],
+        threshold=ThresholdDecision(
+            threshold=threshold,
+            top_score=candidates[0].rerank_score if candidates else None,
+            passed=bool(kept),
+            kept=len(kept),
         ),
         config_version="cfg-fake",
     )
@@ -189,6 +235,66 @@ def structured_reply(schema: str, usage: tuple[int, int] | None = None, **fields
         content="",
         tool_calls=[{"name": schema, "args": fields, "id": f"call-{schema}", "type": "tool_call"}],
         usage_metadata=usage_metadata,  # type: ignore[arg-type]
+    )
+
+
+def judge_reply(*grounded: bool, usage: tuple[int, int] | None = None) -> AIMessage:
+    """The sufficiency judge's structured answer: one verdict per numbered sub-question."""
+    return structured_reply(
+        "SufficiencyJudgement",
+        usage=usage,
+        sub_questions=[{"n": i, "grounded": g} for i, g in enumerate(grounded, 1)],
+    )
+
+
+def multi_query_reply(*queries: tuple[int, list[str]], usage: tuple[int, int] | None = None) -> Any:
+    """The correction step's multi-query answer: `(sub-question number, [phrasings])` pairs."""
+    return structured_reply(
+        "MultiQueryPlan",
+        usage=usage,
+        by_sub_question=[{"n": n, "queries": list(q)} for n, q in queries],
+    )
+
+
+def hyde_reply(*passages: tuple[int, str], usage: tuple[int, int] | None = None) -> Any:
+    """The correction step's HyDE answer: `(sub-question number, passage)` pairs."""
+    return structured_reply(
+        "HydePlan",
+        usage=usage,
+        by_sub_question=[{"n": n, "passage": p} for n, p in passages],
+    )
+
+
+def make_context(
+    *,
+    cfg: KnowledgeBaseConfig | None = None,
+    settings: ServiceSettings | None = None,
+    helper_model: Any = None,
+    judge_model: Any = None,
+    model: Any = None,
+    retriever: Any = None,
+    total_ms: int = 30_000,
+    clock: Any = None,
+    cap: int | None = None,
+) -> AgentContext:
+    """An `AgentContext` for a test that calls a hook or a step on its own (no graph)."""
+    settings = settings or agent_settings()
+    cfg = cfg or kb_config("hf_docs", judge=True)
+    kwargs: dict[str, Any] = {"clock": clock} if clock is not None else {}
+    return AgentContext(
+        settings=settings,
+        cfg=cfg,
+        retriever=retriever if retriever is not None else ScriptedSearchBackend(cfg.kb),
+        deadline=Deadline.after_ms(total_ms, **kwargs),
+        total_ms=total_ms,
+        budget=TokenBudget(cap or settings.agent_token_cap, settings.agent_answer_reserve_tokens),
+        model=model,
+        helper_model=helper_model,
+        judge_model=judge_model,
+        hooks=AgentHooks(),
+        request_id="req-test",
+        session_id=None,
+        thread_id="-:test",
     )
 
 

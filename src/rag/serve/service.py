@@ -592,6 +592,8 @@ class SearchService:
                     else None,
                     "search_queries": [_clip(q, RECORD_TEXT_CHARS) for q in result.search_queries],
                     "fallbacks": result.fallbacks,
+                    "sufficiency": result.sufficiency,
+                    "missing": [_clip(m, RECORD_TEXT_CHARS) for m in result.missing],
                 },
             )
             call.record = record.model_copy(

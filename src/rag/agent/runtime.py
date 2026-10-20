@@ -75,6 +75,11 @@ from rag.types import AnswerStatus, AskResult, ErrorCategory, StopReason
 logger = logging.getLogger(__name__)
 
 
+def _first(*candidates: Any) -> Any:
+    """The first candidate that is not None."""
+    return next(c for c in candidates if c is not None)
+
+
 class AgentDeadlineExceeded(Exception):  # noqa: N818 - named like BudgetExceeded
     """The request ran out of its total time before the graph could start (it waited for the
     session's lock). Its category is `agent_deadline` (read by `rag.serve.errors`)."""
@@ -106,6 +111,7 @@ class AgentRuntime:
         self.clock = clock
         self._chat: Any = None
         self._helper: Any = None
+        self._judge: Any = None
 
     @classmethod
     def from_settings(
@@ -175,6 +181,17 @@ class AgentRuntime:
             self._helper = make_chat_model(self.settings.agent_rewrite_profile, self.settings)
         return self._helper
 
+    def default_judge_model(self) -> Any:
+        """The model of the sufficiency judge (`agent_judge_profile`), built once, when the judge
+        first needs it. The same model as the helper's when the two profiles are the same."""
+        if self.settings.agent_judge_profile == self.settings.agent_rewrite_profile:
+            return self.default_helper_model()
+        if self._judge is None:
+            from rag.llm import make_chat_model
+
+            self._judge = make_chat_model(self.settings.agent_judge_profile, self.settings)
+        return self._judge
+
     async def state_values(self, thread: str) -> dict[str, Any]:
         """The last checkpointed state of a thread (empty for an unknown one); for tests and
         for finding out what a request did."""
@@ -195,6 +212,7 @@ class AgentRuntime:
         deadline_ms: int | None = None,
         model: Any = None,
         helper_model: Any = None,
+        judge_model: Any = None,
         filters: Mapping[str, Any] | None = None,
         run_id: str | None = None,
         resume_token: str | None = None,
@@ -207,7 +225,9 @@ class AgentRuntime:
         `resume_token` the run continues from the question it stopped at and `question` is not
         used; `ResumeTokenInvalid` when the token cannot be used by this caller, knowledge base
         and session (or at all). `run_id` names the checkpoint thread of a new run (default: a
-        new one); `helper_model` is the small model of the route and rewrite steps."""
+        new one); `helper_model` is the small model of the route and rewrite steps, and
+        `judge_model` the one of the sufficiency judge (default: `helper_model` when given,
+        else the model of `agent_judge_profile`)."""
         if (resume_token is None) != (answer is None):
             raise ValueError("resume_token and answer go together")
         request_id = request_id or new_request_id()
@@ -225,6 +245,7 @@ class AgentRuntime:
             budget=TokenBudget(settings.agent_token_cap, settings.agent_answer_reserve_tokens),
             model=model if model is not None else self.default_model,
             helper_model=helper_model if helper_model is not None else self.default_helper_model,
+            judge_model=_first(judge_model, helper_model, self.default_judge_model),
             hooks=self.hooks,
             request_id=request_id,
             session_id=session_id,
@@ -468,6 +489,7 @@ async def ask_docs(
     deadline_ms: int | None = None,
     model: Any = None,
     helper_model: Any = None,
+    judge_model: Any = None,
     filters: Mapping[str, Any] | None = None,
     run_id: str | None = None,
     resume_token: str | None = None,
@@ -491,6 +513,7 @@ async def ask_docs(
         deadline_ms=deadline_ms,
         model=model,
         helper_model=helper_model,
+        judge_model=judge_model,
         filters=filters,
         run_id=run_id,
         resume_token=resume_token,

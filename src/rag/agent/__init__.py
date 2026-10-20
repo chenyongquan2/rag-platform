@@ -7,15 +7,25 @@ Our own LangGraph `StateGraph`: route (rules) -> rewrite -> retrieve -> judge ->
 verify, one checkpoint thread per request (`session_id:run_id`), chat history per session,
 requests of one session one after another, a total deadline, a recursion limit and a token cap.
 Rewrite (standalone question, declarative query, sub-questions), the small-model fallback of the
-route and the clarify step (`interrupt`, resumed with a token) are P3-02; the sufficiency judge
-is a stub (`AgentHooks.judge`) that P3-03 fills in.
+route and the clarify step (`interrupt`, resumed with a token) are P3-02. The sufficiency judge
+(enough / partly enough / not enough, rules first, small model second) and the correction rounds
+(multi-query, HyDE, then a real "not found") are P3-03 (`rag.agent.judge`,
+`rag.agent.correction`).
 """
 
 from rag.agent.budget import RequestTokenCapExceeded, TokenBudget, guard_model
 from rag.agent.context import AgentContext, AgentRetriever
 from rag.agent.graph import build_graph
 from rag.agent.helper import HelperFailed, ask_helper
-from rag.agent.hooks import AgentHooks, RewriteOutcome, RouteDecision, Verdict, decide_route
+from rag.agent.hooks import (
+    AgentHooks,
+    JudgeOutcome,
+    RewriteOutcome,
+    RouteDecision,
+    Verdict,
+    decide_route,
+)
+from rag.agent.judge import SufficiencyJudge, judge_rounds
 from rag.agent.resume import MemoryResumeStore, ResumeStore, ResumeTokenInvalid, SqliteResumeStore
 from rag.agent.rewrite import QueryRewriter, RewritePlan
 from rag.agent.routing import RouteJudgement, route_with_model
@@ -27,7 +37,13 @@ from rag.agent.session import (
     SessionStore,
     SqliteSessionStore,
 )
-from rag.agent.state import AgentState, RetrievalRound, thread_id, valid_session_id
+from rag.agent.state import (
+    AgentState,
+    RetrievalRound,
+    SearchQuery,
+    thread_id,
+    valid_session_id,
+)
 
 __all__ = [
     "AgentContext",
@@ -38,6 +54,7 @@ __all__ = [
     "AgentState",
     "HelperFailed",
     "HistoryTurn",
+    "JudgeOutcome",
     "MemoryResumeStore",
     "MemorySessionStore",
     "QueryRewriter",
@@ -49,10 +66,12 @@ __all__ = [
     "RewritePlan",
     "RouteDecision",
     "RouteJudgement",
+    "SearchQuery",
     "SessionLocks",
     "SessionStore",
     "SqliteResumeStore",
     "SqliteSessionStore",
+    "SufficiencyJudge",
     "TokenBudget",
     "Verdict",
     "ask_docs",
@@ -60,6 +79,7 @@ __all__ = [
     "build_graph",
     "decide_route",
     "guard_model",
+    "judge_rounds",
     "route_with_model",
     "thread_id",
     "valid_session_id",

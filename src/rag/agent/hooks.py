@@ -1,4 +1,4 @@
-"""The route rules and the list of hooks behind the graph's nodes (spec P3-01, P3-02).
+"""The route rules and the list of hooks behind the graph's nodes (spec P3-01, P3-02, P3-03).
 
 The graph (`rag.agent.graph`) has a `clarify`, a `rewrite` and a `judge` node, the edges between
 them and the guards around them (maximum rounds, deadline, token cap). What those nodes decide
@@ -12,9 +12,11 @@ is a function in `AgentHooks`:
                    | left undecided (only then)                     |
     clarify        | the question to ask the caller (the node        | here
                    | stops the run with `interrupt`)                |
-    rewrite        | standalone question, declarative query,        | `rag.agent.rewrite`
-                   | sub-questions; round 2 is P3-03's              |
-    judge          | the results are enough (stub)                  | P3-03
+    rewrite        | standalone question, declarative query,        | `rag.agent.rewrite`,
+                   | sub-questions; from round 2 multi-query, HyDE   | `rag.agent.correction`
+    judge          | enough / partly enough / not enough, and which  | `rag.agent.judge`
+                   | sub-questions are missing (off without          |
+                   | `agent.judge`)                                 |
 
 so adding behaviour is a change of one function, not of the graph. `decide_route` is the `route`
 node's rule set: rules only, no model (design s8-1, s13-3). It returns signals; the node reads
@@ -28,7 +30,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from rag.agent.decisions import RewriteOutcome, RouteDecision, Verdict
+from rag.agent.decisions import JudgeOutcome, RewriteOutcome, RouteDecision, Verdict
+from rag.agent.judge import SufficiencyJudge
 from rag.agent.rewrite import QueryRewriter
 from rag.agent.routing import route_with_model
 from rag.agent.rules import clarity, default_clarification, multi_hop_hint
@@ -41,6 +44,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AgentHooks",
+    "JudgeOutcome",
     "RewriteOutcome",
     "RouteDecision",
     "Verdict",
@@ -93,8 +97,8 @@ async def clarification_question(state: AgentState, ctx: AgentContext) -> str | 
 
 
 async def stub_judge(state: AgentState, ctx: AgentContext) -> Verdict:
-    """P3-03: are the chunks found so far enough for every sub-question? The stub says yes, so
-    there is exactly one round."""
+    """The P3-01 stub: everything found is enough, so there is exactly one round. The default
+    hook is now `SufficiencyJudge`, which does the same until a KB sets `agent.judge`."""
     return "sufficient"
 
 
@@ -110,4 +114,6 @@ class AgentHooks:
     rewrite: Callable[[AgentState, AgentContext], Awaitable[RewriteOutcome]] = field(
         default_factory=QueryRewriter
     )
-    judge: Callable[[AgentState, AgentContext], Awaitable[str]] = stub_judge
+    judge: Callable[[AgentState, AgentContext], Awaitable[JudgeOutcome | str]] = field(
+        default_factory=SufficiencyJudge
+    )

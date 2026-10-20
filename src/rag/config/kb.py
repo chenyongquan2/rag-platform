@@ -228,6 +228,13 @@ class AgentConfig(_Strict):
       (`need_clarification`, at most once per request). Off: such a question is searched as is.
     - `route_model`: the route step may ask the small model about what the rules cannot decide
       (only questions the rules call undecided, and only for the features switched on above).
+    - `judge` (spec P3-03, s13-4): after every round, decide whether what was found is enough
+      (the threshold first, the small model second) and go on to another round when it is not.
+      Off: one round, as before. Another round needs a new phrasing, which needs `rewrite`;
+      with `rewrite` off the run stops after the judgement (`stop_reason: no_new_query`).
+    - `multi_queries`: phrasings of each missing sub-question in round two (multi-query).
+    - `hyde`: round three searches with a hypothetical answer passage (HyDE, s8-2); off: round
+      three asks for new phrasings again.
     """
 
     max_rounds: int = Field(default=3, ge=1)
@@ -236,6 +243,9 @@ class AgentConfig(_Strict):
     max_sub_questions: int = Field(default=3, ge=1, le=8)
     clarify: bool = False
     route_model: bool = False
+    judge: bool = False
+    multi_queries: int = Field(default=3, ge=1, le=6)
+    hyde: bool = True
 
 
 class KnowledgeBaseConfig(_Strict):

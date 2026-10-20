@@ -239,9 +239,16 @@ class Answer(_ResultMeta):
         return " ".join(s.text for s in self.sentences)
 
 
-StopReason = Literal["deadline", "recursion_limit", "token_cap", "max_rounds"]
+StopReason = Literal["deadline", "recursion_limit", "token_cap", "max_rounds", "no_new_query"]
 """Why an `ask_docs` run stopped searching before it confirmed it had searched enough (s13-3):
-its total deadline, its recursion limit, the per-request token cap, or the KB's `max_rounds`."""
+its total deadline, its recursion limit, the per-request token cap, the KB's `max_rounds` with
+part of the question still without grounds, or `no_new_query` (the judge wanted another round
+and no new phrasing could be made: the model failed, every phrasing was refused, or the KB
+does not allow a model before the answer). Three rounds in which nothing reached the rerank
+threshold are not a stop reason: that is a plain `not_found` (s13-4)."""
+
+Sufficiency = Literal["enough", "partly_enough", "not_enough"]
+"""The sufficiency judge's verdict on what a run found (s13-4)."""
 
 
 class AskResult(_ResultMeta):
@@ -283,6 +290,13 @@ class AskResult(_ResultMeta):
     clarified: bool = False
     question: str = ""
     """The question as the caller first asked it (a resumed call carries only the answer)."""
+    sufficiency: Sufficiency | None = None
+    """The judge's last verdict (None: the KB's `agent.judge` is off)."""
+    missing: list[str] = Field(default_factory=list)
+    """The sub-questions the last judgement found without grounds (empty when enough)."""
+    nearest: list[Chunk] = Field(default_factory=list)
+    """With `not_found` and no chunk above the rerank threshold in any round: the closest chunks
+    of all rounds, best rerank score first, at most three. Not sources of an answer."""
     standalone_question: str | None = None
     search_queries: list[str] = Field(default_factory=list)
     fallbacks: list[str] = Field(default_factory=list)

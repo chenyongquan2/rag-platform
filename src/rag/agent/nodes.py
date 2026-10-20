@@ -4,17 +4,18 @@
               KB, ask the caller back, two-hop; clears the retrieval fields of the thread
     clarify   the question to ask the caller (hook), then `interrupt`: the run stops here and
               continues from here with the caller's answer
-    rewrite   hook: standalone question, declarative query, sub-questions (P3-02); another
-              wording of what was missing (P3-03)
-    retrieve  the retrieval layer, once per sub-question (a blocking call, run in a thread)
-    judge     hook (P3-03): enough found? plus the guards that end the loop
+    rewrite   hook: standalone question, declarative query, sub-questions (P3-02); from round
+              two on, other phrasings of what was missing: multi-query, HyDE (P3-03)
+    retrieve  the retrieval layer, once per search of the round (a blocking call, run in a thread)
+    judge     hook (P3-03): enough, partly enough or not enough found, and which sub-questions
+              are missing; plus the guards that end the loop
     answer    the answer layer (`rag.answer`) over the chunks of every round
     verify    builds the `AskResult`: retrieval flags, answer flags, stop reason
 
 Every node runs in its own step span and writes its time into `timings_ms`. What each hook does
 is in `rag.agent.hooks`; the guards around them live here, so a hook that calls a model only has
 to say "insufficient" and the loop still ends at `max_rounds`, at the deadline (no round starts
-when less than the answer's time is left) and at the token cap.
+when less than the answer's time plus one round's is left) and at the token cap.
 """
 
 import asyncio
@@ -27,6 +28,7 @@ from langgraph.types import Overwrite, interrupt
 
 from rag.agent.budget import RequestTokenCapExceeded
 from rag.agent.context import AgentContext
+from rag.agent.decisions import JudgeOutcome
 from rag.agent.result import (
     answer_question,
     compose_result,
@@ -35,7 +37,7 @@ from rag.agent.result import (
 )
 from rag.agent.routing import CLARIFY, TWO_HOP
 from rag.agent.rules import default_clarification
-from rag.agent.state import AgentState, RetrievalRound, working_question
+from rag.agent.state import AgentState, RetrievalRound, SearchQuery, working_question
 from rag.answer import build_context, generate_answer
 from rag.answer.prompts import answer_language
 from rag.observe import attributes as attr
@@ -52,6 +54,18 @@ def _ms(began: float) -> float:
 def _sub_questions(state: AgentState) -> list[str]:
     planned = [q for q in state.get("sub_questions") or [] if q.strip()]
     return planned or [state.get("standalone_question") or working_question(state)]
+
+
+def _search_plan(state: AgentState) -> list[SearchQuery]:
+    """The searches of this round: what the rewrite hook planned for it (round two on), else
+    one search per sub-question."""
+    planned = list(state.get("search_plan") or [])
+    return planned or [SearchQuery(text=q, owner=q) for q in _sub_questions(state)]
+
+
+# What a correction that could not go on says about why the run stops: a model that was refused
+# for tokens or time is those limits, anything else is "no new query".
+_STOP_FOR = {"token_cap": "token_cap", "no_time": "deadline"}
 
 
 async def route_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
@@ -109,6 +123,9 @@ async def route_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[
         "round": 0,
         "loop": False,
         "sub_questions": [],
+        "search_plan": [],
+        "missing": [],
+        "sufficiency": None,
         "standalone_question": None,
         "clarification": None,
         "clarify_question": ask,
@@ -160,9 +177,11 @@ async def clarify_node(state: AgentState, runtime: Runtime[AgentContext]) -> dic
 
 
 async def rewrite_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
-    """The rewrite hook (standalone question, declarative query, sub-questions). The hook falls
-    back to the original question itself when its model fails; the node records that in
-    `fallbacks` (the request is then `degraded`) and on the span."""
+    """The rewrite hook (standalone question, declarative query, sub-questions; from round two on
+    the new phrasings of what is missing). The hook falls back to the original question itself
+    when its model fails in round one; the node records that in `fallbacks` (the request is
+    then `degraded`) and on the span. A correction that cannot make a new query ends the run
+    (`stop_reason`): searching the same thing again would give the same chunks."""
     ctx = runtime.context
     began = time.perf_counter()
     update: dict[str, Any] = {}
@@ -177,13 +196,21 @@ async def rewrite_node(state: AgentState, runtime: Runtime[AgentContext]) -> dic
                 update["standalone_question"] = outcome.standalone_question
             if outcome.sub_questions:
                 update["sub_questions"] = list(outcome.sub_questions)
+            if outcome.queries:
+                update["search_plan"] = list(outcome.queries)
             if outcome.fallback:
-                update["fallbacks"] = [f"rewrite:{outcome.fallback}"]
+                update["fallbacks"] = [f"{outcome.technique or 'rewrite'}:{outcome.fallback}"]
                 span.set_attribute(attr.REWRITE_FALLBACK, outcome.fallback)
+            if outcome.exhausted:
+                update["stop_reason"] = _STOP_FOR.get(outcome.fallback or "", "no_new_query")
+                span.set_attribute(attr.AGENT_STOP_REASON, update["stop_reason"])
+            if outcome.technique:
+                span.set_attribute(attr.REWRITE_TECHNIQUE, outcome.technique)
+            texts = [q.text for q in outcome.queries] or list(outcome.sub_questions)
             span.set_attributes(
                 {
                     attr.REWRITE_MODEL_USED: outcome.used_model,
-                    attr.REWRITE_QUERIES: [q[:300] for q in outcome.sub_questions],
+                    attr.REWRITE_QUERIES: [q[:300] for q in texts],
                     attr.REWRITE_STANDALONE: (outcome.standalone_question or "")[:500],
                     attr.AGENT_TOKENS: ctx.budget.spent,
                 }
@@ -193,16 +220,19 @@ async def rewrite_node(state: AgentState, runtime: Runtime[AgentContext]) -> dic
 
 
 async def retrieve_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
-    """One search per sub-question (the retrieval layer is blocking: a worker thread; the
-    request context and span follow it). A failure is the request's failure (P3-03 decides what
-    a later round may survive)."""
+    """One search per planned query (the retrieval layer is blocking: a worker thread; the
+    request context and span follow it): round one searches each sub-question, a later round
+    the phrasings of what was missing. A search of a later round that would start with no time
+    left (before the answer's) is not made. A failure is the request's failure."""
     ctx = runtime.context
     began = time.perf_counter()
     round_no = state.get("round", 0) + 1
     retrieval = ctx.cfg.retrieval
     top_k = retrieval.final_k
     found: list[RetrievalRound] = []
-    for sub_question in _sub_questions(state):
+    for query in _search_plan(state):
+        if round_no > 1 and ctx.deadline.remaining_ms() <= ctx.reserve_ms:
+            break
         with layer_span(
             "retrieve",
             attributes={
@@ -215,7 +245,7 @@ async def retrieve_node(state: AgentState, runtime: Runtime[AgentContext]) -> di
         ) as span:
             result = await asyncio.to_thread(
                 ctx.retriever.retrieve,
-                sub_question,
+                query.text,
                 ctx.cfg.kb,
                 top_k,
                 filters=dict(ctx.filters or {}),
@@ -225,19 +255,42 @@ async def retrieve_node(state: AgentState, runtime: Runtime[AgentContext]) -> di
             )
             span.set_attribute(attr.HITS, len(result.chunks))
         observe_retrieval(result, ctx.cfg.kb, TOOL)
-        found.append(RetrievalRound.from_result(round_no, sub_question, result))
+        found.append(RetrievalRound.from_result(round_no, query.owner, result, query=query.text))
     return {"rounds": found, "round": round_no, "timings_ms": {"retrieve": _ms(began)}}
 
 
-def plan_next(state: AgentState, verdict: str, ctx: AgentContext) -> tuple[bool, str | None]:
-    """Whether another round runs, and why not when the judge wanted one: the KB's `max_rounds`,
-    the deadline (less than the answer's time is left), the token cap (no tokens left for
-    another rewrite and judge after keeping the answer's)."""
-    if verdict == "sufficient":
+def as_outcome(judgement: JudgeOutcome | str, state: AgentState) -> JudgeOutcome:
+    """The judge hook's answer as a `JudgeOutcome`. A P3-01 hook says `sufficient` or
+    `insufficient`: the second means chunks exist but something is still wanted, for every
+    sub-question searched so far."""
+    if isinstance(judgement, JudgeOutcome):
+        return judgement
+    if judgement == "sufficient":
+        return JudgeOutcome("enough")
+    owners = tuple(dict.fromkeys(r.sub_question for r in state.get("rounds") or []))
+    return JudgeOutcome("partly_enough", owners)
+
+
+def plan_next(
+    state: AgentState, judgement: JudgeOutcome | str, ctx: AgentContext
+) -> tuple[bool, str | None]:
+    """Whether another round runs, and why not when the judge wanted one.
+
+    The limits, in this order: the KB's `max_rounds` (three rounds in which nothing passed the
+    rerank threshold are a definitive "not found", no stop reason; with part of the question
+    still without grounds it is `max_rounds`); a judged KB that allows no model before the
+    answer, which cannot make a new phrasing (`no_new_query`); the deadline (less than the
+    answer's time plus one round's is left: a round that cannot finish is not started); the
+    token cap (no tokens left for another rewrite and judgement after keeping the answer's)."""
+    outcome = as_outcome(judgement, state)
+    if outcome.verdict == "enough":
         return False, None
-    if state.get("round", 0) >= ctx.cfg.agent.max_rounds:
-        return False, "max_rounds"
-    if ctx.deadline.remaining_ms() <= ctx.reserve_ms:
+    agent = ctx.cfg.agent
+    if state.get("round", 0) >= agent.max_rounds:
+        return False, None if outcome.verdict == "not_enough" else "max_rounds"
+    if agent.judge and not agent.rewrite:
+        return False, "no_new_query"
+    if ctx.deadline.remaining_ms() <= ctx.reserve_ms + ctx.settings.agent_round_min_ms:
         return False, "deadline"
     if ctx.budget.exhausted(reserve=ctx.settings.agent_answer_reserve_tokens):
         return False, "token_cap"
@@ -245,20 +298,41 @@ def plan_next(state: AgentState, verdict: str, ctx: AgentContext) -> tuple[bool,
 
 
 async def judge_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
+    """The judge hook (is what was found enough, and which sub-questions are missing), then the
+    guards (`plan_next`) that decide whether another round runs. A judgement that fell back to
+    the rules is recorded in `fallbacks` (the request is then `degraded`)."""
     ctx = runtime.context
     began = time.perf_counter()
     forced: str | None = None
     with layer_span("judge") as span:
         try:
-            verdict = await ctx.hooks.judge(state, ctx)
+            outcome = as_outcome(await ctx.hooks.judge(state, ctx), state)
         except RequestTokenCapExceeded:  # could not even ask: treat as "enough" and say so
-            verdict, forced = "sufficient", "token_cap"
-        loop, stop_reason = plan_next(state, verdict, ctx)
+            outcome, forced = JudgeOutcome("enough"), "token_cap"
+        loop, stop_reason = plan_next(state, outcome, ctx)
         stop_reason = stop_reason or forced
-        span.set_attribute(attr.AGENT_VERDICT, verdict)
+        span.set_attributes(
+            {
+                attr.AGENT_VERDICT: outcome.verdict,
+                attr.JUDGE_MISSING: [m[:300] for m in outcome.missing],
+                attr.JUDGE_MODEL_USED: outcome.used_model,
+            }
+        )
+        if outcome.fallback:
+            span.set_attribute(attr.JUDGE_FALLBACK, outcome.fallback)
         if stop_reason:
             span.set_attribute(attr.AGENT_STOP_REASON, stop_reason)
-    return {"loop": loop, "stop_reason": stop_reason, "timings_ms": {"judge": _ms(began)}}
+    update: dict[str, Any] = {
+        "loop": loop,
+        "stop_reason": stop_reason,
+        "missing": list(outcome.missing),
+        # Without `agent.judge` nothing was judged: the stub's "enough" is not a verdict.
+        "sufficiency": outcome.verdict if ctx.cfg.agent.judge else None,
+        "timings_ms": {"judge": _ms(began)},
+    }
+    if outcome.fallback:
+        update["fallbacks"] = [f"judge:{outcome.fallback}"]
+    return update
 
 
 async def answer_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:

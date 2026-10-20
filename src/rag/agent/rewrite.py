@@ -26,8 +26,9 @@ model failure, a timeout, an unparsable answer or a refused call (token cap), th
 question is searched and the outcome names the reason (`fallback`); the node then marks the
 request `degraded`. A rewrite never fails the request.
 
-Round 2 onwards (P3-03) goes through `next_round`, which gets what the judge found missing.
-Only its signature is built here.
+Round 2 onwards (P3-03) goes through `next_round`, which gets what the judge found missing and
+asks the model for other phrasings of it (multi-query in round two, a HyDE passage in round
+three): `rag.agent.correction`, under the same safety rules.
 """
 
 from __future__ import annotations
@@ -111,7 +112,7 @@ TOKENS_TAG = "untrusted_tokens"
 _OUR_TAGS = re.compile(r"<(?=\s*/?\s*untrusted_)", re.IGNORECASE)
 
 
-def _block(tag: str, text: str) -> str:
+def untrusted_block(tag: str, text: str) -> str:
     """`text` as a block of untrusted data: NFKC (so full-width tags are caught), invisible
     format characters removed, line breaks kept (one earlier question or answer per line),
     our tags neutralised."""
@@ -126,7 +127,7 @@ def _history_text(state: AgentState, ctx: AgentContext) -> str:
     lines = history_lines(state, ctx)
     if not lines:
         return "No earlier conversation."
-    return "Conversation so far, oldest first:\n" + _block(HISTORY_TAG, "\n".join(lines))
+    return "Conversation so far, oldest first:\n" + untrusted_block(HISTORY_TAG, "\n".join(lines))
 
 
 def _messages(
@@ -138,23 +139,23 @@ def _messages(
         _DECLARATIVE if agent.declarative else _PLAIN,
         _SPLIT.format(n=max_queries) if max_queries > 1 else _ONE_QUERY,
     ]
-    parts = [_history_text(state, ctx), "Question:\n" + _block(QUESTION_TAG, question)]
+    parts = [_history_text(state, ctx), "Question:\n" + untrusted_block(QUESTION_TAG, question)]
     if tokens:
         listed = json.dumps(list(tokens), ensure_ascii=False)
         parts.append(
             "Strings from the question that every search query must contain exactly as "
-            "written (a JSON list):\n" + _block(TOKENS_TAG, listed)
+            "written (a JSON list):\n" + untrusted_block(TOKENS_TAG, listed)
         )
     return [SystemMessage(" ".join(instructions)), HumanMessage("\n\n".join(parts))]
 
 
-def _same_language(question: str, queries: Sequence[str], ctx: AgentContext) -> bool:
+def same_language(question: str, queries: Sequence[str], ctx: AgentContext) -> bool:
     setting = ctx.cfg.answer.language
     return answer_language(question, setting) == answer_language(" ".join(queries), setting)
 
 
 # Reasons for a fallback that was decided before any request was sent to the model.
-_NOT_CALLED = frozenset({"token_cap", "no_time", "unavailable"})
+NOT_CALLED = frozenset({"token_cap", "no_time", "unavailable"})
 
 
 class QueryRewriter:
@@ -169,9 +170,12 @@ class QueryRewriter:
         self, state: AgentState, ctx: AgentContext, *, missing: Sequence[str]
     ) -> RewriteOutcome:
         """The queries of round two and later: another wording of what `missing` names (the
-        sub-questions the last round did not find enough for). P3-03 builds this (multi-query,
-        HyDE); until then the queries of the last round are kept."""
-        return RewriteOutcome()
+        sub-questions the last judgement found without grounds): multi-query, then HyDE
+        (`rag.agent.correction`). A KB that allows no model before the answer
+        (`agent.rewrite` off) keeps the queries of the last round."""
+        from rag.agent.correction import corrective_queries  # it imports this module's helpers
+
+        return await corrective_queries(state, ctx, missing=missing)
 
     async def first_round(self, state: AgentState, ctx: AgentContext) -> RewriteOutcome:
         agent = ctx.cfg.agent
@@ -209,7 +213,7 @@ class QueryRewriter:
         if lost:
             logger.info("rewrite lost %s; searching the original question", lost)
             return self._fallback(question, query, "identifiers_lost")
-        if not _same_language(question, queries, ctx):
+        if not same_language(question, queries, ctx):
             return self._fallback(question, query, "language_changed")
         shown = "\n".join(history_lines(state, ctx))
         for text in (*queries, standalone):
@@ -219,7 +223,7 @@ class QueryRewriter:
         if (
             not standalone
             or missing_tokens(tokens, standalone)
-            or not _same_language(question, [standalone], ctx)
+            or not same_language(question, [standalone], ctx)
         ):
             standalone = ""  # the answer gets the question as asked
         return RewriteOutcome(
@@ -234,5 +238,5 @@ class QueryRewriter:
         return RewriteOutcome(
             sub_questions=(query,),
             fallback=reason,
-            used_model=reason not in _NOT_CALLED,
+            used_model=reason not in NOT_CALLED,
         )

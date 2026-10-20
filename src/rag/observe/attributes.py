@@ -62,8 +62,10 @@ GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"  # reasoning tokens in
 ROUTE_RETRIEVE = "rag.route.retrieve"  # the rules decided to retrieve
 ROUTE_REASON = "rag.route.reason"  # which rule decided
 AGENT_ROUND = "rag.agent.round"  # retrieval rounds done so far
-AGENT_VERDICT = "rag.agent.verdict"  # sufficient | insufficient
-AGENT_STOP_REASON = "rag.agent.stop_reason"  # deadline | recursion_limit | token_cap | max_rounds
+AGENT_VERDICT = "rag.agent.verdict"  # enough | partly_enough | not_enough (P3-03)
+AGENT_STOP_REASON = (  # deadline | recursion_limit | token_cap | max_rounds | no_new_query
+    "rag.agent.stop_reason"
+)
 AGENT_TOKENS = "rag.agent.tokens_used"  # tokens spent on model calls by this request so far
 
 # Route, rewrite and clarify steps (design s13-3, s8-1, s8-2; spec P3-02). `NODE_*` are the
@@ -82,6 +84,10 @@ REWRITE_MODEL_USED = "rag.rewrite.model_used"
 REWRITE_STANDALONE = "rag.rewrite.standalone_question"
 REWRITE_QUERIES = "rag.rewrite.queries"  # the search queries, one search each
 REWRITE_FALLBACK = "rag.rewrite.fallback"  # why the original question was searched
+REWRITE_TECHNIQUE = "rag.rewrite.technique"  # round two and later: multi_query | hyde
+JUDGE_MISSING = "rag.judge.missing"  # the sub-questions still without grounds
+JUDGE_MODEL_USED = "rag.judge.model_used"
+JUDGE_FALLBACK = "rag.judge.fallback"  # why the rules alone decided
 CLARIFY_QUESTION = "rag.clarify.question"
 CLARIFY_RESUMED = "rag.clarify.resumed"  # the step ran again with the caller's answer
 

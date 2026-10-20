@@ -17,7 +17,7 @@ Rules that keep one request from seeing another's retrieved chunks:
 """
 
 import re
-from typing import Annotated, Any, Self, TypedDict
+from typing import Annotated, Any, Literal, Self, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -53,13 +53,33 @@ def thread_id(session_id: str | None, run_id: str) -> str:
     return f"{session_id}:{run_id}"
 
 
+QueryKind = Literal["original", "multi_query", "hyde"]
+
+
+class SearchQuery(BaseModel):
+    """One search of a round: the text sent to the retrieval layer, the sub-question it is
+    for (`owner`, the key the judge and the answer's context budget group by), and how the
+    text was made. A `hyde` text is a model-written passage, used as a query only: it is never
+    given to the judge or the answer as if it were a source (s8-2, spec P3-03)."""
+
+    text: str
+    owner: str
+    kind: QueryKind = "original"
+
+
 class RetrievalRound(BaseModel):
     """What one search of one sub-question returned (the part of `RetrievalResult` the graph
-    keeps). Several of these are appended per request: one per sub-question and round."""
+    keeps). Several of these are appended per request: one per search of each round. In round
+    one `sub_question` is the query itself; later rounds search other phrasings (`query`) of
+    the same `sub_question`."""
 
     round: int = Field(ge=1)
     sub_question: str
+    query: str = ""
+    """The text searched, when it is not the sub-question (a phrasing, a HyDE passage)."""
     chunks: list[Chunk] = Field(default_factory=list)
+    below_threshold: list[Chunk] = Field(default_factory=list)
+    """With `not_found`: the nearest chunks the retrieval layer kept apart (s10-2)."""
     not_found: bool = False
     degraded: bool = False
     rerank_timeout: bool = False
@@ -70,12 +90,16 @@ class RetrievalRound(BaseModel):
     timings_ms: dict[str, float] = Field(default_factory=dict)
 
     @classmethod
-    def from_result(cls, round_no: int, sub_question: str, result: RetrievalResult) -> Self:
+    def from_result(
+        cls, round_no: int, sub_question: str, result: RetrievalResult, *, query: str = ""
+    ) -> Self:
         scores = [h.score for h in result.rerank if h.score is not None]
         return cls(
             round=round_no,
             sub_question=sub_question,
+            query=query if query != sub_question else "",
             chunks=list(result.chunks),
+            below_threshold=list(result.below_threshold),
             not_found=result.not_found,
             degraded=result.degraded,
             rerank_timeout=result.rerank_timeout,
@@ -130,8 +154,13 @@ class AgentState(TypedDict, total=False):
     sub_questions: list[str]
     """The search queries of the first round (rewrite) or of the next one (P3-03)."""
     missing: list[str]
-    """What the last round did not find, per sub-question (set by the P3-03 judge, read by the
-    rewrite hook of round two)."""
+    """The sub-questions (first-round queries) the last judgement found without grounds: set by
+    the judge, read by the rewrite hook of the next round and the judge after it."""
+    sufficiency: str | None
+    """The judge's last verdict: enough, partly_enough or not_enough (None: no judge)."""
+    search_plan: list[SearchQuery]
+    """The searches of the next round, set by the rewrite hook from round two on (empty: search
+    `sub_questions`, as round one does)."""
     fallbacks: Annotated[list[str], accumulate]
     """Steps that fell back to the rules or the original question: `route:timeout`,
     `rewrite:parse_failed` ... (any entry sets the result's `degraded`)."""
@@ -166,4 +195,5 @@ MSGPACK_ALLOWED: tuple[type, ...] = (
     ErrorCategory,
     HistoryTurn,
     RetrievalRound,
+    SearchQuery,
 )

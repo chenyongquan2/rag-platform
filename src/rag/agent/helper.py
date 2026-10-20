@@ -115,22 +115,32 @@ def history_lines(state: AgentState, ctx: AgentContext) -> list[str]:
 
 
 async def ask_helper[SchemaT: BaseModel](
-    ctx: AgentContext, schema: type[SchemaT], messages: list[BaseMessage]
+    ctx: AgentContext,
+    schema: type[SchemaT],
+    messages: list[BaseMessage],
+    *,
+    timeout_ms: int | None = None,
+    model: Any = None,
 ) -> SchemaT:
-    """`schema` filled in by the small model from `messages`; `HelperFailed` when it cannot."""
+    """`schema` filled in by the small model from `messages`; `HelperFailed` when it cannot.
+
+    `timeout_ms` is the longest the call may take (default `agent_rewrite_timeout_ms`; the
+    judge passes its own); `model` is the chat model or the function that makes it (default:
+    the helper model of the context)."""
     left_ms = ctx.deadline.remaining_ms() - ctx.reserve_ms
-    timeout_ms = min(ctx.settings.agent_rewrite_timeout_ms, left_ms)
+    allowed_ms = ctx.settings.agent_rewrite_timeout_ms if timeout_ms is None else timeout_ms
+    timeout_ms = min(allowed_ms, left_ms)
     if timeout_ms <= 0:
         raise HelperFailed("no_time", "the time kept for the answer is all that is left")
     span = trace.get_current_span()
     spent_before = ctx.budget.spent
     try:
         try:
-            model = ctx.helper_model_instance()
+            chat = ctx.helper_model_instance() if model is None else ctx.model_instance(model)
         except Exception as exc:  # no gateway configured, unknown profile, no price
             logger.warning("no helper model: %s", exc)
             raise HelperFailed("unavailable", str(exc)) from exc
-        runnable = ctx.guard(structured_output(model, schema, settings=ctx.settings))
+        runnable = ctx.guard(structured_output(chat, schema, settings=ctx.settings))
         with _collect_ledger_rows() as rows:
             try:
                 async with asyncio.timeout(timeout_ms / 1000.0) as limit:

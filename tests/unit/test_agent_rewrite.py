@@ -361,7 +361,7 @@ def test_token_cap_before_rewrite_falls_back_and_still_answers() -> None:
 
 
 def test_next_round_signature_takes_what_was_missing() -> None:
-    # Round one is built; round two is P3-03's. The hook already hands it what was missing.
+    # The hook hands round two what was missing (P3-03 builds the default: correction.py).
     seen: list[tuple[int, list[str]]] = []
 
     class Next(QueryRewriter):
@@ -370,10 +370,11 @@ def test_next_round_signature_takes_what_was_missing() -> None:
             return RewriteOutcome(sub_questions=("another wording",))
 
     state: Any = {"question": "q", "round": 1, "missing": ["part b"]}
-    ctx = SimpleNamespace()
+    ctx = SimpleNamespace(cfg=kb_config(KB))
     assert asyncio.run(Next()(state, ctx)).sub_questions == ("another wording",)
     assert seen == [(1, ["part b"])]
-    # The default keeps the queries of the last round.
+    # The default (P3-03 fills it in: tests/unit/test_agent_correction.py) keeps the queries of
+    # the last round when the KB allows no model before the answer (`agent.rewrite` off).
     assert asyncio.run(QueryRewriter()(state, ctx)) == RewriteOutcome()
 
 
