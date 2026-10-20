@@ -368,9 +368,17 @@ async def _run(
     max_cny: float | None,
     spent_before: float,
     progress: Callable[[int, int, SystemRecord], None] | None,
+    retry_errors: bool = False,
 ) -> RunStats:
     repair_tail(records_path)
     existing = read_records(records_path)
+    if retry_errors and any(r.status == "error" for r in existing):
+        # An errored question counts as done unless asked: drop those records and run them again
+        # (what they cost stays in the ledger; the file no longer counts it).
+        existing = [r for r in existing if r.status != "error"]
+        records_path.write_text(
+            "".join(r.model_dump_json() + "\n" for r in existing), encoding="utf-8", newline=""
+        )
     done = {r.qid for r in existing}
     spent = spent_before + sum(r.usage.cny for r in existing)
     stats = RunStats(skipped=sum(1 for i in items if i.qid in done))
@@ -401,6 +409,7 @@ async def run_standard(
     spent_before: float = 0.0,
     clock: Callable[[], float] = time.perf_counter,
     progress: Callable[[int, int, SystemRecord], None] | None = None,
+    retry_errors: bool = False,
 ) -> RunStats:
     """Standard RAG over `items`: search chain, context, one answer call."""
 
@@ -408,7 +417,13 @@ async def run_standard(
         return await _standard_one(item, contexts, kb_config=kb_config, model=model, clock=clock)
 
     return await _run(
-        items, records_path, one, max_cny=max_cny, spent_before=spent_before, progress=progress
+        items,
+        records_path,
+        one,
+        max_cny=max_cny,
+        spent_before=spent_before,
+        progress=progress,
+        retry_errors=retry_errors,
     )
 
 
@@ -428,6 +443,7 @@ async def run_agentic(
     judge_model: Any = None,
     clock: Callable[[], float] = time.perf_counter,
     progress: Callable[[int, int, SystemRecord], None] | None = None,
+    retry_errors: bool = False,
 ) -> RunStats:
     """The ask_docs graph over `items` (`runtime` built with `tracer.hooks()`); models default
     to the runtime's: `online` for the answer, `cheap` for route, rewrite and judge."""
@@ -446,5 +462,11 @@ async def run_agentic(
         )
 
     return await _run(
-        items, records_path, one, max_cny=max_cny, spent_before=spent_before, progress=progress
+        items,
+        records_path,
+        one,
+        max_cny=max_cny,
+        spent_before=spent_before,
+        progress=progress,
+        retry_errors=retry_errors,
     )

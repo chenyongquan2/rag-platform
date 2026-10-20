@@ -14,7 +14,7 @@ import random
 from collections.abc import Sequence
 from pathlib import Path
 
-from rag.eval.agentic.records import SystemRecord
+from rag.eval.agentic.records import JudgeLine, SystemRecord
 
 SHEET_COLUMNS = [
     "sample_id",
@@ -42,6 +42,10 @@ Score each of the two answers of a row on its own, from 1 to 3:
   3 completely correct, accurate and/or factual
 
 Leave both cells of a row empty to skip it. Do not open human_key.csv before you are done.
+
+How the rows were chosen: every question where the judge scored the two answers differently is
+in the sheet; the other rows are drawn at random (seeded) per question type. The sheet does not
+say which rows are which.
 """
 
 
@@ -52,10 +56,30 @@ def _quotas(n: int) -> dict[str, int]:
     return quotas
 
 
+def _differing(pairs: dict[str, dict[str, SystemRecord]], lines: Sequence[JudgeLine]) -> list[str]:
+    """Questions whose first-pass judge scores differ between the two systems."""
+    scores = {(x.system, x.qid): x.score for x in lines if x.run == 1 and x.score is not None}
+    return sorted(
+        q
+        for q, p in pairs.items()
+        if len(p) == 2
+        and ("standard", q) in scores
+        and ("agentic", q) in scores
+        and scores["standard", q] != scores["agentic", q]
+    )
+
+
 def export_human_sheet(
-    records: Sequence[SystemRecord], *, n: int = 30, seed: int = 0, out_dir: str | Path
+    records: Sequence[SystemRecord],
+    *,
+    n: int = 30,
+    seed: int = 0,
+    out_dir: str | Path,
+    lines: Sequence[JudgeLine] = (),
 ) -> tuple[Path, Path]:
-    """Write the sheet, the key and the rubric; returns (sheet, key)."""
+    """Write the sheet, the key and the rubric; returns (sheet, key). With the judge's `lines`,
+    every question where the two systems' scores differ is included (at most `n` of them), the
+    rest of the `n` rows is drawn at random by type."""
     if n < 1:
         raise ValueError("n must be at least 1")
     pairs: dict[str, dict[str, SystemRecord]] = {}
@@ -63,9 +87,14 @@ def export_human_sheet(
         if r.answerable:
             pairs.setdefault(r.qid, {})[r.system] = r
     rng = random.Random(seed)
-    chosen: list[str] = []
-    for qtype, quota in _quotas(n).items():
-        qids = sorted(q for q, p in pairs.items() if len(p) == 2 and p["standard"].qtype == qtype)
+    must = _differing(pairs, lines)
+    chosen: list[str] = rng.sample(must, n) if len(must) > n else list(must)
+    for qtype, quota in _quotas(n - len(chosen)).items():
+        qids = sorted(
+            q
+            for q, p in pairs.items()
+            if len(p) == 2 and p["standard"].qtype == qtype and q not in chosen
+        )
         chosen.extend(rng.sample(qids, min(quota, len(qids))))
     rng.shuffle(chosen)
     out = Path(out_dir)

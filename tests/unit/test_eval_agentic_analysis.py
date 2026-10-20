@@ -313,6 +313,30 @@ def test_judge_stability() -> None:
     assert result.mean_abs_diff == pytest.approx(1 / 3)
 
 
+def test_gold_hit_two_hop_needs_every_page() -> None:
+    from rag.eval.agentic.analysis import gold_hit
+
+    two_hop = rec("agentic", "q1", "two_hop", relevant_pages=["a", "b"], requires="all")
+    assert gold_hit(two_hop, ["a"]) is False  # one of the two pages is a miss
+    assert gold_hit(two_hop, ["b", "x"]) is False
+    assert gold_hit(two_hop, ["b", "a", "x"]) is True
+    either = rec("agentic", "q2", relevant_pages=["a", "b"], requires="any")
+    assert gold_hit(either, ["b"]) is True and gold_hit(either, ["x"]) is False
+    assert gold_hit(rec("agentic", "q3", "no_answer"), ["a"]) is False  # no gold page
+
+
+def test_over_15s_and_30s_boundaries_are_strict() -> None:
+    records = [
+        rec("agentic", "q1", total_ms=15000),
+        rec("agentic", "q2", total_ms=15001),
+        rec("agentic", "q3", total_ms=30000),
+        rec("agentic", "q4", total_ms=30001),
+    ]
+    row = next(r for r in cost_latency(records) if r.qtype == "all")
+    assert (row.over_15s, row.over_30s) == (3, 1)  # exactly 15 s or 30 s is not over
+    assert limits_report(records, []).over_deadline_ms == 1
+
+
 def test_clean_refusal_excludes_errors() -> None:
     """A run that crashed (a retrieval error, a gateway timeout) gave no answer, so it counts as
     a refusal by the fixed definition; the clean refusal rate leaves those out."""

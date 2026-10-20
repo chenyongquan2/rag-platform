@@ -177,6 +177,7 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
                         max_cny=args.max_cny,
                         spent_before=before,
                         progress=_progress(system),
+                        retry_errors=args.retry_errors,
                     )
                 )
             else:
@@ -197,6 +198,7 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
                         helper_model=helper,
                         judge_model=judge,
                         progress=_progress(system),
+                        retry_errors=args.retry_errors,
                     )
                 )
             print(
@@ -257,7 +259,11 @@ def _report(args: argparse.Namespace) -> int:
 def _human_sheet(args: argparse.Namespace) -> int:
     out = _out(args)
     sheet, key = export_human_sheet(
-        _all_records(out), n=args.n, seed=args.seed, out_dir=out / "human"
+        _all_records(out),
+        n=args.n,
+        seed=args.seed,
+        out_dir=out / "human",
+        lines=read_judge_lines(judge_file(out)),
     )
     print(f"wrote {sheet} (to fill, blind) and {key} (do not open before scoring)")
     return 0
@@ -304,6 +310,11 @@ def _parser() -> argparse.ArgumentParser:
     p_run.add_argument("--qids", help="only these question ids, comma separated")
     p_run.add_argument(
         "--deadline-ms", type=int, help="total deadline of each graph run (default: the settings')"
+    )
+    p_run.add_argument(
+        "--retry-errors",
+        action="store_true",
+        help="run again the questions whose record is an error",
     )
     p_run.add_argument("--max-cny", type=float, default=DEFAULT_MAX_CNY)
     p_run.add_argument("--index-prefix", default="")

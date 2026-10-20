@@ -247,6 +247,40 @@ def test_cli_rejects_a_run_past_the_stop_line(env: dict[str, Any]) -> None:
     )
 
 
+def test_cli_ledger_stop_line_is_inclusive(env: dict[str, Any]) -> None:
+    """A ledger at exactly the stop line leaves no room: refuse; a cent below it: go on."""
+    ledger = Path(env["settings"].cost_ledger_path)
+    settings = env["settings"].model_copy(update={"budget_stop_cny": 28.0})
+    argv = ["run", "--system", "standard", "--out", str(env["out"])]
+    ledger.write_text('{"kind": "chat", "cny": 28.0}\n', encoding="utf-8")
+    assert cli.main(argv, settings=settings) == 2
+    below = ledger.with_name("below.jsonl")  # a file of its own: the ledger caches its total
+    below.write_text('{"kind": "chat", "cny": 27.99}\n', encoding="utf-8")
+    settings = settings.model_copy(update={"cost_ledger_path": str(below)})
+    assert cli.main(argv, settings=settings) == 0
+
+
+def test_human_sheet_always_holds_the_questions_where_the_scores_differ(tmp_path: Path) -> None:
+    records = [*_pair("single_hop", 40), *_pair("two_hop", 20), *_pair("colloquial", 15)]
+    differ = {"single_hop:31", "two_hop:17", "colloquial:09"}
+    lines = [
+        JudgeLine(
+            system=r.system, qid=r.qid, run=1,
+            score=3 if r.system == "standard" or r.qid not in differ else 1,
+        )
+        for r in records
+        if r.answerable
+    ]  # fmt: skip
+    for seed in range(5):  # whatever the random part picks, these three are in
+        _sheet, key = export_human_sheet(
+            records, n=30, seed=seed, out_dir=tmp_path / str(seed), lines=lines
+        )
+        qids = {k["qid"] for k in csv.DictReader(key.open(encoding="utf-8-sig", newline=""))}
+        assert differ <= qids and len(qids) == 30
+    # The first line of the rubric file says how the rows were chosen.
+    assert "differ" in (tmp_path / "0" / "human_rubric.txt").read_text(encoding="utf-8")
+
+
 def test_cli_selects_questions_and_passes_the_deadline(
     env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

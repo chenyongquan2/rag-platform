@@ -337,3 +337,80 @@ def test_spend_limit_stops_run(tmp_path: Path) -> None:
     assert isinstance(
         SystemRecord.model_validate_json(out.read_text("utf-8").splitlines()[0]), SystemRecord
     )
+
+
+def test_spend_limit_boundary_is_inclusive(tmp_path: Path) -> None:
+    """The run stops once the spend has *reached* the limit, not only when it passed it."""
+    backend = ScriptedSearchBackend(KB, default=pages_result(KB, [1]))
+    items = [_item("q1", "Question 1?", [f"{KB}:p1.md"])]
+
+    def run(limit: float) -> Any:
+        return asyncio.run(
+            run_standard(
+                items,
+                records_path=tmp_path / f"standard-{limit}.jsonl",
+                contexts=RetrieverContexts(backend, kb=KB, top_k=8),
+                kb_config=kb_config(KB),
+                model=_answer_model(tmp_path),
+                max_cny=limit,
+                spent_before=0.5,
+            )
+        )
+
+    assert (run(0.5).ran, run(0.5).stopped) == (0, "budget")  # exactly at the limit: stop
+    assert run(0.5000001).ran == 1  # just below it: go on
+
+
+def test_retry_errors_reruns_only_the_errored_questions(tmp_path: Path) -> None:
+    backend = ScriptedSearchBackend(KB, default=pages_result(KB, [1]))
+    items = [_item(f"q{i}", f"Question {i}?", [f"{KB}:p1.md"]) for i in (1, 2, 3)]
+    out = tmp_path / "standard.jsonl"
+    failing = RetrieverContexts(
+        ScriptedSearchBackend(KB, raises=RuntimeError("es down")), kb=KB, top_k=8
+    )
+    asyncio.run(
+        run_standard(
+            items[:1], records_path=out, contexts=failing, kb_config=kb_config(KB),
+            model=_answer_model(tmp_path),
+        )
+    )  # fmt: skip
+    asyncio.run(
+        run_standard(
+            items[1:], records_path=out,
+            contexts=RetrieverContexts(backend, kb=KB, top_k=8),
+            kb_config=kb_config(KB), model=_answer_model(tmp_path),
+        )
+    )  # fmt: skip
+    assert [r.status for r in read_records(out)] == ["error", "answered", "answered"]
+
+    def again(retry: bool) -> Any:
+        return asyncio.run(
+            run_standard(
+                items, records_path=out, contexts=RetrieverContexts(backend, kb=KB, top_k=8),
+                kb_config=kb_config(KB), model=_answer_model(tmp_path), retry_errors=retry,
+            )
+        )  # fmt: skip
+
+    assert again(False).ran == 0  # an errored question counts as done unless asked
+    stats = again(True)
+    assert (stats.ran, stats.skipped) == (1, 2)
+    records = read_records(out)
+    assert [r.qid for r in records] == ["q2", "q3", "q1"] and all(
+        r.status == "answered" for r in records
+    )
+
+
+def test_usage_by_profile_names_embedding_and_unprofiled_calls() -> None:
+    from rag.eval.agentic.records import usage_by_profile
+
+    rows = [
+        {"kind": "chat", "profile": "cheap", "cny": 0.1, "prompt_tokens": 10},
+        {"kind": "chat", "profile": "online", "cny": 0.2},
+        {"kind": "chat", "cny": 0.3},  # a call with no profile
+        {"kind": "embedding", "profile": "ignored", "cny": 0.01},
+        {"kind": "embedding", "cny": 0.01},
+    ]
+    result = usage_by_profile(rows)
+    assert sorted(result) == ["chat", "cheap", "embedding", "online"]
+    assert result["embedding"].calls == 2 and result["chat"].calls == 1
+    assert result["cheap"].prompt_tokens == 10
