@@ -331,7 +331,8 @@ model says the chunks hold what the sub-question asks for), **partly enough** (s
 but a sub-question is still without grounds; `missing` names which) and **not enough** (nothing
 passed the threshold in any round). Rules come first: a sub-question whose chunks are all below
 the threshold is missing without asking, and when that is true of all of them the model is not
-called. The model (`AGENT_JUDGE_PROFILE`, default `cheap`; `ask_docs(judge_model=...)`) sees the
+called; with `agent.judge_skip_score` a sub-question that has a chunk scored at or above it is
+grounded without asking (P3-06). The model (`AGENT_JUDGE_PROFILE`, default `cheap`; `ask_docs(judge_model=...)`) sees the
 chunks that passed, best first, capped to `AGENT_JUDGE_CONTEXT_TOKENS`, in a marked untrusted
 block, and answers grounded or not per numbered sub-question. A failure, timeout, refused call or
 an answer that does not name every sub-question makes the rules decide alone: `judge:<reason>`
@@ -343,7 +344,13 @@ answer passage (HyDE, `agent.hyde`). The phrasings pass the rewrite's rules (ide
 same language, no instruction-like text, on topic, nothing searched twice) and a HyDE passage is
 a search query only: it is never shown to the judge or the answer. Results of all rounds
 accumulate and are deduplicated by chunk id. No round starts that cannot finish
-(`AGENT_ROUND_MIN_MS` plus the answer's time must be left, else `stop_reason: deadline`); when no
+(the answer's time plus `AGENT_ROUND_MIN_MS`, or 0.9 times the last round's time when that is more,
+must be left, else `stop_reason: deadline`). A search of round two or later is made only with
+`AGENT_SEARCH_MIN_MS` before the answer's time (the ones that do not fit are dropped, one phrasing
+of every sub-question first; none fits: `stop_reason: deadline` and straight to the answer); after
+a rerank timeout only the chunks the reranker scored are kept; a search of a later round that
+fails (`retrieval_timeout` / `retrieval_failed` in the categories, `degraded`) does not fail the
+request: it is answered from the earlier rounds. Round one still fails the request. When no
 new phrasing can be made (model failure, every phrasing refused, or `agent.rewrite` off) the run
 stops with `stop_reason: no_new_query`. Three rounds with nothing above the threshold are a plain
 `not_found` (no stop reason) with `nearest`, the closest chunks of all rounds; part of the
@@ -368,7 +375,7 @@ no accuracy, which would only be the share of "not enough" labels). `--rescue` a
 | Setting (env var) | Default | Meaning |
 |---|---|---|
 | `AGENT_DEADLINE_MS` | 30000 | Total time of one request; at most `SEARCH_MAX_DEADLINE_MS` |
-| `AGENT_ANSWER_RESERVE_MS` | 12000 | Time kept for writing the answer (below the deadline) |
+| `AGENT_ANSWER_RESERVE_MS` | 6000 | Time kept for writing the answer (below the deadline); the answer step took a median 2.6 s, at most 6.0 s in P3-05 |
 | `AGENT_RECURSION_LIMIT` | 25 | LangGraph steps of one run (6 for one round, 3 more per further round) |
 | `AGENT_TOKEN_CAP` | 20000 | Model tokens of one request |
 | `AGENT_ANSWER_RESERVE_TOKENS` | 6000 | Tokens calls before the answer must leave (below the cap) |
@@ -381,7 +388,10 @@ no accuracy, which would only be the share of "not enough" labels). `--rescue` a
 | `AGENT_JUDGE_PROFILE` | `cheap` | Chat profile of the sufficiency judge |
 | `AGENT_JUDGE_TIMEOUT_MS` | 9000 | Longest one judge call (never into the answer's time) |
 | `AGENT_JUDGE_CONTEXT_TOKENS` | 1500 | Estimated tokens of fragments shown to the judge |
-| `AGENT_ROUND_MIN_MS` | 8000 | Time one more round needs, on top of the answer's time |
+| `AGENT_ROUND_MIN_MS` | 8000 | Time one more round needs, on top of the answer's time (floor; see `AGENT_ROUND_RATIO`) |
+| `AGENT_ROUND_RATIO` | 0.9 | A further round also needs this share of the last round's time (P3-06) |
+| `AGENT_SEARCH_MIN_MS` | 4000 | Least time a search of round two or later gets (after the answer's time); with less it is not made (P3-06) |
+| `SEARCH_RERANK_RESERVE_MS` | 2000 | The query-vector wait ends this long (at most half the limit) before the deadline, so the rerank has time (P3-06) |
 | `SSE_HEARTBEAT_S` | 10 | Seconds of silence before the stream sends a heartbeat comment line |
 | `SSE_QUEUE_MAX_EVENTS` | 5000 | Events of one stream waiting for the client; past it the run is cancelled |
 | `SERVICE_SHUTDOWN_TIMEOUT_S` | 5 | Seconds the server waits for connections to close at shutdown |
@@ -391,13 +401,14 @@ no accuracy, which would only be the share of "not enough" labels). `--rescue` a
 | `SESSION_LOCK_URL` | `memory://` | Session locks (`file://data/locks` for several processes) |
 | KB config `agent.max_rounds` | 3 | Retrieval rounds of one request at most |
 | KB config `agent.rewrite` | false (`hf_docs`: true) | The rewrite step may call the small model |
-| KB config `agent.declarative` | true | Write the search query as a statement |
+| KB config `agent.declarative` | true (`hf_docs`: false since P3-06) | Write the search query as a statement |
 | KB config `agent.max_sub_questions` | 3 | Most searches of a split question (1: never split) |
 | KB config `agent.clarify` | false (`hf_docs`: true) | Ask the caller back when the question is too vague |
 | KB config `agent.route_model` | false (`hf_docs`: true) | The route may ask the small model about what rules leave open |
 | KB config `agent.judge` | false (`hf_docs`: true) | Judge after each round, correct with more rounds |
 | KB config `agent.multi_queries` | 3 | Phrasings of each missing sub-question in round 2 |
 | KB config `agent.hyde` | true | Round 3 searches a hypothetical answer passage |
+| KB config `agent.judge_skip_score` | null (`hf_docs`: 0.98) | A sub-question with a chunk scored at or above this needs no judge call (P3-06) |
 
 ## Streaming answers and the Q&A page (P3-04)
 
@@ -547,6 +558,10 @@ uv run python -m rag.eval.agentic run --system both --max-cny 4.3   # continues 
 uv run python -m rag.eval.agentic judge --runs 2
 uv run python -m rag.eval.agentic report --md data/reports/p3-05/report.md
 uv run python -m rag.eval.agentic human-sheet --n 30   # blind A/B sheet for the owner
+# P3-06: a new graph run on chosen questions, set beside the P3-05 records (A, B before, B after)
+uv run python -m rag.eval.agentic run --system agentic --out data/reports/p3-06 --qids ID,ID,...
+uv run python -m rag.eval.agentic judge --out data/reports/p3-06
+uv run python -m rag.eval.agentic compare --before data/reports/p3-05 --after data/reports/p3-06
 ```
 
 ## Synthetic question sets

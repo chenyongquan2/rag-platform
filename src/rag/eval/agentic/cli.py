@@ -8,6 +8,7 @@ uv run python -m rag.eval.agentic judge --out DIR [--runs 2] [--model M] [--conc
 uv run python -m rag.eval.agentic report --out DIR [--md FILE]
 uv run python -m rag.eval.agentic human-sheet --out DIR [--n 30] [--seed 0]
 uv run python -m rag.eval.agentic project --out DIR [--judge-cny-per-call 0.0014]
+uv run python -m rag.eval.agentic compare --before DIR --after DIR [--md FILE]
 
 `run` answers the question sets (public single-hop, two-hop, colloquial, no-answer) by standard
 RAG and/or the real `ask_docs` graph, one question at a time, appending each result to
@@ -16,7 +17,9 @@ after a crash or continues a pilot (`--take`) into the full run. The run stops b
 once this spec's spend (both systems' records and the judge's lines in DIR) has reached
 `--max-cny`, and refuses to start when the cost ledger is already past the budget stop line.
 `judge` scores the answerable records with the P1-04 judge (1-3 scale), `--runs` passes.
-`report` and `project` call no model.
+`report`, `project` and `compare` call no model. `compare` (spec P3-06) sets a new run of the
+graph (`--after`) beside the P3-05 records of standard RAG and of the graph (`--before`), on the
+questions the new run has, by group (what happened to the question in P3-05).
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from typing import Any
 from rag.agent import AgentHooks, AgentRuntime
 from rag.config import KnowledgeBaseConfig, ServiceSettings, repo_path
 from rag.cost import CostLedger
+from rag.eval.agentic.analysis import judge_scores
 from rag.eval.agentic.human import export_human_sheet
 from rag.eval.agentic.judging import judge_records
 from rag.eval.agentic.records import (
@@ -44,6 +48,7 @@ from rag.eval.agentic.records import (
 from rag.eval.agentic.report import project_cost, render_report
 from rag.eval.agentic.runner import REPORTS_ROOT, Tracer, run_agentic, run_standard
 from rag.eval.agentic.sets import QTYPES, EvalItem, load_items
+from rag.eval.agentic.subset import compare_subset
 from rag.eval.answer.cli import build_answer_model, build_judge_model
 from rag.eval.answer.judge import JudgeConfig
 from rag.eval.answer.runner import RetrieverContexts
@@ -270,6 +275,34 @@ def _human_sheet(args: argparse.Namespace) -> int:
     return 0
 
 
+def _compare(args: argparse.Namespace) -> int:
+    before, after = Path(args.before), Path(args.after)
+
+    def records(out: Path, system: str) -> dict[str, SystemRecord]:
+        return {r.qid: r for r in read_records(system_file(out, system))}
+
+    standard, old, new = (
+        records(before, "standard"),
+        records(before, "agentic"),
+        records(after, "agentic"),
+    )
+    if not new:
+        raise UsageError(f"no graph records under {after}")
+    old_lines = read_judge_lines(judge_file(before))
+    new_lines = read_judge_lines(judge_file(after))
+    scores = {
+        "A standard": judge_scores(old_lines, "standard"),
+        "B before": judge_scores(old_lines, "agentic"),
+        "B after": judge_scores(new_lines, "agentic"),
+    }
+    text = compare_subset(standard, old, new, scores)
+    if args.md:
+        Path(args.md).write_text(text, encoding="utf-8", newline="\n")
+        print(f"wrote {args.md}")
+    _echo(text)
+    return 0
+
+
 def _project(args: argparse.Namespace) -> int:
     out = _out(args)
     pilot = _all_records(out)
@@ -336,6 +369,11 @@ def _parser() -> argparse.ArgumentParser:
     p_sheet.add_argument("--seed", type=int, default=0)
     add_out(p_sheet)
 
+    p_cmp = sub.add_parser("compare", help="a new graph run beside the P3-05 records (P3-06)")
+    p_cmp.add_argument("--before", required=True, help="P3-05 records directory")
+    p_cmp.add_argument("--after", required=True, help="records directory of the new graph run")
+    p_cmp.add_argument("--md", help="also write the Markdown to this file")
+
     p_proj = sub.add_parser("project", help="project the cost of the full run from the records")
     p_proj.add_argument("--kb", default="hf_docs")
     p_proj.add_argument("--judge-cny-per-call", type=float, default=0.0014)
@@ -351,7 +389,12 @@ def main(argv: Sequence[str] | None = None, *, settings: ServiceSettings | None 
         if args.command in ("run", "judge"):
             settings = settings if settings is not None else ServiceSettings()
             return (_run if args.command == "run" else _judge)(args, settings)
-        handler = {"report": _report, "human-sheet": _human_sheet, "project": _project}
+        handler = {
+            "report": _report,
+            "human-sheet": _human_sheet,
+            "project": _project,
+            "compare": _compare,
+        }
         return handler[args.command](args)
     except UsageError as exc:
         print(f"error: {exc}", file=sys.stderr)
