@@ -105,19 +105,25 @@ class RetrievalRound(BaseModel):
         *,
         query: str = "",
         kind: QueryKind = "original",
+        scored_only: bool = False,
     ) -> Self:
-        """The round of one search. After a rerank timeout (some candidates, or all, without a
-        rerank score) only the chunks the reranker scored count (spec P3-06): `search_docs` keeps
-        the unscored ones behind the scored ones because it has no second chance (s16-8), but
-        here a chunk nobody judged is no evidence for the judge or the answer, and the graph can
-        search again. Scored chunks at or above the threshold stay as `chunks`, scored ones below
-        it (best three) go to `below_threshold`; none at or above: the round is `not_found`. The
-        round still says `rerank_timeout`."""
+        """The round of one search.
+
+        After a rerank timeout (some candidates, or all, without a rerank score) the result has
+        the unscored chunks behind the scored ones and nothing cut by the threshold (s16-8).
+        `scored_only` (spec P3-06; the graph sets it for round two and later, when an earlier
+        round exists to answer from and the graph can search again) keeps only the chunks the
+        reranker scored: scored chunks at or above the threshold stay as `chunks`, scored ones
+        below it (best three) go to `below_threshold`; none at or above: the round is
+        `not_found`. Round one is not cut like that: nothing else has been found, so the unscored
+        fused chunks stay for the answer, as `search_docs` returns them (the judge does not
+        count them as grounds). Either way the round keeps `rerank_timeout`: the flag says the
+        search was cut short, not that chunks are still there."""
         scores = [h.score for h in result.rerank if h.score is not None]
         chunks = list(result.chunks)
         below = list(result.below_threshold)
         not_found = result.not_found
-        if result.rerank_timeout:
+        if scored_only and result.rerank_timeout:
             threshold = result.threshold.threshold if result.threshold is not None else 0.0
             scored = [c for c in chunks if c.rerank_score is not None]
             chunks = [c for c in scored if (c.rerank_score or 0.0) >= threshold]
@@ -172,6 +178,8 @@ class AgentState(TypedDict, total=False):
     needs_retrieval: bool
     needs_clarification: bool
     two_hop: bool
+    multi_hop: str
+    """The rules' signal that the question may need two searches: `no`, `maybe` or `yes`."""
     clarify_question: str | None
     """The question to ask the caller (set by route, read by clarify)."""
     clarification: str | None

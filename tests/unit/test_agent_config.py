@@ -15,8 +15,8 @@ from rag.testing import observe_settings
 def test_agent_settings_defaults_and_validation() -> None:
     s = observe_settings()
     assert s.agent_deadline_ms == 30_000
-    # 6 s since P3-06 (the answer step took at most 6.0 s in the P3-05 run; it was 12 s).
-    assert s.agent_answer_reserve_ms == 6_000
+    # 7 s since P3-06 (answer step P99 6.0 s, 6.8 to 7.0 s on a busy machine; it was 12 s).
+    assert s.agent_answer_reserve_ms == 7_000
     assert s.agent_recursion_limit == 25
     assert s.agent_token_cap == 20_000
     assert s.agent_answer_reserve_tokens == 6_000
@@ -138,13 +138,15 @@ def test_time_fix_settings_are_named_keys_with_checked_ranges(
 ) -> None:
     """Spec P3-06 AC11: the new limits are explicit settings with defaults and ranges."""
     s = observe_settings()
-    assert (s.agent_search_min_ms, s.agent_round_ratio) == (4_000, 0.9)
-    assert s.search_rerank_reserve_ms == 2_000
+    # Measured on a busy machine: 4.5 s for a whole search, so 6 s; answer P99 6.8 to 7.0 s.
+    assert (s.agent_search_min_ms, s.agent_round_ratio) == (6_000, 0.9)
+    assert (s.agent_rerank_reserve_ms, s.agent_answer_max_tokens) == (3_000, 1_536)
     for bad in (
         {"agent_search_min_ms": -1},
         {"agent_round_ratio": -0.1},
         {"agent_round_ratio": 2.5},
-        {"search_rerank_reserve_ms": -1},
+        {"agent_rerank_reserve_ms": -1},
+        {"agent_answer_max_tokens": 0},
     ):
         with pytest.raises(ValueError):
             observe_settings(**bad)
@@ -159,3 +161,16 @@ def test_time_fix_settings_are_named_keys_with_checked_ranges(
     for bad_score in (-0.1, 1.5):
         with pytest.raises(ValidationError):
             AgentConfig(judge_skip_score=bad_score)
+
+
+def test_judge_skip_score_must_not_be_below_the_rerank_threshold() -> None:
+    """A score below the threshold would call a chunk that does not pass "sure"."""
+    from rag.config import RetrievalConfig
+
+    retrieval = RetrievalConfig(threshold=0.3)
+    with pytest.raises(ValidationError, match="judge_skip_score"):
+        KnowledgeBaseConfig(retrieval=retrieval, agent=AgentConfig(judge_skip_score=0.29))
+    assert KnowledgeBaseConfig(
+        retrieval=retrieval, agent=AgentConfig(judge_skip_score=0.3)
+    ).agent.judge_skip_score == pytest.approx(0.3)
+    assert KnowledgeBaseConfig(retrieval=retrieval).agent.judge_skip_score is None

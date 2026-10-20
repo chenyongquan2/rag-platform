@@ -17,11 +17,12 @@ BM25 search is sent (degraded). Only when no route answers does the retriever ra
 Deadline: the request's `Deadline` (s16-2) bounds everything. A query vector in the L0 cache
 is used whenever the cache answers within half of the remaining time. The gateway call is
 waited for at most until min(`es_reserve_ms`, `es_reserve_ratio` x the request's time limit)
-before the deadline, the time kept for the search, and `rerank_reserve_ms` (at most half of the
-request's time limit; 0 = none) before that, the time kept for the rerank that follows: a vector
-that arrives with no time left for the rerank gives a result with no rerank score (spec P3-06,
-found by the P3-05 evaluation in later rounds of the ask_docs graph; with time to spare the
-reserve changes nothing); the `_msearch` gets the remaining time as its
+before the deadline, the time kept for the search. A query may also carry `rerank_reserve_ms`
+(`HybridQuery`; at most half of the request's time limit, 0 by default): the wait then ends that
+much earlier, so the rerank that follows still has time. Only the ask_docs graph sets it, for the
+searches of round two and later (spec P3-06): a vector that arrives with no time left for the
+rerank gave a result with no rerank score. `search_docs` and the retrieval evals never set it,
+so their results do not depend on it; the `_msearch` gets the remaining time as its
 HTTP time-out, and each search inside it an Elasticsearch `timeout` shorter by `es_margin_ms` (at
 most half of the remaining time, so the searches keep the other half), so a
 slow route is reported as timed out before the HTTP request itself is cut off.
@@ -141,7 +142,6 @@ class EsHybridRetriever(BaseRetriever):
         es_reserve_ms: int,
         es_margin_ms: int,
         es_reserve_ratio: float = 0.2,
-        rerank_reserve_ms: int = 0,
         embed_threads: int = DEFAULT_EMBED_THREADS,
         routes: Sequence[str] = ROUTES,
         callback_manager: CallbackManager | None = None,
@@ -155,8 +155,6 @@ class EsHybridRetriever(BaseRetriever):
         A route left out here is not a failed route: the result is not degraded."""
         if es_reserve_ms < 0 or es_margin_ms < 0:
             raise ValueError("es_reserve_ms and es_margin_ms must be >= 0")
-        if rerank_reserve_ms < 0:
-            raise ValueError(f"rerank_reserve_ms must be >= 0, got {rerank_reserve_ms}")
         if not 0 <= es_reserve_ratio < 1:
             raise ValueError(f"es_reserve_ratio must be in [0, 1), got {es_reserve_ratio}")
         self._es = es
@@ -166,7 +164,6 @@ class EsHybridRetriever(BaseRetriever):
         self.config = config
         self.es_reserve_ms = es_reserve_ms
         self.es_reserve_ratio = es_reserve_ratio
-        self.rerank_reserve_ms = rerank_reserve_ms
         self.es_margin_ms = es_margin_ms
         # Query embeddings run in these threads so the wait can stop at the deadline; a call
         # still running then finishes in the background (bounded by the query profile's own
@@ -194,10 +191,11 @@ class EsHybridRetriever(BaseRetriever):
             return cap
         return min(cap, self.es_reserve_ratio * deadline.total_s)
 
-    def rerank_reserve_s(self, deadline: Deadline) -> float:
-        """Time kept for the rerank while waiting for the gateway: `rerank_reserve_ms`, at most
-        half of the request's whole time limit (so a short deadline still waits for a vector)."""
-        cap = self.rerank_reserve_ms / 1000.0
+    @staticmethod
+    def rerank_reserve_s(deadline: Deadline, reserve_ms: int) -> float:
+        """Time kept for the rerank while waiting for the gateway: `reserve_ms`, at most half of
+        the request's whole time limit (so a short deadline still waits for a vector)."""
+        cap = max(0, reserve_ms) / 1000.0
         if deadline.total_s <= 0:
             return cap
         return min(cap, 0.5 * deadline.total_s)
@@ -256,7 +254,9 @@ class EsHybridRetriever(BaseRetriever):
         if cached is not None:
             return cached, None
         wait_s = (
-            deadline.remaining_s() - self.es_reserve_s(deadline) - self.rerank_reserve_s(deadline)
+            deadline.remaining_s()
+            - self.es_reserve_s(deadline)
+            - self.rerank_reserve_s(deadline, query.rerank_reserve_ms)
         )
         if wait_s <= 0:
             return None, EMBED_TIMEOUT

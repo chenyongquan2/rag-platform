@@ -326,7 +326,7 @@ def test_a_partly_scored_round_two_keeps_what_the_reranker_judged() -> None:
             "below_threshold": [],
         }
     )
-    found = RetrievalRound.from_result(2, "q", partial)
+    found = RetrievalRound.from_result(2, "q", partial, scored_only=True)
     # 0.9 is evidence; 0.2 is below the threshold; the unscored chunk is nothing.
     assert [c.chunk_id for c in found.chunks] == ["hf_docs:p8.md#0"]
     assert [c.chunk_id for c in found.below_threshold] == ["hf_docs:p9.md#0"]
@@ -335,6 +335,63 @@ def test_a_partly_scored_round_two_keeps_what_the_reranker_judged() -> None:
     # A complete rerank is taken as it is, and so is a search without a rerank timeout.
     whole = RetrievalRound.from_result(1, "q", base)
     assert [c.chunk_id for c in whole.chunks] == [c.chunk_id for c in base.chunks]
+
+
+def test_a_round_of_scored_chunks_below_the_threshold_and_unscored_ones_is_not_found() -> None:
+    base = scored_result(KB, [0.2, 0.1], pages=[8, 9])
+    partial = base.model_copy(
+        update={
+            "chunks": [
+                fake_chunk(KB, 8, rerank_score=0.2),
+                fake_chunk(KB, 9, rerank_score=0.1),
+                fake_chunk(KB, 10),
+            ],
+            "rerank_timeout": True,
+            "not_found": False,
+            "below_threshold": [],
+        }
+    )
+    found = RetrievalRound.from_result(2, "q", partial, scored_only=True)
+    assert found.chunks == [] and found.not_found is True and found.rerank_timeout
+    assert [c.chunk_id for c in found.below_threshold] == ["hf_docs:p8.md#0", "hf_docs:p9.md#0"]
+
+
+def test_a_score_equal_to_the_threshold_is_evidence() -> None:
+    base = scored_result(KB, [0.3], pages=[8])
+    partial = base.model_copy(
+        update={
+            "chunks": [fake_chunk(KB, 8, rerank_score=0.3), fake_chunk(KB, 9)],
+            "rerank_timeout": True,
+            "not_found": False,
+        }
+    )
+    found = RetrievalRound.from_result(2, "q", partial, scored_only=True)
+    assert [c.chunk_id for c in found.chunks] == ["hf_docs:p8.md#0"]
+    assert found.not_found is False
+
+
+def test_round_one_keeps_the_fused_chunks_after_a_rerank_timeout() -> None:
+    """Review probe (P3-06): in round one nothing else was found, so the unscored fused chunks
+    stay for the answer (design s16-8) and the round says `rerank_timeout`; the judge does not
+    count them as grounds (they are no evidence that the threshold passed)."""
+    partial = _unscored(KB, [8, 9])
+    found = RetrievalRound.from_result(1, "q", partial)
+    assert [c.chunk_id for c in found.chunks] == ["hf_docs:p8.md#0", "hf_docs:p9.md#0"]
+    assert found.not_found is False and found.rerank_timeout
+
+
+def test_a_completely_unscored_round_one_is_still_answered_and_flagged() -> None:
+    backend = ScriptedSearchBackend(KB, default=_unscored(KB, [8, 9]))
+    judge = FakeChatModel(responses=[])  # the judge model is not asked about unscored chunks
+    answer = StreamingFakeChatModel(default_response="Use it [1].")
+    result = _ask("gamma delta", backend, judge=judge, answer=answer, max_rounds=1)
+    assert result.status == AnswerStatus.ANSWERED and result.found
+    assert len(answer.calls) == 1 and judge.calls == []
+    assert [c.chunk_id for c in result.sources] == ["hf_docs:p8.md#0", "hf_docs:p9.md#0"]
+    assert result.degraded is False  # nothing fell back
+    assert result.rerank_timeout and "rerank_timeout" in result.error_categories
+    assert result.sufficiency == "not_enough"  # no chunk is known to pass the threshold
+    assert result.cache_allowed is False
 
 
 # ---- AC6: a retrieval error in a later round ----------------------------------------------
@@ -363,10 +420,12 @@ def test_retrieval_error_in_round_two_still_answers() -> None:
     result = _ask("gamma delta", backend, helper=helper, judge=judge, answer=answer)
     assert _asked(backend) == ["gamma delta", "gamma epsilon"]
     assert result.status == AnswerStatus.ANSWERED and result.found and len(answer.calls) == 1
-    assert (result.stop_reason, result.coverage_unconfirmed) == ("deadline", True)
+    # An accurate reason: the search failed, the time did not run out (spec P3-06 review).
+    assert (result.stop_reason, result.coverage_unconfirmed) == ("retrieval_error", True)
     assert result.degraded and result.fallbacks == ["retrieve:retrieval_timeout"]
+    assert result.retrieval_error == ErrorCategory.RETRIEVAL_TIMEOUT
     assert "retrieval_timeout" in result.error_categories
-    assert "agent_deadline" in result.error_categories
+    assert "agent_deadline" not in result.error_categories
     assert result.cache_allowed is False
 
 
@@ -375,3 +434,83 @@ def test_retrieval_error_in_round_one_raises() -> None:
     backend = ScriptedSearchBackend(KB, raises=error)
     with pytest.raises(RetrievalError):
         _ask("gamma delta", backend)
+
+
+def test_a_failed_search_after_a_partly_found_round_stops_the_run_and_answers() -> None:
+    """Two phrasings in round two: the first is found, the second fails. What the first found
+    is kept (round two counts), the run stops with `retrieval_error` (no judge call) and answers."""
+    error = RetrievalError("es is down", category=ErrorCategory.RETRIEVAL_FAILED)
+    backend = ScriptedSearchBackend(
+        KB,
+        by_question={
+            "gamma delta": scored_result(KB, [0.5], pages=[1]),
+            "gamma epsilon": scored_result(KB, [0.6], pages=[2]),
+        },
+        on_call=_raise_on("gamma zeta", error),
+    )
+    helper = FakeChatModel(responses=[multi_query_reply((1, ["gamma epsilon", "gamma zeta"]))])
+    judge = FakeChatModel(responses=[judge_reply(False)])  # a second call would raise
+    answer = StreamingFakeChatModel(default_response="Use it [1].")
+    result = _ask("gamma delta", backend, helper=helper, judge=judge, answer=answer)
+    assert _asked(backend) == ["gamma delta", "gamma epsilon", "gamma zeta"]
+    assert (result.rounds, result.stop_reason) == (2, "retrieval_error")
+    assert result.retrieval_error == ErrorCategory.RETRIEVAL_FAILED
+    assert result.status == AnswerStatus.ANSWERED and len(judge.calls) == 1
+    assert {c.chunk_id for c in result.sources} >= {"hf_docs:p2.md#0"}
+
+
+def test_a_search_may_start_at_exactly_the_minimum_time() -> None:
+    clock = FakeClock()
+    settings = agent_settings(
+        agent_deadline_ms=30_000, agent_answer_reserve_ms=7_000, agent_search_min_ms=6_000
+    )
+    ctx = make_context(settings=settings, total_ms=30_000, clock=clock)
+    clock.advance_ms(30_000 - 13_000)  # 13 s left: 7 s for the answer, exactly 6 s to search
+    assert ctx.search_time_ms() == pytest.approx(6_000) and ctx.can_search()
+    clock.advance_ms(1)
+    assert not ctx.can_search()
+
+
+def test_the_response_exposes_the_retrieval_error() -> None:
+    """What the report and the MCP description say is there: the category and the stop reason
+    reach the caller in `AskResponse`."""
+    from rag.serve.schema import AskResponse
+
+    result = AskResult(
+        request_id="r",
+        kb=KB,
+        degraded=True,
+        retrieval_error=ErrorCategory.RETRIEVAL_TIMEOUT,
+        stop_reason="retrieval_error",
+        coverage_unconfirmed=True,
+        notice="n",
+    )
+    response = AskResponse.from_result(result)
+    assert (response.retrieval_error, response.stop_reason) == (
+        "retrieval_timeout",
+        "retrieval_error",
+    )
+    assert "retrieval_error" in AskResponse.model_json_schema()["properties"]
+    assert AskResponse.from_result(AskResult(request_id="r", kb=KB)).retrieval_error is None
+
+
+def test_the_graph_caps_the_answer_call_and_other_calls_keep_their_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review item S5 (P3-06): the runtime builds the answer model with `agent_answer_max_tokens`
+    (one answer ran to 4096 tokens and past the deadline); the helper and judge models are built
+    from their profiles as before."""
+    import rag.llm
+
+    built: list[tuple[str, int | None]] = []
+
+    def fake_factory(profile: str, settings: Any = None, **kwargs: Any) -> Any:
+        built.append((profile, kwargs.get("max_tokens")))
+        return FakeChatModel(responses=[])
+
+    monkeypatch.setattr(rag.llm, "make_chat_model", fake_factory)
+    settings = agent_settings(agent_answer_max_tokens=900)
+    runtime = AgentRuntime.from_settings(settings)
+    runtime.default_model()
+    runtime.default_helper_model()
+    assert built == [("online", 900), ("cheap", None)]

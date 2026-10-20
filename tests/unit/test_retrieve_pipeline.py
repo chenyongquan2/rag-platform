@@ -105,17 +105,16 @@ def _pipeline(
     threshold: float = 0.3,
     rerank_n: int = 30,
     clock: ManualClock | None = None,
-    rerank_reserve_ms: int = 0,
+    embed: Any = None,
 ) -> SearchPipeline:
     retriever = EsHybridRetriever(
         msearch,
-        FakeEmbedding(dim=4),
+        embed or FakeEmbedding(dim=4),
         kb=KB,
         index=ALIAS,
         config=RetrievalConfig(),
         es_reserve_ms=100,
         es_margin_ms=200,
-        rerank_reserve_ms=rerank_reserve_ms,
     )
     runner = RerankRunner(scorer, batch_size=8, max_concurrency=2)
     reader = ContextReader(_expand_es(), kb=KB, index=ALIAS, count_tokens=count_tokens)
@@ -386,16 +385,44 @@ def test_config_version_ignores_description() -> None:
     )
 
 
+class _SlowEmbedding(FakeEmbedding):
+    """A query embedding that takes `delay_s` (a gateway on a bad day)."""
+
+    delay_s: float = 1.5
+
+    def _get_query_embedding(self, query: str) -> Any:
+        import time
+
+        time.sleep(self.delay_s)
+        return super()._get_query_embedding(query)
+
+
+def test_search_docs_with_a_slow_gateway_is_the_same_as_before_p3_06() -> None:
+    """Spec P3-06 AC10, review probe: the embedding takes 1.5 s and the caller's limit is 3 s.
+    A plain call (what `search_docs` makes, with the default settings) waits for the vector and
+    returns both routes, not degraded. Only a call that passes `rerank_reserve_ms` (the graph's
+    later rounds) stops waiting early; the config version is the same either way."""
+    pipeline = _pipeline(_msearch(), FakeCrossEncoder(SCORES), embed=_SlowEmbedding(dim=4))
+    plain = pipeline.retrieve("which page?", kb=KB, top_k=3, deadline_ms=3000)
+    assert plain.degraded is False and set(plain.routes) == {BM25, VECTOR}
+
+    pipeline = _pipeline(_msearch(), FakeCrossEncoder(SCORES), embed=_SlowEmbedding(dim=4))
+    reserved = pipeline.retrieve(
+        "which page?", kb=KB, top_k=3, deadline_ms=3000, rerank_reserve_ms=2000
+    )
+    assert reserved.degraded is True and set(reserved.routes) == {BM25}
+    assert plain.config_version == reserved.config_version == "cfg1"
+
+
 def test_search_docs_output_is_identical_with_and_without_the_rerank_reserve() -> None:
-    """Spec P3-06 AC10: the whole chain (fusion, dedupe, rerank, threshold, top_k) gives the same
-    result for a fixed scripted run whatever the vector-wait reserve, when time is ample. The
-    config version is unchanged too (it does not include the reserve)."""
+    """With time to spare the whole chain (fusion, dedupe, rerank, threshold, top_k) gives the
+    same result for a fixed scripted run whatever the reserve a call passes."""
 
     def run(reserve: int) -> dict[str, Any]:
-        pipeline = _pipeline(
-            _msearch(), FakeCrossEncoder(SCORES), expand="neighbors", rerank_reserve_ms=reserve
+        pipeline = _pipeline(_msearch(), FakeCrossEncoder(SCORES), expand="neighbors")
+        result = pipeline.retrieve(
+            "which page?", kb=KB, top_k=3, request_id="req-1", rerank_reserve_ms=reserve
         )
-        result = pipeline.retrieve("which page?", kb=KB, top_k=3, request_id="req-1")
         return result.model_dump(exclude={"timings_ms"})
 
     assert run(0) == run(2_000)

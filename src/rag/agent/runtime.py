@@ -167,11 +167,15 @@ class AgentRuntime:
         }
 
     def default_model(self) -> Any:
-        """The `online` chat model, built once (the answer layer would build one per call)."""
+        """The `online` chat model, built once (the answer layer would build one per call), with
+        its output capped at `agent_answer_max_tokens` (spec P3-06): the profile's 4096 let one
+        answer run to 4096 tokens and past the deadline."""
         if self._chat is None:
             from rag.llm import make_chat_model
 
-            self._chat = make_chat_model("online", self.settings)
+            self._chat = make_chat_model(
+                "online", self.settings, max_tokens=self.settings.agent_answer_max_tokens
+            )
         return self._chat
 
     def default_helper_model(self) -> Any:

@@ -734,3 +734,19 @@ def test_fake_backend_fallback(tmp_path: Path) -> None:
     prices = {"other": ModelPrice(input_cny_per_m=1.0)}
     unpriced = make_settings(tmp_path, chat_backend="fake", model_prices=prices)
     assert isinstance(make_chat_model("online", unpriced), FakeChatModel)
+
+
+def test_factory_max_tokens_override_changes_only_that_model(tmp_path: Path) -> None:
+    """Spec P3-06: a caller may cap the output of one model (the graph's answer call) without
+    changing the profile: the default stays the profile's 4096."""
+    settings = make_settings(tmp_path)
+    transport = httpx.MockTransport(FakeChatGateway())
+    ledger = CostLedger.from_settings(settings)
+    capped = make_chat_model(
+        "online", settings, ledger=ledger, transport=transport, max_tokens=1536
+    )
+    plain = make_chat_model("online", settings, ledger=ledger, transport=transport)
+    assert isinstance(capped, ChatOpenAI) and isinstance(plain, ChatOpenAI)
+    assert (capped.max_tokens, plain.max_tokens) == (1536, 4096)
+    with pytest.raises(ValueError, match="max_tokens"):
+        make_chat_model("online", settings, ledger=ledger, transport=transport, max_tokens=0)

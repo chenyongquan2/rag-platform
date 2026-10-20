@@ -184,6 +184,7 @@ async def route_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[
         "answer": None,
         "result": None,
         "two_hop": two_hop,
+        "multi_hop": decision.multi_hop,
         "tokens_before_clarify": ctx.budget.spent,
         "kb": decision.kb or state["kb"],
         "needs_retrieval": decision.retrieve,
@@ -284,7 +285,8 @@ async def retrieve_node(state: AgentState, runtime: Runtime[AgentContext]) -> di
     dropped, and when none fits the run stops with `deadline` and goes on to the answer, the
     round not counted. A search of a later round that fails (`RetrievalError`) is not the
     request's failure: the chunks of the earlier rounds are still there, so the failure is
-    noted (`fallbacks`, `retrieval_error`), the run stops with `deadline` and answers from them.
+    noted (`fallbacks`, `retrieval_error`), the run stops with `retrieval_error` and answers
+    from them.
     A failure in round one is the request's failure: there is nothing to answer from."""
     ctx = runtime.context
     began = time.perf_counter()
@@ -310,6 +312,13 @@ async def retrieve_node(state: AgentState, runtime: Runtime[AgentContext]) -> di
                     attr.AGENT_ROUND: round_no,
                 },
             ) as span:
+                # Round one is the plain search (as `search_docs`); later rounds leave time for
+                # the rerank while waiting for the query vector.
+                extra = (
+                    {"rerank_reserve_ms": ctx.settings.agent_rerank_reserve_ms}
+                    if round_no > 1
+                    else {}
+                )
                 result = await asyncio.to_thread(
                     ctx.retriever.retrieve,
                     query.text,
@@ -319,6 +328,7 @@ async def retrieve_node(state: AgentState, runtime: Runtime[AgentContext]) -> di
                     deadline_ms=ctx.retrieval_deadline_ms(),
                     request_id=ctx.request_id,
                     acl_groups=ctx.acl_groups,
+                    **extra,
                 )
                 span.set_attribute(attr.HITS, len(result.chunks))
         except RetrievalError as exc:
@@ -329,7 +339,12 @@ async def retrieve_node(state: AgentState, runtime: Runtime[AgentContext]) -> di
         observe_retrieval(result, ctx.cfg.kb, TOOL)
         found.append(
             RetrievalRound.from_result(
-                round_no, query.owner, result, query=query.text, kind=query.kind
+                round_no,
+                query.owner,
+                result,
+                query=query.text,
+                kind=query.kind,
+                scored_only=round_no > 1,
             )
         )
     update: dict[str, Any] = {"rounds": found, "timings_ms": {"retrieve": _ms(began)}}
@@ -339,7 +354,9 @@ async def retrieve_node(state: AgentState, runtime: Runtime[AgentContext]) -> di
         category = str(failure.category)
         update["fallbacks"] = [f"retrieve:{category}"]
         update["retrieval_error"] = category
-    if failure is not None or not found:
+    if failure is not None:
+        update["stop_reason"] = "retrieval_error"
+    elif not found:
         update["stop_reason"] = "deadline"
     return update
 

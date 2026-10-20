@@ -116,8 +116,14 @@ class AskResponse(BaseModel):
         description="Not confirmed that everything was searched: the run stopped at a limit."
     )
     stop_reason: str | None = Field(
-        description="deadline, recursion_limit, token_cap, max_rounds or no_new_query when the "
-        "run stopped early."
+        description="deadline, recursion_limit, token_cap, max_rounds, no_new_query or "
+        "retrieval_error when the run stopped early."
+    )
+    retrieval_error: str | None = Field(
+        default=None,
+        description="retrieval_timeout or retrieval_failed when a search of round two or later "
+        "failed and the answer was written from the earlier rounds (with stop_reason "
+        "retrieval_error and degraded); null otherwise.",
     )
     notice: str | None = Field(
         description="coverage_unconfirmed in words, in the answer's language."
@@ -181,6 +187,7 @@ class AskResponse(BaseModel):
             rerank_timeout=result.rerank_timeout,
             coverage_unconfirmed=result.coverage_unconfirmed,
             stop_reason=result.stop_reason,
+            retrieval_error=result.retrieval_error,
             notice=result.notice,
             used_history=result.used_history,
             cache_allowed=result.cache_allowed,

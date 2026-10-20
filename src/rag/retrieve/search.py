@@ -143,9 +143,13 @@ class HybridSearch:
         deadline_ms: int | None = None,
         request_id: str | None = None,
         acl_groups: Sequence[str] | None = None,
+        rerank_reserve_ms: int = 0,
     ) -> RetrievalResult:
         """Search `kb` (must be this chain's knowledge base); raises `RetrievalError` when no
         route answered and `FilterError` for a filter outside the whitelist.
+
+        `rerank_reserve_ms`: the query-vector wait leaves this long for the rerank (see
+        `EsHybridRetriever`); 0, the default, is the plain search. Only the ask_docs graph sets it.
 
         `acl_groups`: the groups of the caller of this request (the search service resolves
         them per request, spec P0-09); None uses the groups the chain was built with."""
@@ -163,6 +167,7 @@ class HybridSearch:
             acl_groups=groups,
             filters=dict(filters or {}),
             deadline=deadline,
+            rerank_reserve_ms=rerank_reserve_ms,
         )
         generation = (
             self._generation_pool.submit(self._generation)
@@ -313,7 +318,6 @@ def hybrid_parts(
         config=cfg.retrieval,
         es_reserve_ms=settings.search_es_reserve_ms,
         es_reserve_ratio=settings.search_es_reserve_ratio,
-        rerank_reserve_ms=settings.search_rerank_reserve_ms,
         es_margin_ms=settings.search_es_margin_ms,
         embed_threads=settings.embed_max_concurrency,
         routes=routes,

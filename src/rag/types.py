@@ -249,13 +249,17 @@ class Answer(_ResultMeta):
         return " ".join(s.text for s in self.sentences)
 
 
-StopReason = Literal["deadline", "recursion_limit", "token_cap", "max_rounds", "no_new_query"]
+StopReason = Literal[
+    "deadline", "recursion_limit", "token_cap", "max_rounds", "no_new_query", "retrieval_error"
+]
 """Why an `ask_docs` run stopped searching before it confirmed it had searched enough (s13-3):
 its total deadline, its recursion limit, the per-request token cap, the KB's `max_rounds` with
 part of the question still without grounds, or `no_new_query` (the judge wanted another round
 and no new phrasing could be made: the model failed, every phrasing was refused, or the KB
 does not allow a model before the answer). Three rounds in which nothing reached the rerank
-threshold are not a stop reason: that is a plain `not_found` (s13-4)."""
+threshold are not a stop reason: that is a plain `not_found` (s13-4). `retrieval_error`: a
+search of round two or later failed (spec P3-06; `AskResult.retrieval_error` says which
+category) and the run answered from the earlier rounds."""
 
 Sufficiency = Literal["enough", "partly_enough", "not_enough"]
 """The sufficiency judge's verdict on what a run found (s13-4)."""

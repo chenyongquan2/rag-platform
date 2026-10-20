@@ -319,11 +319,6 @@ class ServiceSettings(BaseSettings):
     search_es_reserve_ms: int = Field(default=200, ge=0)
     search_es_reserve_ratio: float = Field(default=0.2, ge=0, lt=1)
     search_es_margin_ms: int = Field(default=200, ge=0)
-    # Spec P3-06: the query-vector wait also stops `search_rerank_reserve_ms` before the end (at
-    # most half of the request's time limit), so the rerank that follows still has time: a
-    # vector that arrives in time for the search but not for the rerank gave a result with no
-    # rerank score (P3-05). Rerank of 10 candidates takes about 1.5 s (P0-12); 0 = no reserve.
-    search_rerank_reserve_ms: int = Field(default=2_000, ge=0)
     # Search service (spec P0-09, design s16-1). A caller's deadline_ms must lie in
     # 1..`search_max_deadline_ms` and its query be at most `search_max_query_chars` long.
     # `search_index_prefix` selects other indices (`fake_` = the fake-vector index, used with
@@ -344,9 +339,10 @@ class ServiceSettings(BaseSettings):
     # The ask_docs graph (spec P3-01, design s13-3, s16-4, s16-8). `agent_deadline_ms`: total time
     # of one ask_docs request (a caller's deadline_ms replaces it, at most `search_max_deadline_ms`;
     # MCP clients time out tool calls). `agent_answer_reserve_ms`: time kept for writing the
-    # answer: no further round starts when less is left. The answer step took a median 2.6 s, P95
-    # 4.3 s and at most 6.0 s in the P3-05 run (150 questions), so 6 s (spec P3-06; it was 12 s,
-    # the online chat profile's own deadline, which made round one end by 10 s).
+    # answer: no further round starts when less is left. The answer step of the graph runs of
+    # P3-05 and P3-06 (208 answers): median 2.7 s, P95 4.7 s, P99 6.0 s, 6.8 to 7.0 s at P99 in
+    # the two runs made on a busy machine, longest 7.4 s; so 7 s (spec P3-06; it was 12 s, the
+    # online chat profile's own deadline, which made round one end by 10 s).
     # `agent_recursion_limit`: LangGraph steps of one run (route, rewrite, retrieve, judge
     # count one each; three rounds need about 12). `agent_token_cap`: model tokens of one request
     # (usage from the gateway, else an estimate); `agent_answer_reserve_tokens`: tokens kept for
@@ -365,7 +361,7 @@ class ServiceSettings(BaseSettings):
     # for rewriting). `agent_resume_ttl_s`: how long a question asked back waits for its answer
     # (the `resume_token` is valid that long, once).
     agent_deadline_ms: int = Field(default=30_000, gt=0)
-    agent_answer_reserve_ms: int = Field(default=6_000, ge=0)
+    agent_answer_reserve_ms: int = Field(default=7_000, ge=0)
     agent_recursion_limit: int = Field(default=25, gt=0)
     agent_token_cap: int = Field(default=20_000, gt=0)
     agent_answer_reserve_tokens: int = Field(default=6_000, ge=0)
@@ -393,9 +389,21 @@ class ServiceSettings(BaseSettings):
     # not start a second one that cannot end. `agent_search_min_ms`: the least time a search of
     # round two or later may get (what is left minus the answer's time): a search with less
     # embeds the question and then has no time to rerank (P3-05: 54 such searches, all without
-    # a rerank score), so it is not made. About 1 s to embed, 1.5 s to rerank 10 candidates.
+    # a rerank score), so it is not made. Measured on a busy machine (P3-06 review): a rerank
+    # batch of 8 pairs took 2.5 to 2.7 s (0.31 to 0.34 s per pair, 3.3 s for 10), a cold query
+    # embedding plus the search about 1.2 s, so a whole search 4.5 s: 6 s. On a quiet machine
+    # (0.12 to 0.15 s per pair) a search takes about 3 s.
+    # `agent_rerank_reserve_ms`: the query-vector wait of such a search ends this long before its
+    # deadline (at most half of it), so the rerank has time (3 s: the 3.3 s above, rounded
+    # down). Only these searches get it: `search_docs` and the retrieval evals wait as before.
+    # `agent_answer_max_tokens`: output tokens (reasoning included) of the graph's answer call;
+    # the `online` profile's 4096 let one answer run to 4096 tokens and past the deadline
+    # (P3-06, no_answer_hard:03). Of 208 answer calls in the P3-05 and P3-06 graph runs the
+    # median was 101 tokens, P99 731, the longest normal one 1,058; 1,536 keeps all of them.
     agent_round_ratio: float = Field(default=0.9, ge=0, le=2)
-    agent_search_min_ms: int = Field(default=4_000, ge=0)
+    agent_search_min_ms: int = Field(default=6_000, ge=0)
+    agent_rerank_reserve_ms: int = Field(default=3_000, ge=0)
+    agent_answer_max_tokens: int = Field(default=1_536, gt=0)
     # Streaming endpoint (spec P3-04, design s16-9): `sse_heartbeat_s` is how often a comment
     # line is sent while the stream is silent (the retrieval and rerank seconds), so a proxy
     # that closes idle connections after 30 to 60 s keeps it open.

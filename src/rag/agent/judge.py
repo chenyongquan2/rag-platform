@@ -38,6 +38,7 @@ marked block whose tags cannot be forged, like the rewrite's input (`untrusted_b
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -175,14 +176,31 @@ async def _ask_model(
     return {asked[v.n - 1] for v in judgement.sub_questions if v.grounded}
 
 
+def _sure_owners(
+    grounds: dict[str, list[Chunk]], owners: Sequence[str], skip: float | None
+) -> set[str]:
+    """The sub-questions a rerank score settles without the model: each has a chunk scored at or
+    above `skip` that no other sub-question has as a sure chunk too. One chunk that is the only
+    sure chunk of two sub-questions (two searches returned the same page) shows nothing about
+    which of them it answers, so the model is asked about both."""
+    if skip is None:
+        return set()
+    sure_chunks = {o: {c.chunk_id for c in grounds[o] if _score(c) >= skip} for o in owners}
+    shared = Counter(chunk_id for ids in sure_chunks.values() for chunk_id in ids)
+    return {o for o, ids in sure_chunks.items() if any(shared[chunk_id] == 1 for chunk_id in ids)}
+
+
 async def judge_rounds(
     ctx: AgentContext,
     rounds: Sequence[RetrievalRound],
     *,
     open_owners: Sequence[str] | None = None,
+    allow_skip: bool = True,
 ) -> JudgeOutcome:
     """The tier of what `rounds` found (see the module doc). `open_owners`: the sub-questions
-    still to judge (default: all of them)."""
+    still to judge (default: all of them). `allow_skip`: whether `agent.judge_skip_score` may
+    settle a sub-question without the model (the hook turns it off for a question the route
+    flagged as possibly needing two pages)."""
     grounds = grounds_by_owner(rounds, ctx.cfg.retrieval.threshold)
     owners = list(grounds)
     keep = set(open_owners) if open_owners is not None else set(owners)
@@ -190,10 +208,8 @@ async def judge_rounds(
     with_chunks = [o for o in wanted if grounds[o]]  # the rest are missing by the rules alone
     # A sub-question with a chunk the reranker is very sure about needs no question to the model
     # (`agent.judge_skip_score`, spec P3-06).
-    skip = ctx.cfg.agent.judge_skip_score
-    sure = {
-        o for o in with_chunks if skip is not None and any(_score(c) >= skip for c in grounds[o])
-    }
+    skip = ctx.cfg.agent.judge_skip_score if allow_skip else None
+    sure = _sure_owners(grounds, with_chunks, skip)
     asked = [o for o in with_chunks if o not in sure]
     fallback: str | None = None
     used_model = False
@@ -225,6 +241,12 @@ class SufficiencyJudge:
     async def __call__(self, state: AgentState, ctx: AgentContext) -> JudgeOutcome:
         if not ctx.cfg.agent.judge:
             return JudgeOutcome("enough")
+        # A question the route flagged as possibly needing two pages is never settled by a score
+        # alone: one chunk at 0.99 says nothing about the second page (spec P3-06 review).
+        flagged = bool(state.get("two_hop")) or state.get("multi_hop") in ("maybe", "yes")
         return await judge_rounds(
-            ctx, list(state.get("rounds") or []), open_owners=state.get("missing") or None
+            ctx,
+            list(state.get("rounds") or []),
+            open_owners=state.get("missing") or None,
+            allow_skip=not flagged,
         )

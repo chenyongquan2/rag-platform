@@ -270,6 +270,17 @@ class KnowledgeBaseConfig(_Strict):
     agent: AgentConfig = Field(default_factory=AgentConfig)
 
     @model_validator(mode="after")
+    def _skip_score_is_not_below_the_threshold(self) -> Self:
+        skip = self.agent.judge_skip_score
+        if skip is not None and skip < self.retrieval.threshold:
+            raise ValueError(
+                f"agent.judge_skip_score ({skip}) must not be below retrieval.threshold "
+                f"({self.retrieval.threshold}): a chunk that does not pass the threshold is "
+                "not a sure one"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _default_eval_dir(self) -> Self:
         if self.eval.dir is None:
             self.eval.dir = f"evals/datasets/{self.kb}"
