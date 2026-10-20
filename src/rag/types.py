@@ -136,6 +136,9 @@ class _ResultMeta(BaseModel):
         generation_error = getattr(self, "generation_error", None)
         if generation_error is not None:
             categories.append(ErrorCategory(generation_error))
+        retrieval_error = getattr(self, "retrieval_error", None)
+        if retrieval_error is not None:
+            categories.append(ErrorCategory(retrieval_error))
         stop_reason = getattr(self, "stop_reason", None)
         if stop_reason in ("deadline", "recursion_limit"):
             categories.append(ErrorCategory.AGENT_DEADLINE)
@@ -307,6 +310,9 @@ class AskResult(_ResultMeta):
     standalone_question: str | None = None
     search_queries: list[str] = Field(default_factory=list)
     fallbacks: list[str] = Field(default_factory=list)
+    retrieval_error: ErrorCategory | None = None
+    """A search of round two or later failed (`retrieval_timeout` or `retrieval_failed`) and the
+    run answered from the earlier rounds (spec P3-06); the request is also `degraded`."""
 
     @property
     def chunks(self) -> list[Chunk]:

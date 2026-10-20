@@ -15,7 +15,8 @@ from rag.testing import observe_settings
 def test_agent_settings_defaults_and_validation() -> None:
     s = observe_settings()
     assert s.agent_deadline_ms == 30_000
-    assert s.agent_answer_reserve_ms == 12_000
+    # 6 s since P3-06 (the answer step took at most 6.0 s in the P3-05 run; it was 12 s).
+    assert s.agent_answer_reserve_ms == 6_000
     assert s.agent_recursion_limit == 25
     assert s.agent_token_cap == 20_000
     assert s.agent_answer_reserve_tokens == 6_000
@@ -50,13 +51,14 @@ def test_hf_docs_sets_agent_keys() -> None:
     assert cfg.agent == AgentConfig(
         max_rounds=3,
         rewrite=True,
-        declarative=True,
+        declarative=False,  # P3-06: no rewrite call for a plain question
         max_sub_questions=3,
         clarify=True,
         route_model=True,
         judge=True,
         multi_queries=3,
         hyde=True,
+        judge_skip_score=0.98,  # P3-06
     )
 
 
@@ -129,3 +131,31 @@ def test_judge_and_correction_config(monkeypatch: pytest.MonkeyPatch) -> None:
     for bad_kb in ({"multi_queries": 0}, {"multi_queries": 7}, {"judge": "maybe"}):
         with pytest.raises(ValidationError):
             AgentConfig.model_validate(bad_kb)
+
+
+def test_time_fix_settings_are_named_keys_with_checked_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec P3-06 AC11: the new limits are explicit settings with defaults and ranges."""
+    s = observe_settings()
+    assert (s.agent_search_min_ms, s.agent_round_ratio) == (4_000, 0.9)
+    assert s.search_rerank_reserve_ms == 2_000
+    for bad in (
+        {"agent_search_min_ms": -1},
+        {"agent_round_ratio": -0.1},
+        {"agent_round_ratio": 2.5},
+        {"search_rerank_reserve_ms": -1},
+    ):
+        with pytest.raises(ValueError):
+            observe_settings(**bad)
+    monkeypatch.setenv("AGENT_SEARCH_MIN_MS", "3500")
+    from rag.config import ServiceSettings
+
+    assert ServiceSettings(_env_file=None).agent_search_min_ms == 3_500  # type: ignore[call-arg]
+
+    # Per knowledge base: off unless a KB sets it (the P3-03 behaviour), a score in [0, 1].
+    assert AgentConfig().judge_skip_score is None
+    assert AgentConfig(judge_skip_score=0.9).judge_skip_score == 0.9
+    for bad_score in (-0.1, 1.5):
+        with pytest.raises(ValidationError):
+            AgentConfig(judge_skip_score=bad_score)

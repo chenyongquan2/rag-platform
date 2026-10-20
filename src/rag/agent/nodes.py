@@ -45,6 +45,7 @@ from rag.answer.generate import AnswerDelta, AnswerDone, AnswerRetry, stream_ans
 from rag.answer.prompts import answer_language
 from rag.observe import attributes as attr
 from rag.observe import layer_span
+from rag.retrieve.hybrid import RetrievalError
 from rag.retrieve.observe import observe_retrieval
 
 TOOL = "ask_docs"
@@ -64,6 +65,16 @@ def _search_plan(state: AgentState) -> list[SearchQuery]:
     one search per sub-question."""
     planned = list(state.get("search_plan") or [])
     return planned or [SearchQuery(text=q, owner=q) for q in _sub_questions(state)]
+
+
+def _round_robin(plan: list[SearchQuery]) -> list[SearchQuery]:
+    """The searches of a later round, one phrasing of every sub-question before a second one of
+    any: when time allows only some of them, each sub-question still gets a search."""
+    by_owner: dict[str, list[SearchQuery]] = {}
+    for query in plan:
+        by_owner.setdefault(query.owner, []).append(query)
+    longest = max((len(queries) for queries in by_owner.values()), default=0)
+    return [qs[i] for i in range(longest) for qs in by_owner.values() if i < len(qs)]
 
 
 # What a correction that could not go on says about why the run stops: a model that was refused
@@ -168,6 +179,8 @@ async def route_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[
         "clarified": False,
         "clarified_question": None,
         "stop_reason": None,
+        "round_started": None,
+        "retrieval_error": None,
         "answer": None,
         "result": None,
         "two_hop": two_hop,
@@ -221,7 +234,7 @@ async def rewrite_node(state: AgentState, runtime: Runtime[AgentContext]) -> dic
     (`stop_reason`): searching the same thing again would give the same chunks."""
     ctx = runtime.context
     began = time.perf_counter()
-    update: dict[str, Any] = {}
+    update: dict[str, Any] = {"round_started": ctx.deadline.clock()}
     with layer_span("rewrite", attributes={attr.AGENT_ROUND: state.get("round", 0) + 1}) as span:
         try:
             outcome = await ctx.hooks.rewrite(state, ctx)
@@ -264,45 +277,71 @@ async def rewrite_node(state: AgentState, runtime: Runtime[AgentContext]) -> dic
 async def retrieve_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
     """One search per planned query (the retrieval layer is blocking: a worker thread; the
     request context and span follow it): round one searches each sub-question, a later round
-    the phrasings of what was missing. A search of a later round that would start with no time
-    left (before the answer's) is not made. A failure is the request's failure."""
+    the phrasings of what was missing (one phrasing of each sub-question first).
+
+    A search of a later round is made only when it has the least time worth spending
+    (`agent_search_min_ms` before the answer's time, spec P3-06); the ones that do not fit are
+    dropped, and when none fits the run stops with `deadline` and goes on to the answer, the
+    round not counted. A search of a later round that fails (`RetrievalError`) is not the
+    request's failure: the chunks of the earlier rounds are still there, so the failure is
+    noted (`fallbacks`, `retrieval_error`), the run stops with `deadline` and answers from them.
+    A failure in round one is the request's failure: there is nothing to answer from."""
     ctx = runtime.context
     began = time.perf_counter()
     round_no = state.get("round", 0) + 1
     retrieval = ctx.cfg.retrieval
     top_k = retrieval.final_k
+    plan = _search_plan(state)
+    if round_no > 1:
+        plan = _round_robin(plan)
     found: list[RetrievalRound] = []
-    for query in _search_plan(state):
-        if round_no > 1 and ctx.deadline.remaining_ms() <= ctx.reserve_ms:
+    failure: RetrievalError | None = None
+    for query in plan:
+        if round_no > 1 and not ctx.can_search():
             break
-        with layer_span(
-            "retrieve",
-            attributes={
-                attr.TOP_K: top_k,
-                attr.RERANK_N: retrieval.rerank_n,
-                attr.FINAL_K: retrieval.final_k,
-                attr.THRESHOLD: retrieval.threshold,
-                attr.AGENT_ROUND: round_no,
-            },
-        ) as span:
-            result = await asyncio.to_thread(
-                ctx.retriever.retrieve,
-                query.text,
-                ctx.cfg.kb,
-                top_k,
-                filters=dict(ctx.filters or {}),
-                deadline_ms=ctx.retrieval_deadline_ms(),
-                request_id=ctx.request_id,
-                acl_groups=ctx.acl_groups,
-            )
-            span.set_attribute(attr.HITS, len(result.chunks))
+        try:
+            with layer_span(
+                "retrieve",
+                attributes={
+                    attr.TOP_K: top_k,
+                    attr.RERANK_N: retrieval.rerank_n,
+                    attr.FINAL_K: retrieval.final_k,
+                    attr.THRESHOLD: retrieval.threshold,
+                    attr.AGENT_ROUND: round_no,
+                },
+            ) as span:
+                result = await asyncio.to_thread(
+                    ctx.retriever.retrieve,
+                    query.text,
+                    ctx.cfg.kb,
+                    top_k,
+                    filters=dict(ctx.filters or {}),
+                    deadline_ms=ctx.retrieval_deadline_ms(),
+                    request_id=ctx.request_id,
+                    acl_groups=ctx.acl_groups,
+                )
+                span.set_attribute(attr.HITS, len(result.chunks))
+        except RetrievalError as exc:
+            if round_no == 1:
+                raise
+            failure = exc
+            break
         observe_retrieval(result, ctx.cfg.kb, TOOL)
         found.append(
             RetrievalRound.from_result(
                 round_no, query.owner, result, query=query.text, kind=query.kind
             )
         )
-    return {"rounds": found, "round": round_no, "timings_ms": {"retrieve": _ms(began)}}
+    update: dict[str, Any] = {"rounds": found, "timings_ms": {"retrieve": _ms(began)}}
+    if found or round_no == 1:
+        update["round"] = round_no
+    if failure is not None:
+        category = str(failure.category)
+        update["fallbacks"] = [f"retrieve:{category}"]
+        update["retrieval_error"] = category
+    if failure is not None or not found:
+        update["stop_reason"] = "deadline"
+    return update
 
 
 def as_outcome(judgement: JudgeOutcome | str, state: AgentState) -> JudgeOutcome:
@@ -318,7 +357,11 @@ def as_outcome(judgement: JudgeOutcome | str, state: AgentState) -> JudgeOutcome
 
 
 def plan_next(
-    state: AgentState, judgement: JudgeOutcome | str, ctx: AgentContext
+    state: AgentState,
+    judgement: JudgeOutcome | str,
+    ctx: AgentContext,
+    *,
+    round_ms: float | None = None,
 ) -> tuple[bool, str | None]:
     """Whether another round runs, and why not when the judge wanted one.
 
@@ -326,8 +369,10 @@ def plan_next(
     rerank threshold are a definitive "not found", no stop reason; with part of the question
     still without grounds it is `max_rounds`); a judged KB that allows no model before the
     answer, which cannot make a new phrasing (`no_new_query`); the deadline (less than the
-    answer's time plus one round's is left: a round that cannot finish is not started); the
-    token cap (no tokens left for another rewrite and judgement after keeping the answer's)."""
+    answer's time plus one round's is left: a round that cannot finish is not started; one
+    round's time is at least `agent_round_min_ms` and, once a round has run (`round_ms`, how long
+    it took), `agent_round_ratio` (0.9) times that, spec P3-06); the token cap (no tokens left
+    for another rewrite and judgement after keeping the answer's)."""
     outcome = as_outcome(judgement, state)
     if outcome.verdict == "enough":
         return False, None
@@ -336,7 +381,10 @@ def plan_next(
         return False, None if outcome.verdict == "not_enough" else "max_rounds"
     if agent.judge and not agent.rewrite:
         return False, "no_new_query"
-    if ctx.deadline.remaining_ms() <= ctx.reserve_ms + ctx.settings.agent_round_min_ms:
+    needed = float(ctx.settings.agent_round_min_ms)
+    if round_ms:
+        needed = max(needed, ctx.settings.agent_round_ratio * round_ms)
+    if ctx.deadline.remaining_ms() <= ctx.reserve_ms + needed:
         return False, "deadline"
     if ctx.budget.exhausted(reserve=ctx.settings.agent_answer_reserve_tokens):
         return False, "token_cap"
@@ -356,13 +404,16 @@ async def judge_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict[
             outcome = as_outcome(await ctx.hooks.judge(state, ctx), state)
         except RequestTokenCapExceeded:  # could not even ask: treat as "enough" and say so
             outcome, forced = JudgeOutcome("enough"), "token_cap"
-        loop, stop_reason = plan_next(state, outcome, ctx)
+        started = state.get("round_started")
+        round_ms = (ctx.deadline.clock() - started) * 1000.0 if started is not None else None
+        loop, stop_reason = plan_next(state, outcome, ctx, round_ms=round_ms)
         stop_reason = stop_reason or forced
         span.set_attributes(
             {
                 attr.AGENT_VERDICT: outcome.verdict,
                 attr.JUDGE_MISSING: [m[:300] for m in outcome.missing],
                 attr.JUDGE_MODEL_USED: outcome.used_model,
+                attr.JUDGE_SKIPPED: outcome.skipped,
             }
         )
         if outcome.fallback:

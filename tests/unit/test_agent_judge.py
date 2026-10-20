@@ -229,3 +229,63 @@ def test_judge_model_falls_back_to_the_helper_model_and_is_guarded_by_the_token_
     outcome = asyncio.run(judge_rounds(ctx, [_round("A", [0.9])]))
     assert outcome.fallback == "token_cap" and model.calls == []
     assert ctx.budget.cap_hit
+
+
+def test_judge_does_not_count_unscored_chunks() -> None:
+    """Spec P3-06 AC5: a chunk the reranker never scored (it timed out first) is not grounds. It
+    used to count as above the threshold, which made every sub-question "enough" by the rules."""
+    base = scored_result(KB, [0.5], pages=[1])
+    unscored = base.model_copy(
+        update={"chunks": [c.model_copy(update={"rerank_score": None}) for c in base.chunks]}
+    )
+    rounds = [RetrievalRound.from_result(1, "A", unscored)]
+    model = FakeChatModel(responses=[])  # a call raises
+    outcome = _judge(rounds, model)
+    assert (outcome.verdict, outcome.missing, outcome.used_model) == ("not_enough", ("A",), False)
+    assert model.calls == []
+    # With a scored chunk next to the unscored one only the scored one is shown to the model.
+    mixed = base.model_copy(
+        update={"chunks": [base.chunks[0], *unscored.chunks[:0], _unscored_chunk(7)]}
+    )
+    model = FakeChatModel(responses=[judge_reply(True)])
+    outcome = _judge([RetrievalRound.from_result(1, "A", mixed)], model)
+    assert outcome.verdict == "enough"
+    assert "body of page 7" not in _prompt(model)
+
+
+def _unscored_chunk(page: int) -> Any:
+    from rag.testing.serve import fake_chunk
+
+    return fake_chunk(KB, page)
+
+
+def test_judge_skip_score() -> None:
+    """Spec P3-06 AC8: a sub-question with a chunk at or above `judge_skip_score` is grounded
+    without asking; the model gets the others; none left to ask: no call at all."""
+    cfg = kb_config(KB, judge=True, judge_skip_score=0.98)
+    rounds = [_round("A", [0.99, 0.5], pages=[1, 2]), _round("B", [0.9], pages=[3])]
+    model = FakeChatModel(responses=[judge_reply(False)])
+    outcome = _judge(rounds, model, cfg=cfg)
+    # A is sure (0.99 >= 0.98): not asked. B is asked, and the model says no.
+    assert (outcome.verdict, outcome.missing, outcome.skipped) == ("partly_enough", ("B",), 1)
+    assert len(model.calls) == 1
+    assert "body of page 3" in _prompt(model) and "body of page 1" not in _prompt(model)
+
+    model = FakeChatModel(responses=[])  # a call raises
+    outcome = _judge([_round("A", [0.98], pages=[1])], model, cfg=cfg)  # equal to the score: sure
+    assert (outcome.verdict, outcome.used_model, outcome.skipped) == ("enough", False, 1)
+    assert model.calls == []
+
+    # Just below the score the model is asked; unset (the default) it is always asked.
+    model = FakeChatModel(responses=[judge_reply(True)])
+    outcome = _judge([_round("A", [0.979], pages=[1])], model, cfg=cfg)
+    assert (outcome.verdict, outcome.used_model, outcome.skipped) == ("enough", True, 0)
+    model = FakeChatModel(responses=[judge_reply(False)])
+    outcome = _judge([_round("A", [0.999], pages=[1])], model)
+    assert (outcome.verdict, outcome.used_model, outcome.skipped) == ("partly_enough", True, 0)
+
+    # A sure sub-question stays enough when the model fails for the others (rules decide those).
+    model = FakeChatModel(responses=[])
+    rounds = [_round("A", [0.99], pages=[1]), _round("B", [0.9], pages=[2])]
+    outcome = _judge(rounds, model, cfg=cfg)
+    assert (outcome.verdict, outcome.skipped) == ("enough", 1) and outcome.fallback

@@ -159,6 +159,7 @@ def compose_result(
         "search_queries": list(values.get("sub_questions") or []),
         "fallbacks": fallbacks,
         "sufficiency": values.get("sufficiency"),
+        "retrieval_error": values.get("retrieval_error"),
     }
     if values.get("sufficiency") in ("partly_enough", "not_enough"):
         meta["missing"] = list(values.get("missing") or [])

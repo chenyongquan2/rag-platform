@@ -249,6 +249,7 @@ class Tracer:
                     "missing": list(getattr(out, "missing", ())),
                     "fallback": getattr(out, "fallback", None),
                     "used_model": bool(getattr(out, "used_model", False)),
+                    "skipped": int(getattr(out, "skipped", 0)),
                 },
             )
             return out

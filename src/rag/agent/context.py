@@ -71,6 +71,16 @@ class AgentContext:
         would eat into it. At most half the total, so a short deadline still searches."""
         return min(self.settings.agent_answer_reserve_ms, self.total_ms // 2)
 
+    def search_time_ms(self) -> float:
+        """Time a search could get now: what is left minus the answer's time (may be negative)."""
+        return self.deadline.remaining_ms() - self.reserve_ms
+
+    def can_search(self) -> bool:
+        """Whether a search of round two or later has the least time worth spending
+        (`agent_search_min_ms`, spec P3-06): with less it would embed the question and then have
+        no time left to rerank."""
+        return self.search_time_ms() >= self.settings.agent_search_min_ms
+
     def retrieval_deadline_ms(self) -> int:
         """Time limit given to one search: what is left minus the answer's time, and never more
         than a plain search_docs would get."""

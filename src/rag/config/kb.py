@@ -235,6 +235,10 @@ class AgentConfig(_Strict):
     - `multi_queries`: phrasings of each missing sub-question in round two (multi-query).
     - `hyde`: round three searches with a hypothetical answer passage (HyDE, s8-2); off: round
       three asks for new phrasings again.
+    - `judge_skip_score` (spec P3-06): a sub-question that has a chunk with a rerank score at or
+      above this is taken as grounded without asking the judge model; when no sub-question is left
+      to ask, no model call is made. None: the model is asked about every sub-question that has
+      chunks above the threshold (the P3-03 behaviour).
     """
 
     max_rounds: int = Field(default=3, ge=1)
@@ -246,6 +250,7 @@ class AgentConfig(_Strict):
     judge: bool = False
     multi_queries: int = Field(default=3, ge=1, le=6)
     hyde: bool = True
+    judge_skip_score: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class KnowledgeBaseConfig(_Strict):

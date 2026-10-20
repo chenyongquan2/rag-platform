@@ -57,6 +57,9 @@ def thread_id(session_id: str | None, run_id: str) -> str:
 
 QueryKind = Literal["original", "multi_query", "hyde"]
 
+_KEEP_BELOW = 3
+"""Chunks below the threshold a round keeps apart (the retrieval layer's number, s10-2)."""
+
 
 class SearchQuery(BaseModel):
     """One search of a round: the text sent to the retrieval layer, the sub-question it is
@@ -103,15 +106,35 @@ class RetrievalRound(BaseModel):
         query: str = "",
         kind: QueryKind = "original",
     ) -> Self:
+        """The round of one search. After a rerank timeout (some candidates, or all, without a
+        rerank score) only the chunks the reranker scored count (spec P3-06): `search_docs` keeps
+        the unscored ones behind the scored ones because it has no second chance (s16-8), but
+        here a chunk nobody judged is no evidence for the judge or the answer, and the graph can
+        search again. Scored chunks at or above the threshold stay as `chunks`, scored ones below
+        it (best three) go to `below_threshold`; none at or above: the round is `not_found`. The
+        round still says `rerank_timeout`."""
         scores = [h.score for h in result.rerank if h.score is not None]
+        chunks = list(result.chunks)
+        below = list(result.below_threshold)
+        not_found = result.not_found
+        if result.rerank_timeout:
+            threshold = result.threshold.threshold if result.threshold is not None else 0.0
+            scored = [c for c in chunks if c.rerank_score is not None]
+            chunks = [c for c in scored if (c.rerank_score or 0.0) >= threshold]
+            nearest = sorted(
+                (c for c in scored if (c.rerank_score or 0.0) < threshold),
+                key=lambda c: -(c.rerank_score or 0.0),
+            )
+            below = [*below, *nearest][:_KEEP_BELOW]
+            not_found = not chunks
         return cls(
             round=round_no,
             sub_question=sub_question,
             query=query if query != sub_question else "",
             kind=kind,
-            chunks=list(result.chunks),
-            below_threshold=list(result.below_threshold),
-            not_found=result.not_found,
+            chunks=chunks,
+            below_threshold=below,
+            not_found=not_found,
             degraded=result.degraded,
             rerank_timeout=result.rerank_timeout,
             index_version=result.index_version,
@@ -181,6 +204,12 @@ class AgentState(TypedDict, total=False):
     timings_ms: Annotated[dict[str, float], add_timings]
     loop: bool
     stop_reason: str | None
+    round_started: float | None
+    """Reading of the run's clock when the current round began (set by the rewrite step); the
+    judge step takes the round's duration from it (spec P3-06)."""
+    retrieval_error: str | None
+    """Error category of a search of round two or later that failed and was left out
+    (`retrieval_timeout`, `retrieval_failed`); the result carries it (spec P3-06)."""
     answer: Answer | None
     result: AskResult | None
 

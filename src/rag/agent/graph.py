@@ -10,6 +10,8 @@
     rewrite  -> retrieve
              -> answer    (token cap reached while rewriting)
     retrieve -> judge
+             -> answer    (a later round that could not search: no time left, or the search
+                           failed; the chunks of the earlier rounds are answered from)
     judge    -> rewrite   (another round: not enough found, and no limit reached)
              -> answer    (enough, or max rounds, deadline or token cap reached)
     answer -> verify -> END
@@ -52,6 +54,10 @@ def _after_rewrite(state: AgentState) -> str:
     return "answer" if state.get("stop_reason") else "retrieve"
 
 
+def _after_retrieve(state: AgentState) -> str:
+    return "answer" if state.get("stop_reason") else "judge"
+
+
 def _after_judge(state: AgentState) -> str:
     return "rewrite" if state.get("loop") else "answer"
 
@@ -78,7 +84,7 @@ def build_graph(checkpointer: Any) -> Any:
     graph.add_conditional_edges(
         "rewrite", _after_rewrite, {"retrieve": "retrieve", "answer": "answer"}
     )
-    graph.add_edge("retrieve", "judge")
+    graph.add_conditional_edges("retrieve", _after_retrieve, {"judge": "judge", "answer": "answer"})
     graph.add_conditional_edges("judge", _after_judge, {"rewrite": "rewrite", "answer": "answer"})
     graph.add_edge("answer", "verify")
     graph.add_edge("verify", END)
