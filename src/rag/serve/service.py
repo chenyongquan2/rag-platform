@@ -209,6 +209,8 @@ class _Call:
     """The success path's record; failures get one built from the fields above."""
     stage: str | None = None
     """The graph node a streamed request is in (the record of a cancelled one names it)."""
+    cancel_note: dict[str, str] = field(default_factory=dict)
+    """Why a streamed request is cancelled, when the stream knows (`by`: slow_client)."""
 
     def elapsed_ms(self) -> float:
         return (time.perf_counter() - self.began) * 1000.0
@@ -274,6 +276,7 @@ class SearchService:
         self.load_s: float | None = None
         self._agent = agent
         self._streams: set[asyncio.Task[None]] = set()  # the runs of open streams
+        self._shutting_down = False
         self._answer_model = answer_model  # None: the runtime's `online` chat model
         self._helper_model = helper_model  # None: the runtime's `agent_rewrite_profile` model
 
@@ -546,6 +549,7 @@ class SearchService:
         resume_token: str | None = None,
         answer: str | None = None,
         emit: Callable[[str, dict[str, Any]], None] | None = None,
+        cancel_note: dict[str, str] | None = None,
     ) -> AskResponse:
         """The one implementation of `ask_docs` and of the streamed call (`emit` is the stream's
         listener: the run's events go to it as they happen)."""
@@ -574,6 +578,8 @@ class SearchService:
             config_version=self._config_version(cfg, pipeline),
             extra=extra,
         ) as call:
+            if cancel_note is not None:
+                call.cancel_note = cancel_note
             if cfg is None:
                 raise ServiceError(ErrorCategory.KB_NOT_FOUND, request_id, detail=f"kb {kb!r}")
             deadline_ms = self.settings.agent_deadline_ms if deadline_ms is None else deadline_ms
@@ -678,6 +684,8 @@ class SearchService:
         `client_cancelled` and its span ends `cancelled`. The task, not the generator, does
         that work, because the generator is being cancelled itself when this happens."""
         request_id = request_id or new_request_id()
+        if self._shutting_down:
+            raise ServiceError(ErrorCategory.SERVER_SHUTDOWN, request_id, detail="closing")
         beat = self.settings.sse_heartbeat_s if heartbeat_s is None else heartbeat_s
         queue: asyncio.Queue[Any] = asyncio.Queue()
         began = time.perf_counter()
@@ -699,6 +707,7 @@ class SearchService:
         self._streams.add(task)
         task.add_done_callback(self._streams.discard)
         started = False
+        ended = False  # an event that ends a stream (answer, question, error) went out
         try:
             while True:
                 try:
@@ -709,6 +718,10 @@ class SearchService:
                     yield HEARTBEAT
                     continue
                 if item is _END:
+                    if self._shutting_down and started and not ended:
+                        # Cancelled by the shutdown: say so, the stream would end silently.
+                        failure = ErrorResponse.of(ErrorCategory.SERVER_SHUTDOWN, request_id)
+                        yield StreamEvent("error", failure.model_dump())
                     return
                 if isinstance(item, ServiceError):
                     if not started:
@@ -716,6 +729,7 @@ class SearchService:
                     failure = ErrorResponse.of(item.category, item.request_id)
                     item = StreamEvent("error", failure.model_dump())
                 started = True
+                ended = ended or item.name in ("answer", "need_clarification", "error")
                 yield item
         finally:
             if not task.done():
@@ -733,14 +747,23 @@ class SearchService:
         """Run the request and put its events in `queue`; a `ServiceError` for a failure; `_END`
         last, however it ends."""
         first: dict[str, float] = {}
+        note: dict[str, str] = {}
+        run = asyncio.current_task()
 
         def emit(name: str, data: dict[str, Any]) -> None:
             if name not in first and name in ("progress", "token"):
                 first[name] = round((time.perf_counter() - began) * 1000.0, 3)
+            if queue.qsize() >= self.settings.sse_queue_max_events and run is not None:
+                # The client is not reading: stop the run instead of keeping its events.
+                note["by"] = "slow_client"
+                run.cancel()
+                return
             queue.put_nowait(StreamEvent(name, data))
 
         try:
-            response = await self._ask_docs(credentials, request_id=request_id, emit=emit, **ask)
+            response = await self._ask_docs(
+                credentials, request_id=request_id, emit=emit, cancel_note=note, **ask
+            )
             for event in self._closing_events(response, first):
                 queue.put_nowait(event)
         except ServiceError as err:
@@ -788,6 +811,17 @@ class SearchService:
         )
         return [last, done]
 
+    def begin_shutdown(self) -> None:
+        """The server is going away: no new stream starts, and the runs of the open ones
+        are cancelled now. Each generator then ends its stream with an `error` event
+        (`server_shutdown`) and each run is recorded as cancelled by the shutdown. Called by
+        the server before it waits for open responses (`rag.serve.server`): uvicorn runs the
+        app's own shutdown code only after they have ended, which for a stream is too late.
+        Call it on the event loop of the streams."""
+        self._shutting_down = True
+        for task in list(self._streams):
+            task.cancel()
+
     async def cancel_streams(self) -> None:
         """Cancel the runs of the open streams and wait until they have cleaned up (at shutdown;
         a stream whose client is gone has been cancelled already)."""
@@ -822,7 +856,7 @@ class SearchService:
             extra={},
         ) as call:
             problem = None
-            if not isinstance(rated_request_id, str) or not _REQUEST_ID.match(rated_request_id):
+            if not isinstance(rated_request_id, str) or not _REQUEST_ID.fullmatch(rated_request_id):
                 problem = "request_id must be the id of a request"
             elif not isinstance(useful, bool):
                 problem = "useful must be true or false"
@@ -1027,7 +1061,7 @@ class SearchService:
                 problem = f"answer longer than {self.settings.search_max_query_chars} characters"
         if problem is not None:
             raise ServiceError(ErrorCategory.INVALID_REQUEST, request_id, detail=problem)
-        if resume_token is not None and not _RESUME_TOKEN.match(resume_token):
+        if resume_token is not None and not _RESUME_TOKEN.fullmatch(resume_token):
             # Cannot be a token we issued: the same answer as for one that is unknown.
             raise ServiceError(
                 ErrorCategory.INVALID_RESUME_TOKEN, request_id, detail="malformed resume_token"
@@ -1134,7 +1168,13 @@ class SearchService:
                             call,
                             flags=[ErrorCategory.CLIENT_CANCELLED],
                             timings_ms={"request": call.elapsed_ms()},
-                            extra={**call.extra, "cancelled": True, "cancelled_at": call.stage},
+                            extra={
+                                **call.extra,
+                                "cancelled": True,
+                                "cancelled_at": call.stage,
+                                "cancelled_by": call.cancel_note.get("by")
+                                or ("shutdown" if self._shutting_down else "client"),
+                            },
                         )
                     )
                     raise

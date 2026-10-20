@@ -98,7 +98,15 @@ def test_http_errors_and_request_id() -> None:
             "invalid_request",
         )
         assert "k" not in body["message"].split()  # fixed text, no echo of the input
-        _error(client.post("/v1/search_docs", content=b"{not json"), 400, "invalid_request")
+        _error(
+            client.post(
+                "/v1/search_docs",
+                content=b"{not json",
+                headers={"Content-Type": "application/json"},
+            ),
+            400,
+            "invalid_request",
+        )
         _error(client.post("/v1/search_docs", json=["x"]), 400, "invalid_request")
         _error(
             client.post("/v1/search_docs", json={"kb": "hf_docs", "query": "q", "top_k": "x"}),
@@ -156,7 +164,13 @@ def test_rejected_bodies_write_records(tmp_path: Path) -> None:
                 "/v1/search_docs", json={"kb": "hf_docs", "x": 1}, headers={"X-Request-Id": "b-1"}
             )
             _error(r, 400, "invalid_request")
-            _error(client.post("/v1/get_context", content=b"{"), 400, "invalid_request")
+            _error(
+                client.post(
+                    "/v1/get_context", content=b"{", headers={"Content-Type": "application/json"}
+                ),
+                400,
+                "invalid_request",
+            )
         spans = [s.name for s in obs.span_exporter.get_finished_spans()]
     records = [json.loads(line) for line in path.read_text("utf-8").splitlines()]
     assert [(r["tool"], r["flags"]) for r in records] == [

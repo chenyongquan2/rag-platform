@@ -18,6 +18,8 @@ _TEST_DEFAULTS: dict[str, Any] = {
     "business_record_path": "",
     "log_dir": "",
     "log_stderr_level": "OFF",
+    # Starlette's test client sends `Host: testserver`.
+    "service_allowed_hosts": ["testserver"],
 }
 
 

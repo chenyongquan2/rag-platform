@@ -69,6 +69,20 @@ class RawStream:
             self.seen += chunk
         return self.seen
 
+    def read_to_end(self, timeout_s: float = 10.0) -> bytes:
+        """Everything until the server closes the connection."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            self.sock.settimeout(max(0.05, deadline - time.monotonic()))
+            try:
+                chunk = self.sock.recv(65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            self.seen += chunk
+        return self.seen
+
     def close(self) -> None:
         self.sock.close()
 
@@ -266,3 +280,84 @@ def test_a_waiting_request_runs_after_the_first_one_disconnects(tmp_path: Path) 
 def _holders(service: SearchService) -> int:
     """Requests that hold or wait for any session lock (the count the lock registry keeps)."""
     return sum(entry[1] for entry in service.agent.locks._entries.values())
+
+
+# ---- review round 1: shutdown and a client that does not read -------------------------------
+
+
+def test_a_shutdown_with_a_stream_open_cancels_it_within_seconds(tmp_path: Path) -> None:
+    """uvicorn waits for open responses before it runs the app's shutdown code, so the end of the
+    stream has to come from the server's own shutdown step (`rag.serve.server.make_server`), not
+    from the lifespan: the real order, a real server told to exit while a client is reading."""
+    model = SlowStreamingChatModel(default_response=LONG, chunk_chars=4, delay_s=0.05)
+    with memory_observability(business_record_path=str(tmp_path / "records.jsonl")):
+        service, _ = _service(tmp_path, model=model, service_shutdown_timeout_s=5)
+        server = LiveServer(build_http_app(service), service=service)
+        server.__enter__()
+        try:
+            stream = RawStream(server.port, BODY, request_id="req-bye")
+            stream.read_until(b"event: token")
+            assert _wait(lambda: model.pieces_sent >= 3)
+            began = time.monotonic()
+        finally:
+            server.__exit__(None, None, None)  # should_exit: the server shuts down
+        took = time.monotonic() - began
+        tail = stream.read_to_end(5).decode()
+        stream.close()
+    assert took < 3.0, f"the shutdown waited {took:.1f} s for the open stream"
+    assert model.closed.is_set() and model.pieces_sent < len(LONG) // 4
+    # The client is told, with an event, that the server is going away; no `done`.
+    assert 'event: error\ndata: {"error":"server_shutdown"' in tail and "event: done" not in tail
+    (record,) = _records(tmp_path)
+    assert record["request_id"] == "req-bye" and record["flags"] == ["client_cancelled"]
+    assert record["extra"]["cancelled_by"] == "shutdown"
+    assert not service._streams
+
+
+def test_a_client_that_does_not_read_is_cut_off_when_its_queue_is_full(tmp_path: Path) -> None:
+    """The events of a stream wait in a queue until the client reads them. A client that stops
+    reading must not make the server keep them all: past `sse_queue_max_events` the run is
+    cancelled (model stopped, lock released) and recorded as cancelled by a slow client."""
+    import asyncio
+
+    from rag.security.access import Credentials
+
+    model = SlowStreamingChatModel(default_response=LONG, chunk_chars=2, delay_s=0.005)
+    with memory_observability(business_record_path=str(tmp_path / "records.jsonl")):
+        service, _ = _service(tmp_path, model=model, sse_queue_max_events=20)
+
+        async def scenario() -> list[str]:
+            events = service.ask_docs_stream(
+                Credentials(transport="http"),
+                kb="hf_docs",
+                question="How do I push a model?",
+                session_id="s1",
+                request_id="req-slow",
+            )
+            await anext(events)  # the client reads one event, then stops
+            deadline = time.monotonic() + 5
+            while service._streams and time.monotonic() < deadline:
+                await asyncio.sleep(0.02)
+            assert not service._streams, "the run kept going into an unbounded queue"
+            assert model.closed.is_set() and len(service.agent.locks) == 0
+            left = [getattr(item, "name", "?") async for item in events]
+            return left
+
+        left = asyncio.run(scenario())
+    # What is left is what was queued before the cut: no `answer`, no `done`.
+    assert "answer" not in left and "done" not in left and len(left) <= 25
+    (record,) = _records(tmp_path)
+    assert record["flags"] == ["client_cancelled"]
+    assert record["extra"]["cancelled_by"] == "slow_client"
+    assert model.pieces_sent < len(LONG) // 2
+
+
+def test_a_stream_asked_for_after_the_shutdown_began_is_refused_with_503(tmp_path: Path) -> None:
+    from starlette.testclient import TestClient
+
+    service, _ = _service(tmp_path, model=StreamingFakeChatModel(default_response="x [1]."))
+    service.begin_shutdown()
+    with TestClient(build_http_app(service)) as client:
+        r = client.post("/v1/ask_docs/stream", json=BODY)
+    assert r.status_code == 503 and r.json()["error"] == "server_shutdown"
+    assert "text/event-stream" not in r.headers["content-type"]

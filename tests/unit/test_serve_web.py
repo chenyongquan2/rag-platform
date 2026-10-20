@@ -90,7 +90,7 @@ def test_root_serves_the_page_with_security_headers() -> None:
         # Nothing else is served from that folder, and no path leaves it.
         for bad in ("/ui/index.html", "/ui/../service.py", "/ui/%2e%2e/service.py", "/ui/nope.js"):
             assert client.get(bad).status_code == 404, bad
-        assert client.post("/").status_code == 405
+        assert client.post("/", json={}).status_code == 405
 
 
 class _Scan(HTMLParser):
@@ -170,6 +170,9 @@ BAD_FEEDBACK: list[Any] = [
     {"request_id": "r1", "useful": True, "comment": "x" * 501},
     {"request_id": "has space", "useful": True},
     {"request_id": "a" * 65, "useful": True},
+    {"request_id": "abc\n", "useful": True},  # `$` would let a trailing newline through
+    {"request_id": "abc\r\n", "useful": True},
+    {"request_id": "", "useful": True},
     {"request_id": "r1", "useful": True, "extra": "field"},
 ]
 
@@ -262,3 +265,13 @@ def test_app_js_never_sets_html() -> None:
         text = (WEB / name).read_text("utf-8")
         for pattern in FORBIDDEN:
             assert not re.search(pattern, text), f"{name}: {pattern}"
+
+
+def test_a_trailing_newline_is_not_part_of_a_session_id() -> None:
+    with TestClient(build_http_app(_service())) as client:
+        base = {"kb": "hf_docs", "question": "q"}
+        for route in ("/v1/ask_docs", "/v1/ask_docs/stream"):
+            r = client.post(route, json={**base, "session_id": "s1\n"})
+            assert r.status_code == 400, route
+        # The same request without the newline is accepted.
+        assert client.post("/v1/ask_docs", json={**base, "session_id": "s1"}).status_code == 200

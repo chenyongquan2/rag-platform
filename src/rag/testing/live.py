@@ -16,20 +16,34 @@ from typing import Any
 
 import uvicorn
 
+from rag.config import ServiceSettings
+from rag.serve.server import make_server
+from rag.serve.service import SearchService
+
 
 class LiveServer:
     """`uvicorn` serving `app` on 127.0.0.1 and a free port, started and stopped as a context
-    manager. Lifespan runs, so the app's start-up and shutdown code runs too."""
+    manager. Lifespan runs, so the app's start-up and shutdown code runs too. With `service`
+    the server is the one `python -m rag.serve http` runs (`rag.serve.server.make_server`:
+    it tells the service when it shuts down)."""
 
-    def __init__(self, app: Any, *, startup_timeout_s: float = 20.0) -> None:
+    def __init__(
+        self, app: Any, *, service: SearchService | None = None, startup_timeout_s: float = 20.0
+    ) -> None:
         sock = socket.socket()
         sock.bind(("127.0.0.1", 0))
         self.port: int = sock.getsockname()[1]
         sock.close()
-        config = uvicorn.Config(
-            app, host="127.0.0.1", port=self.port, log_config=None, log_level="warning"
-        )
-        self._server = uvicorn.Server(config)
+        if service is not None:
+            settings: ServiceSettings = service.settings
+            self._server: uvicorn.Server = make_server(
+                app, "127.0.0.1", self.port, service=service, settings=settings
+            )
+        else:
+            config = uvicorn.Config(
+                app, host="127.0.0.1", port=self.port, log_config=None, log_level="warning"
+            )
+            self._server = uvicorn.Server(config)
         self._thread = threading.Thread(target=self._server.run, name="live-server", daemon=True)
         self._startup_timeout_s = startup_timeout_s
 

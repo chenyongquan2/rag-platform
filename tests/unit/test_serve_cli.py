@@ -72,3 +72,52 @@ def test_stdio_and_http_start_the_load_and_run(monkeypatch: pytest.MonkeyPatch) 
         paths
     )
     assert ran[5] == ("shutdown", None)
+
+
+# ---- spec P3-04 review round 1: the dev-fake mode, the import, the uvicorn settings ---------
+
+
+def test_dev_fake_is_not_imported_unless_asked_for() -> None:
+    import subprocess
+    import sys
+
+    code = "import rag.serve.cli, sys; print('rag.serve.devfake' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False"
+
+
+def test_dev_fake_refuses_other_addresses_and_writes_its_records_elsewhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[Any] = []
+    monkeypatch.setattr(cli, "init_observability", lambda s, name: seen.append(s))
+    monkeypatch.setattr(cli, "shutdown_observability", lambda: None)
+    started: list[tuple[str, int]] = []
+    settings = observe_settings(business_record_path="data/observe/records/business.jsonl")
+
+    def run_http(app: Any, host: str, port: int) -> None:
+        started.append((host, port))
+
+    assert (
+        cli.main(["http", "--dev-fake", "--host", "0.0.0.0"], settings=settings, run_http=run_http)
+        == 2
+    )
+    assert started == [] and seen == []  # refused before anything was set up
+    assert (
+        cli.main(["http", "--dev-fake", "--port", "1"], settings=settings, run_http=run_http) == 0
+    )
+    assert started == [("127.0.0.1", 1)]
+    # Records of fake questions do not go into the file of real ones.
+    assert seen[0].business_record_path == "data/observe/dev-fake/business.jsonl"
+    assert settings.business_record_path == "data/observe/records/business.jsonl"
+
+
+def test_the_server_waits_a_few_seconds_for_open_streams_then_cancels_them() -> None:
+    from rag.serve.server import make_server
+
+    settings = observe_settings(service_shutdown_timeout_s=7)
+    server = make_server(object(), "127.0.0.1", 1, service=None, settings=settings)  # type: ignore[arg-type]
+    assert server.config.timeout_graceful_shutdown == 7
+    assert (server.config.host, server.config.port) == ("127.0.0.1", 1)
+    with pytest.raises(ValueError):
+        observe_settings(service_shutdown_timeout_s=0)

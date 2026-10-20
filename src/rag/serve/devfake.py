@@ -32,7 +32,6 @@ from rag.testing.serve import FakePipelineBuilder
 from rag.types import RetrievalResult
 
 KB = "demo_docs"
-LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 PAGES: dict[str, tuple[str, str]] = {
     "hub": (

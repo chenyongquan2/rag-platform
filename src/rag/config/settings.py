@@ -385,6 +385,16 @@ class ServiceSettings(BaseSettings):
     # line is sent while the stream is silent (the retrieval and rerank seconds), so a proxy
     # that closes idle connections after 30 to 60 s keeps it open.
     sse_heartbeat_s: float = Field(default=10.0, gt=0)
+    # `sse_queue_max_events`: the events of one stream wait in a queue until the client reads
+    # them; past this many the run is cancelled (a client that stopped reading). A normal
+    # answer is a few hundred events. `service_shutdown_timeout_s`: at shutdown the server
+    # cancels the open streams at once and waits this long for the connections to close,
+    # then cancels what is left. `service_allowed_hosts`: host names, besides localhost,
+    # 127.0.0.1, [::1] and the listen address, that the HTTP routes answer to (the Host
+    # header); anything else is refused with 421.
+    sse_queue_max_events: int = Field(default=5000, gt=0)
+    service_shutdown_timeout_s: int = Field(default=5, gt=0)
+    service_allowed_hosts: list[str] = Field(default_factory=list)
     session_store_url: str = "sqlite://data/sessions/sessions.db"
     session_lock_url: str = "memory://"
 
@@ -416,6 +426,14 @@ class ServiceSettings(BaseSettings):
         if not all(isinstance(g, str) and g for g in self.service_acl_groups):
             raise ValueError("service_acl_groups must be non-empty group names")
         return self
+
+    @field_validator("service_allowed_hosts")
+    @classmethod
+    def _host_names(cls, value: list[str]) -> list[str]:
+        for name in value:
+            if not re.fullmatch(r"[A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\]", name):
+                raise ValueError(f"service_allowed_hosts: {name!r} is not a host name")
+        return value
 
     @model_validator(mode="after")
     def _agent_limits_consistent(self) -> Self:

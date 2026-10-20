@@ -525,8 +525,19 @@ def test_dev_fake_service_streams_without_a_gateway(capsys: pytest.CaptureFixtur
 
         asked = ask("How do I fix this error?", client)
         assert asked[-2][0] == "need_clarification"
-    # Fake data is only served on this machine.
-    assert main(["http", "--dev-fake", "--host", "0.0.0.0"]) == 2
+    # Fake data is only served on this machine. The server start is replaced, so a missing
+    # guard fails this test instead of opening a real server on 0.0.0.0.
+    started: list[tuple[str, int]] = []
+
+    def not_a_server(app: Any, host: str, port: int) -> None:
+        started.append((host, port))
+
+    refused = main(
+        ["http", "--dev-fake", "--host", "0.0.0.0"],
+        settings=agent_settings(),
+        run_http=not_a_server,
+    )
+    assert refused == 2 and started == []
     assert "--host 127.0.0.1" in capsys.readouterr().err
 
 

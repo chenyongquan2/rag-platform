@@ -47,6 +47,9 @@ class ErrorCategory(StrEnum):
     # was cancelled. Not a failure of the service: it is written to the business record only
     # (the request span ends `cancelled`), and no response is sent to anyone.
     CLIENT_CANCELLED = "client_cancelled"
+    # The server is shutting down: a stream that was open gets an `error` event with this
+    # category (and a request that arrives now, a 503) instead of the answer.
+    SERVER_SHUTDOWN = "server_shutdown"
 
 
 class AnswerStatus(StrEnum):

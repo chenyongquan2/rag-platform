@@ -28,6 +28,7 @@ _STATUS: dict[str, int] = {
     ErrorCategory.INTERNAL_ERROR: 500,
     ErrorCategory.AGENT_DEADLINE: 504,
     ErrorCategory.INVALID_RESUME_TOKEN: 400,
+    ErrorCategory.SERVER_SHUTDOWN: 503,
 }
 
 _MESSAGES: dict[str, str] = {
@@ -64,6 +65,11 @@ _MESSAGES: dict[str, str] = {
         "once; ask the question again to get a new one."
     ),
 }
+
+
+_MESSAGES[ErrorCategory.SERVER_SHUTDOWN] = (
+    "The server is shutting down and stopped this request; ask again in a minute."
+)
 
 
 class ServiceError(Exception):

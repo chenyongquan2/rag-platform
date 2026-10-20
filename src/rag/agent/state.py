@@ -41,7 +41,9 @@ NO_SESSION = "-"
 
 def valid_session_id(value: object) -> bool:
     """`-` is the no-session name in a thread id, so a real session may not use it."""
-    return isinstance(value, str) and value != NO_SESSION and SESSION_ID.match(value) is not None
+    return (
+        isinstance(value, str) and value != NO_SESSION and SESSION_ID.fullmatch(value) is not None
+    )
 
 
 def thread_id(session_id: str | None, run_id: str) -> str:

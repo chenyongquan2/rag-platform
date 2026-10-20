@@ -39,9 +39,11 @@ import anyio
 from mcp.server import MCPServer
 from pydantic import BaseModel, ConfigDict, ValidationError
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import BaseRoute, Mount, Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from rag.observe import new_request_id
 from rag.security.access import Credentials
@@ -115,9 +117,75 @@ class ContextRequest(BaseModel):
     mode: str | None = None
 
 
+LOCAL_NAMES = frozenset({"localhost", "127.0.0.1", "[::1]"})
+_HOST = re.compile(r"(?P<name>\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::[0-9]{1,5})?")
+_MCP_PATH = "/mcp"  # the MCP mount checks Host and Origin itself (the SDK's rebinding protection)
+
+
+def host_name(header: str) -> str | None:
+    """The host name of a `Host` header, lower case, without port and trailing dot; None when the
+    header is not a plain `name`, `name:port`, `ipv4:port` or `[ipv6]:port`."""
+    match = _HOST.fullmatch(header.strip().lower())
+    if match is None:
+        return None
+    name = match["name"]
+    return name if name.startswith("[") else name.rstrip(".")
+
+
+def allowed_host_names(listen_host: str, extra: list[str]) -> frozenset[str]:
+    """The names the HTTP routes answer to: localhost, 127.0.0.1, [::1], the address the server
+    listens on (unless it listens on every interface) and `service_allowed_hosts`."""
+    names = set(LOCAL_NAMES) | {name.lower().rstrip(".") for name in extra}
+    if listen_host not in ("", "0.0.0.0", "::"):
+        names.add(f"[{listen_host}]" if ":" in listen_host else listen_host.lower())
+    return frozenset(names)
+
+
+class RequestGuard:
+    """Refuses, before any route runs, a request whose `Host` is not one of the names the service
+    answers to (421) and a POST whose body is not declared as JSON (415), with the usual error
+    body. A page on another site can make a browser send a POST with a form or `text/plain`
+    type to a service on the developer's machine without a preflight, and a DNS name that was
+    rebound to 127.0.0.1 reaches it with its own Host header; neither is a request this service
+    was meant to answer. The MCP mount is left to the SDK's own checks."""
+
+    def __init__(self, app: ASGIApp, *, allowed_hosts: frozenset[str]) -> None:
+        self.app = app
+        self.allowed_hosts = allowed_hosts
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope["path"].startswith(_MCP_PATH):
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+        refusal = None
+        if host_name(headers.get("host", "")) not in self.allowed_hosts:
+            refusal = 421
+        elif scope["method"] == "POST" and not _is_json(headers.get("content-type", "")):
+            refusal = 415
+        if refusal is None:
+            await self.app(scope, receive, send)
+            return
+        given = headers.get(REQUEST_ID_HEADER.lower(), "")
+        request_id = given if _REQUEST_ID.fullmatch(given) else new_request_id()
+        logger.warning(
+            "request %s refused with %s (Host %r)", request_id, refusal, headers.get("host")
+        )
+        response = JSONResponse(
+            ErrorResponse.of(ErrorCategory.INVALID_REQUEST, request_id).model_dump(mode="json"),
+            status_code=refusal,
+            headers={REQUEST_ID_HEADER: request_id},
+        )
+        await response(scope, receive, send)
+
+
+def _is_json(content_type: str) -> bool:
+    return content_type.split(";", 1)[0].strip().lower() == "application/json"
+
+
 def _request_id(request: Request) -> str:
     given = request.headers.get(REQUEST_ID_HEADER)
-    if given and _REQUEST_ID.match(given):
+    if given and _REQUEST_ID.fullmatch(given):
         return given
     return new_request_id()
 
@@ -343,4 +411,8 @@ def build_http_app(
         finally:
             await service.cancel_streams()  # runs of streams still open end cleanly
 
-    return Starlette(routes=routes, lifespan=lifespan)
+    guard = Middleware(
+        RequestGuard,
+        allowed_hosts=allowed_host_names(host, service.settings.service_allowed_hosts),
+    )
+    return Starlette(routes=routes, lifespan=lifespan, middleware=[guard])

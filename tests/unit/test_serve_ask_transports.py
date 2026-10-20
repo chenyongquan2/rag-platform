@@ -143,7 +143,13 @@ def test_http_ask_docs() -> None:
             400,
             "invalid_request",
         )  # unknown body field
-        error(client.post("/v1/ask_docs", content=b"{not json"), 400, "invalid_request")
+        error(
+            client.post(
+                "/v1/ask_docs", content=b"{not json", headers={"Content-Type": "application/json"}
+            ),
+            400,
+            "invalid_request",
+        )
         error(client.post("/v1/ask_docs", json={"kb": "hf_docs"}), 400, "invalid_request")
         error(
             client.post(

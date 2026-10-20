@@ -20,12 +20,14 @@ from typing import Any
 
 from rag.config import ServiceSettings
 from rag.observe import init_observability, shutdown_observability
-from rag.serve.devfake import LOCAL_HOSTS, build_dev_service
 from rag.serve.http_app import build_http_app
 from rag.serve.mcp_server import build_mcp_server
+from rag.serve.server import make_server
 from rag.serve.service import SearchService
 
 SERVICE_NAME = "rag-serve"
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+DEV_FAKE_RECORDS = "data/observe/dev-fake/business.jsonl"
 
 
 def build_parser(settings: ServiceSettings) -> argparse.ArgumentParser:
@@ -57,20 +59,13 @@ def _run_stdio(mcp: Any) -> None:
     mcp.run("stdio")
 
 
-def _run_http(app: Any, host: str, port: int) -> None:
-    import uvicorn
-
-    # log_config=None keeps our logging setup (stderr + log file) instead of uvicorn's.
-    uvicorn.run(app, host=host, port=port, log_config=None, log_level="warning")
-
-
 def main(
     argv: Sequence[str] | None = None,
     *,
     settings: ServiceSettings | None = None,
     service_factory: Callable[[ServiceSettings], SearchService] = SearchService,
     run_stdio: Callable[[Any], None] = _run_stdio,
-    run_http: Callable[[Any, str, int], None] = _run_http,
+    run_http: Callable[[Any, str, int], None] | None = None,
 ) -> int:
     settings = settings if settings is not None else ServiceSettings()
     args = build_parser(settings).parse_args(argv)
@@ -80,8 +75,14 @@ def main(
             print(f"--dev-fake serves fake data: use --host {hosts}", file=sys.stderr)
             return 2
 
+        # Only now: the fake knowledge base and its fakes are not imported by a normal server.
+        from rag.serve.devfake import build_dev_service
+
         def service_factory(s: ServiceSettings) -> SearchService:
             return build_dev_service(s, search_ms=args.fake_search_ms, token_ms=args.fake_token_ms)
+
+        # Records of fake questions stay out of the file of real ones.
+        settings = settings.model_copy(update={"business_record_path": DEV_FAKE_RECORDS})
 
     init_observability(settings, SERVICE_NAME)
     service = service_factory(settings)
@@ -91,6 +92,11 @@ def main(
             run_stdio(build_mcp_server(service, transport="stdio"))
         else:
             mcp = build_mcp_server(service, transport="streamable-http")
+            if run_http is None:
+
+                def run_http(app: Any, host: str, port: int) -> None:
+                    make_server(app, host, port, service=service, settings=settings).run()
+
             # The app's lifespan starts the load once uvicorn runs.
             run_http(build_http_app(service, mcp=mcp, host=args.host), args.host, args.port)
     finally:
