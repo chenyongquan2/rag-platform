@@ -1,0 +1,24 @@
+# Elasticsearch snapshot repository (spec P8-01, design s16-6). NOT APPLIED.
+#
+# Snapshots need `path.repo`, a node setting read only at start: applying this file recreates the
+# elasticsearch container (same image, same `es-data` volume, so the indexes stay; about two
+# minutes without search). Elasticsearch is shared by every worktree on this machine, so apply it
+# only when nobody else is using it, never with `docker compose down`.
+#
+# The repository folder is a bind mount outside the checkout and outside Docker's volumes
+# (default `../rag-platform-data/es-snapshots`, next to the shared cost ledger), so neither
+# `down -v` nor deleting a worktree removes the backups. Set ES_SNAPSHOT_DIR to put it elsewhere.
+#
+# See what would change (nothing is created or stopped):
+#   docker compose --dry-run -f docker-compose.yml -f deploy/elasticsearch/snapshot.override.yml \
+#       up -d --no-deps elasticsearch
+# Apply (from the main checkout, when nobody else uses Elasticsearch):
+#   docker compose -f docker-compose.yml -f deploy/elasticsearch/snapshot.override.yml \
+#       up -d --no-deps elasticsearch
+# Then register the repository and a daily policy (README, "Backup and restore").
+services:
+  elasticsearch:
+    environment:
+      path.repo: /usr/share/elasticsearch/snapshots
+    volumes:
+      - ${ES_SNAPSHOT_DIR:-../rag-platform-data/es-snapshots}:/usr/share/elasticsearch/snapshots

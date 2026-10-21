@@ -205,6 +205,28 @@ def cached_questions(questions: Sequence[str]) -> list[str]:
     return [q for q in questions if lookup(q) is not None]
 
 
+def warm_query_cache(questions: Sequence[str], *, max_cny: float) -> dict[str, Any]:
+    """Embed the questions whose query vector is not cached yet, with the real gateway (this
+    costs money: about 0.5 CNY per million tokens; refused above `max_cny`, estimated at one
+    token per character) so a real search load test is neither degraded nor paying per request.
+    The ledger records every call as usual."""
+    from rag.config import ServiceSettings
+    from rag.cost import CostLedger
+    from rag.embed import make_embedding
+
+    settings = ServiceSettings()
+    missing = [q for q in questions if q not in set(cached_questions(questions))]
+    ledger = CostLedger.from_settings(settings)
+    estimate = ledger.estimate(settings.embed_model, sum(len(q) for q in missing))
+    if estimate > max_cny:
+        raise RuntimeError(f"warming {len(missing)} questions may cost {estimate:.4f} CNY")
+    ledger.check_budget(estimate)
+    embed = make_embedding("query", settings)
+    for q in missing:
+        embed.get_query_embedding(q)
+    return {"warmed": len(missing), "estimated_cny": round(estimate, 6)}
+
+
 async def run_load(
     url: str,
     *,
@@ -244,6 +266,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--questions", help="JSONL question set (default: three fixed questions)")
     parser.add_argument("--limit", type=int, default=60, help="questions taken from the set")
     parser.add_argument("--cached-only", action="store_true")
+    parser.add_argument(
+        "--warm-cache-cny",
+        type=float,
+        default=0.0,
+        help="first embed the uncached questions with the real gateway, at most this many CNY",
+    )
     parser.add_argument("--levels", default="1,4,8,16")
     parser.add_argument("--duration", type=float, default=30.0)
     parser.add_argument("--warmup", type=float, default=5.0)
@@ -261,6 +289,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         from rag.eval.questions import load_question_set
 
         questions = [q.question for q in load_question_set(repo_path(args.questions)).questions]
+    questions = questions[: args.limit]
+    if args.warm_cache_cny > 0:
+        print(json.dumps(warm_query_cache(questions, max_cny=args.warm_cache_cny)))
     if args.cached_only:
         questions = cached_questions(questions)
     questions = questions[: args.limit]

@@ -23,9 +23,10 @@ Restore order (what the P5-02 incident taught: a docstore bound to another index
 ingest treat every page as new): 1. restore the index under a new version name; 2. copy the
 docstore of the old version to the new name and bind it to the new index's uuid
 (`rebind-docstore`); 3. copy the L0 embedding cache back (the next ingest then costs nothing);
-4. switch the alias (`python -m rag.index switch`, spec P2-01); 5. bump the data generation, so no
-cache entry of before is served. Never bind a docstore to an index that was not restored from
-the same backup: the docstore then claims chunks the index does not have.
+4. switch the alias (`python -m rag.index.cli switch --kb <kb> --version <n>`, spec P2-01), which
+also adds 1 to the data generation, so no cache entry of before is served. Never bind a docstore
+to an index that was not restored from the same backup: the docstore then claims chunks the index
+does not have.
 """
 
 from __future__ import annotations

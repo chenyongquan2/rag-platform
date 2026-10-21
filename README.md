@@ -309,9 +309,11 @@ pipeline.get_context(result.chunks[0].chunk_id, "neighbors")  # page content + u
 One process serves three tools: `search_docs(kb, query, filters, top_k, deadline_ms)`,
 `get_context(chunk_id, mode)` and `list_knowledge_bases()`. At start it loads the reranker in the
 background (about a minute; logged as `search service ready in ... s`); a search that arrives
-earlier waits for the load within its deadline, then answers `not_ready`. Every request runs as
-the caller in `SERVICE_CALLER` with the document groups in `SERVICE_ACL_GROUPS` (until OAuth in
-P8); a knowledge base is visible when its `access.callers` has `*` or that caller. Responses mark
+earlier waits for the load within its deadline, then answers `not_ready`. With `AUTH_MODE=local`
+(the default) every request runs as the caller in `SERVICE_CALLER` with the document groups in
+`SERVICE_ACL_GROUPS`; with `AUTH_MODE=oauth` the caller comes from the bearer token (see
+"Production guards" below). A knowledge base is visible when its `access.callers` has `*` or that
+caller. Responses mark
 every chunk text `untrusted`; errors are only `{error, request_id, message}`, the details are in
 the log under the same request id. Each request writes one business record line and a trace.
 
@@ -349,8 +351,9 @@ or in a client's JSON config (`.mcp.json`, Claude Desktop, Cursor):
 ```
 
 For the HTTP server, register `http://127.0.0.1:28080/mcp` as a streamable-http server
-(`claude mcp add --transport http rag-docs http://127.0.0.1:28080/mcp`). It has no
-authentication until P8, so keep `SERVICE_HOST` on 127.0.0.1.
+(`claude mcp add --transport http rag-docs http://127.0.0.1:28080/mcp`). In `AUTH_MODE=local` it
+has no authentication and refuses to listen on anything but 127.0.0.1, localhost or ::1; to serve
+other machines use `AUTH_MODE=oauth`.
 
 ## Answering with the ask_docs graph
 
@@ -662,6 +665,79 @@ questions are kept in memory unless `CACHE_SEMANTIC_STORE=es`: then it creates t
 in its YAML (no lookup, no write, no `cache` field); `CACHE_ASK_ANSWERS=false` leaves the answers
 of `ask_docs` out (design s12-1 keeps the answer cache out; see `docs/decisions.md`). Numbers and
 the rule for turning L2 on: `docs/reports/P5-report.md`.
+
+## Production guards (P8-01)
+
+Who may call, how often, for how much, and what happens when the model gateway fails. Numbers
+(leak check, load test, backup timings) are in `docs/reports/P8-report.md`.
+
+**Bearer tokens (`AUTH_MODE=oauth`).** The HTTP API and MCP streamable-http are an OAuth 2.1
+resource server: the company's authorization server issues JWT access tokens, this service only
+checks them (signature from the issuer's JWKS, `iss`, `aud`, `exp`, `nbf`; asymmetric algorithms
+only). `/mcp` uses the MCP SDK's `TokenVerifier` and `AuthSettings` (401 with
+`WWW-Authenticate: Bearer ... resource_metadata=...`, and
+`/.well-known/oauth-protected-resource/mcp` names the issuer); `/v1/` uses the same verifier. A
+token's scopes pick exactly one caller from `AUTH_CALLERS`; no or several matching scopes is
+`403 forbidden`. stdio is unchanged (the local caller). The page at `/` has no login and only
+works in local mode.
+
+```text
+AUTH_MODE=oauth
+AUTH_ISSUER=https://login.example.com/          # exact `iss` of the tokens
+AUTH_AUDIENCE=https://docs.example.com/mcp      # `aud` this service accepts (its resource URL)
+AUTH_JWKS_URL=https://login.example.com/jwks    # or AUTH_JWKS_PATH=<file>
+AUTH_CALLERS='[{"scope": "rag.support", "caller": "support", "acl_groups": ["public", "support"]},
+               {"scope": "rag.read", "caller": "guest", "acl_groups": ["public"]}]'
+uv run python -m rag.serve http --host 0.0.0.0 --port 28080
+curl -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"kb": "hf_docs", "query": "push_to_hub"}' http://docs.example.com:28080/v1/search_docs
+```
+
+**Rate limit.** search_docs, ask_docs (and the stream) and get_context count per caller in a
+one-minute window in Redis (`RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_CALLERS='{"batch": 600}'`, 0 = no
+limit). Over it: `429 rate_limited` with `Retry-After`, an MCP error result with the same
+category. When Redis is down the request is let through (logged once a minute).
+
+**Daily budget.** Ledger rows written inside a request carry the caller. When today's (UTC)
+spending plus `BUDGET_ASK_ESTIMATE_CNY` would pass `BUDGET_DAILY_CALLER_CNY` (or
+`BUDGET_DAILY_CALLERS` for one caller) or `BUDGET_DAILY_CNY` for the service, ask_docs answers
+`429 budget_exceeded` (Retry-After until midnight UTC) before any model call; search_docs still
+works.
+
+**Gateway breaker.** After `CHAT_BREAKER_FAILURES` failed chat calls in a row (gateway errors and
+timeouts after the retries) chat calls fail at once for `CHAT_BREAKER_OPEN_S`, then one trial call
+decides. ask_docs then answers with the passages only (`llm_error`, as for any gateway error);
+search_docs needs no chat model. Counter `rag.model.breaker{event}`, alert `ModelGatewayBreakerOpen`.
+
+**Leak check, backup, load test.**
+
+```bash
+uv run python -m rag.eval.access --questions 3         # two OAuth callers, every tool; 0 leaks or exit 1
+uv run python -m rag.ops.backup export  --index kb_hf_docs_v1 --out <dir>
+uv run python -m rag.ops.backup restore --from <dir>/kb_hf_docs_v1 --index kb_hf_docs_v2
+uv run python -m rag.ops.backup verify  --source kb_hf_docs_v1 --target kb_hf_docs_v2
+uv run python -m rag.ops.backup copy-files --out <dir>/files      # docstores, embedding caches
+uv run python -m rag.ops.backup rebind-docstore --docstore data/docstore/kb_hf_docs_v1.json \
+    --index kb_hf_docs_v2 --out data/docstore/kb_hf_docs_v2.json
+uv run python -m rag.ops.loadtest --url http://127.0.0.1:28181 --kb demo_docs --levels 1,4,8,16
+```
+
+Restore order: index under a new version name, then the docstore copied and bound to the new
+index's uuid, then the embedding cache, then the alias switch, which also adds 1 to the data
+generation so no cache entry of before is served (`python -m rag.index.cli switch --kb hf_docs
+--version 2`). Elasticsearch snapshots (the design's way) need `path.repo`, which needs
+an Elasticsearch restart: the change is in `deploy/elasticsearch/snapshot.override.yml`, not
+applied; after applying it (when no other worktree uses Elasticsearch), register the repository
+and a daily policy:
+
+```bash
+curl -X PUT http://127.0.0.1:29200/_snapshot/local_fs -H "Content-Type: application/json" \
+     -d '{"type": "fs", "settings": {"location": "/usr/share/elasticsearch/snapshots"}}'
+curl -X PUT http://127.0.0.1:29200/_slm/policy/daily -H "Content-Type: application/json" \
+     -d '{"schedule": "0 30 2 * * ?", "name": "<daily-{now/d}>", "repository": "local_fs",
+          "config": {"indices": ["kb_*"], "include_global_state": false},
+          "retention": {"expire_after": "14d", "min_count": 3, "max_count": 14}}'
+```
 
 ## Retrieval evaluation
 
