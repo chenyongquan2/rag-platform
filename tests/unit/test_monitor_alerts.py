@@ -109,6 +109,7 @@ def test_webhook_gets_one_post_per_change_and_its_url_is_never_logged(
     with caplog.at_level(logging.DEBUG):
         receiver.handle([_alert()])
         receiver.handle([_alert()])
+        assert receiver.flush(5.0)
     assert len(sent) == 1
     assert sent[0][0] == SECRET_URL
     body = json.loads(sent[0][1])
@@ -123,9 +124,12 @@ def test_a_failing_webhook_does_not_lose_the_line_or_leak_the_url(
     def poster(url: str, body: bytes) -> int:
         raise ConnectionError(f"cannot reach {url}")
 
-    receiver = _receiver(tmp_path, Clock(), webhook_url=SECRET_URL, poster=poster)
+    receiver = _receiver(
+        tmp_path, Clock(), webhook_url=SECRET_URL, poster=poster, sleep=lambda s: None
+    )
     with caplog.at_level(logging.DEBUG):
         receiver.handle([_alert()])
+        assert receiver.flush(5.0)
     assert [r["status"] for r in _lines(tmp_path / "alerts.jsonl")] == ["firing"]
     assert "secret-token" not in caplog.text and "hooks.example.test" not in caplog.text
     assert "webhook" in caplog.text  # the failure itself is logged
@@ -134,9 +138,12 @@ def test_a_failing_webhook_does_not_lose_the_line_or_leak_the_url(
 def test_a_bad_status_from_the_webhook_is_logged_without_the_url(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    receiver = _receiver(tmp_path, Clock(), webhook_url=SECRET_URL, poster=lambda u, b: 500)
+    receiver = _receiver(
+        tmp_path, Clock(), webhook_url=SECRET_URL, poster=lambda u, b: 500, sleep=lambda s: None
+    )
     with caplog.at_level(logging.DEBUG):
         receiver.handle([_alert()])
+        assert receiver.flush(5.0)
     assert "HTTP 500" in caplog.text and "secret-token" not in caplog.text
 
 
@@ -146,6 +153,7 @@ def test_no_webhook_when_the_url_is_empty(tmp_path: Path) -> None:
 
     receiver = _receiver(tmp_path, Clock(), webhook_url="", poster=poster)
     receiver.handle([_alert()])
+    assert receiver.flush(5.0)
     assert len(_lines(tmp_path / "alerts.jsonl")) == 1
 
 
@@ -222,3 +230,110 @@ def test_http_endpoint_takes_a_prometheus_post(tmp_path: Path) -> None:
         "SearchProbeFailing",
         "HighErrorRate",
     }
+
+
+# ---- review P5-02 round 1, issue 6: state survives a restart, the webhook is retried ---------
+
+
+def test_a_restarted_receiver_rebuilds_the_firing_state_from_the_file(tmp_path: Path) -> None:
+    """Before, the firing state lived only in memory: after a restart the next repeat of a
+    firing alert was written again as a new firing line, and its resolve was dropped."""
+    clock = Clock()
+    first = _receiver(tmp_path, clock)
+    first.handle([_alert("SearchProbeFailing")])
+    first.handle([_alert("DependencyDown", dependency="redis")])
+    first.handle([_alert("DependencyDown", dependency="redis", firing=False)])
+    second = _receiver(tmp_path, clock)  # the process was restarted
+    second.handle([_alert("SearchProbeFailing")])  # Prometheus repeats it: not a new line
+    second.handle([_alert("SearchProbeFailing", firing=False)])  # its resolve is written
+    second.handle([_alert("DependencyDown", dependency="redis", firing=False)])  # already resolved
+    rows = _lines(tmp_path / "alerts.jsonl")
+    assert [(r["alertname"], r["status"]) for r in rows] == [
+        ("SearchProbeFailing", "firing"),
+        ("DependencyDown", "firing"),
+        ("DependencyDown", "resolved"),
+        ("SearchProbeFailing", "resolved"),
+    ]
+
+
+def test_the_state_is_rebuilt_from_the_rotated_files_too_and_bad_lines_are_skipped(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    first = _receiver(tmp_path, clock)
+    first.handle([_alert("HighErrorRate")])
+    path = tmp_path / "alerts.jsonl"
+    path.rename(tmp_path / "alerts.jsonl.1")  # as the writer rotates it
+    path.write_text("not json\n", "utf-8")
+    second = _receiver(tmp_path, clock)
+    second.handle([_alert("HighErrorRate")])
+    second.handle([_alert("HighErrorRate", firing=False)])
+    rows = [json.loads(line) for line in path.read_text("utf-8").splitlines()[1:]]
+    assert [r["status"] for r in rows] == ["resolved"]
+
+
+def test_a_failing_webhook_is_retried_with_backoff_then_given_up(tmp_path: Path) -> None:
+    calls: list[str] = []
+    waits: list[float] = []
+
+    def poster(url: str, body: bytes) -> int:
+        calls.append(url)
+        raise ConnectionError("refused")
+
+    receiver = _receiver(
+        tmp_path, Clock(), webhook_url=SECRET_URL, poster=poster, sleep=waits.append
+    )
+    receiver.handle([_alert()])
+    assert receiver.flush(5.0)
+    assert len(calls) == 3  # bounded: three tries in all
+    assert waits == [1.0, 2.0]  # backoff between the tries
+
+
+def test_a_webhook_that_recovers_is_not_called_again(tmp_path: Path) -> None:
+    answers = iter([503, 200])
+    calls: list[int] = []
+
+    def poster(url: str, body: bytes) -> int:
+        status = next(answers)
+        calls.append(status)
+        return status
+
+    receiver = _receiver(
+        tmp_path, Clock(), webhook_url=SECRET_URL, poster=poster, sleep=lambda s: None
+    )
+    receiver.handle([_alert()])
+    assert receiver.flush(5.0)
+    assert calls == [503, 200]
+
+
+def test_a_client_error_from_the_webhook_is_not_retried(tmp_path: Path) -> None:
+    calls: list[int] = []
+
+    def poster(url: str, body: bytes) -> int:
+        calls.append(400)
+        return 400
+
+    receiver = _receiver(
+        tmp_path, Clock(), webhook_url=SECRET_URL, poster=poster, sleep=lambda s: None
+    )
+    receiver.handle([_alert()])
+    assert receiver.flush(5.0)
+    assert calls == [400]  # the body is wrong for that hook: sending it again will not help
+
+
+def test_a_slow_webhook_does_not_hold_up_the_answer_to_prometheus(tmp_path: Path) -> None:
+    release = threading.Event()
+
+    def poster(url: str, body: bytes) -> int:
+        release.wait(5)
+        return 200
+
+    receiver = _receiver(tmp_path, Clock(), webhook_url=SECRET_URL, poster=poster)
+    import time as _time
+
+    began = _time.perf_counter()
+    receiver.handle([_alert()])
+    assert _time.perf_counter() - began < 1.0
+    assert [r["status"] for r in _lines(tmp_path / "alerts.jsonl")] == ["firing"]
+    release.set()
+    assert receiver.flush(5.0)

@@ -95,6 +95,7 @@ def main(argv: Sequence[str] | None = None, *, settings: ServiceSettings | None 
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+            receiver.flush(10.0)  # posts still queued for the webhook
         return 0
     # probe: its own OTLP metrics, exported often so an alert sees a failure within a minute
     probe_settings = settings.model_copy(

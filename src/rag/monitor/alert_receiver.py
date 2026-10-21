@@ -13,12 +13,22 @@ starts firing and when it resolves. Each line is appended to `alerts.jsonl` (rot
 when `alert_webhook_url` (env `ALERT_WEBHOOK_URL`) is set, posted to that URL as one JSON body
 `{status, alertname, severity, summary, description, labels, starts_at, text}`. The URL is a secret:
 it is never logged, not even in a failure message.
+
+Restarts: at start the receiver reads `alerts.jsonl` and its rotated backups and takes the last
+line of each alert as its state, so an alert that was firing before a restart is not written
+again as new and its resolve is still written.
+
+Webhook: posted from one background thread (Prometheus gets its answer at once), at most
+`WEBHOOK_ATTEMPTS` tries with `WEBHOOK_BACKOFF_S` seconds between them for a refused connection,
+a timeout, HTTP 429 or a 5xx; a 4xx other than 429 is not tried again. The line in the file is
+written first, whatever the webhook does.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import queue
 import re
 import threading
 import time
@@ -38,6 +48,9 @@ FIRING = "firing"
 RESOLVED = "resolved"
 MAX_BODY_BYTES = 1_000_000
 WEBHOOK_TIMEOUT_S = 5.0
+WEBHOOK_ATTEMPTS = 3
+WEBHOOK_BACKOFF_S = (1.0, 2.0)
+"""Seconds to wait before the second and the third try."""
 
 Poster = Callable[[str, bytes], int]
 """Posts a JSON body to a URL and returns the HTTP status; raises `OSError` when it cannot."""
@@ -98,13 +111,17 @@ class AlertReceiver:
         clock: Callable[[], float] = time.time,
         max_bytes: int = 5_000_000,
         backups: int = 3,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._writer = RotatingJsonlWriter(path, max_bytes=max_bytes, backups=backups)
         self._webhook_url = webhook_url
         self._poster = poster
         self._clock = clock
-        self._firing: set[str] = set()
+        self._sleep = sleep
+        self._firing: set[str] = _firing_from_files(Path(path), backups)
         self._lock = threading.Lock()
+        self._outbox: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._worker: threading.Thread | None = None
 
     def handle(self, alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Process one POST body; returns the lines written (for tests and logs)."""
@@ -155,13 +172,80 @@ class AlertReceiver:
     def _notify(self, row: dict[str, Any]) -> None:
         if not self._webhook_url:
             return
+        with self._lock:
+            if self._worker is None:
+                self._worker = threading.Thread(
+                    target=self._deliver_forever, name="alert-webhook", daemon=True
+                )
+                self._worker.start()
+        self._outbox.put(row)
+
+    def flush(self, timeout_s: float = 10.0) -> bool:
+        """Wait until every queued webhook post is done (tests, shutdown); False on time-out."""
+        deadline = time.monotonic() + timeout_s
+        while self._outbox.unfinished_tasks:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        return True
+
+    def _deliver_forever(self) -> None:
+        while True:
+            row = self._outbox.get()
+            try:
+                self._deliver(json.dumps(row, ensure_ascii=False).encode())
+            except Exception:  # the worker must outlive any one post
+                logger.warning("alert webhook delivery failed unexpectedly")
+            finally:
+                self._outbox.task_done()
+
+    def _deliver(self, body: bytes) -> None:
+        for attempt in range(WEBHOOK_ATTEMPTS):
+            if attempt:
+                self._sleep(WEBHOOK_BACKOFF_S[min(attempt, len(WEBHOOK_BACKOFF_S)) - 1])
+            try:
+                status = self._poster(self._webhook_url, body)
+            except (OSError, ValueError) as exc:
+                # The exception text may hold the URL, which is a secret: log its class only.
+                logger.warning(
+                    "alert webhook failed (try %s of %s): %s",
+                    attempt + 1,
+                    WEBHOOK_ATTEMPTS,
+                    type(exc).__name__,
+                )
+                continue
+            if status < 300:
+                return
+            logger.warning(
+                "alert webhook answered HTTP %s (try %s of %s)",
+                status,
+                attempt + 1,
+                WEBHOOK_ATTEMPTS,
+            )
+            if status < 500 and status != 429:
+                return  # the hook refuses this body: sending it again will not help
+        logger.warning("alert webhook: gave up after %s tries", WEBHOOK_ATTEMPTS)
+
+
+def _firing_from_files(path: Path, backups: int) -> set[str]:
+    """The alerts whose last line in the alert file (and its rotated backups, oldest first) says
+    firing. A damaged line is skipped."""
+    last: dict[str, str] = {}
+    files = [path.with_name(f"{path.name}.{n}") for n in range(backups, 0, -1)] + [path]
+    for file in files:
         try:
-            status = self._poster(self._webhook_url, json.dumps(row, ensure_ascii=False).encode())
-            if status >= 300:
-                logger.warning("alert webhook answered HTTP %s", status)
-        except (OSError, ValueError) as exc:
-            # The exception text may hold the URL, which is a secret: log its class only.
-            logger.warning("alert webhook failed: %s", type(exc).__name__)
+            text = file.read_text("utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            try:
+                row = json.loads(line)
+                labels = {str(k): str(v) for k, v in row["labels"].items()}
+                status = str(row["status"])
+            except (ValueError, KeyError, TypeError, AttributeError):
+                continue
+            last[_fingerprint(labels)] = status
+    return {key for key, status in last.items() if status == FIRING}
 
 
 def _handler_for(receiver: AlertReceiver) -> type[BaseHTTPRequestHandler]:
