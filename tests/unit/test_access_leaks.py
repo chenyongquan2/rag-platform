@@ -133,6 +133,9 @@ def test_the_checker_sees_a_kb_opened_to_the_wrong_caller(
     # mt5 is misconfigured as open to every caller, but the guest must not see it.
     report = _report(tmp_path, issuer, open_kbs=("hf_docs", "mt5"))
     assert report.exposures > 0 and report.leaked_chunks > 0
+    # Passages themselves are counted, not only the KB name in the listing.
+    for tool in ("search_docs", "ask_docs", "ask_docs_stream"):
+        assert any(c.leaked for c in report.checks if c.tool == tool), tool
 
 
 def test_the_checker_sees_a_cache_entry_shared_across_groups(

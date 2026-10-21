@@ -1,10 +1,10 @@
 # P8-01 Production readiness: OAuth bearer tokens, access-leak check, rate limit, daily budget, gateway breaker, backup drill, load test
 
-Status: in progress
+Status: review
 Phase: P8
 Depends on: P0-09 (service, ACL), P3-04 (stream), P5-01 (cache keys), P5-02 (alerts)
 Design sections: s16-4, s16-6, s16-1, s16-5, s16-8, s12-1, s15-1
-Calls real models: no (fakes; query embeddings only from the L0 cache; 0 CNY planned)
+Calls real models: once: 92 query embeddings to warm the L0 cache, about 0.0009 CNY (allowed 0.02)
 
 ## Goal
 The HTTP API and MCP streamable-http accept OAuth 2.1 bearer JWTs (resource-server role, SDK `TokenVerifier`/`AuthSettings`), scopes map to callers;
@@ -27,22 +27,22 @@ backup/restore drill and a load test produce real numbers (docs/reports/P8-repor
   `deploy/elasticsearch/snapshot.override.yml` (not applied).
 
 ## Acceptance criteria
-- [ ] AC1 Valid token reaches the tool; expired, wrong audience, wrong issuer, bad signature, missing token, `alg: none`/HS256 are 401 on HTTP and MCP — `tests/unit/test_auth_tokens.py`, `tests/unit/test_serve_auth.py::test_http_*`, `::test_mcp_*`
-- [ ] AC2 Scope maps to caller and groups; no or several mapped scopes is `forbidden`; a caller without the KB gets `kb_not_found`; stdio stays the local caller; local mode unchanged — `tests/unit/test_serve_auth.py::test_scope_*`, `::test_stdio_*`, `::test_local_mode_*`
-- [ ] AC3 Leak check: two callers, every tool incl. stream and cache, 0 leaked chunks (fakes; real ES in the integration test) — `tests/unit/test_access_leaks.py`, `tests/integration/test_access_leaks_es.py`
-- [ ] AC4 Rate limit per caller: 429 + Retry-After on HTTP, MCP error, other callers unaffected, window resets, Redis down lets requests through, Redis keys under the prefix — `tests/unit/test_rate_limit.py`, `tests/integration/test_rate_limit_redis.py`
-- [ ] AC5 Daily budget per caller and global refuses ask_docs before any model call; search_docs still works; yesterday does not count — `tests/unit/test_daily_budget.py`
-- [ ] AC6 Breaker opens after N failures, fails fast without sending, half-open probe closes or reopens; 4xx and budget errors do not count; ask_docs degrades to sources, search_docs works; metric and alert rule — `tests/unit/test_llm_breaker.py`, `tests/unit/test_monitor_config.py`, promtool
-- [ ] AC7 Logical export/restore round-trips mapping, ids and sources (vectors included) into a new index; docstore rebinding writes the new uuid — `tests/unit/test_ops_backup.py`, `tests/integration/test_ops_backup_es.py`
-- [ ] AC8 Load-test runner computes throughput, P50/P95 and errors per concurrency — `tests/unit/test_ops_loadtest.py`
-- [ ] AC9 (manual) Leak report, backup drill timings, load-test table in docs/reports/P8-report.md.
+- [x] AC1 Valid token reaches the tool; expired, wrong audience, wrong issuer, bad signature, missing token, `alg: none`/HS256 are 401 on HTTP and MCP — `tests/unit/test_auth_tokens.py`, `tests/unit/test_serve_auth.py::test_http_*`, `::test_mcp_*`
+- [x] AC2 Scope maps to caller and groups; no or several mapped scopes is `forbidden`; a caller without the KB gets `kb_not_found`; stdio stays the local caller; local mode unchanged — `tests/unit/test_serve_auth.py::test_scope_*`, `::test_stdio_*`, `::test_local_mode_*`
+- [x] AC3 Leak check: two callers, every tool incl. stream and cache, 0 leaked chunks (fakes; real ES in the integration test) — `tests/unit/test_access_leaks.py`, `tests/integration/test_access_leaks_es.py`
+- [x] AC4 Rate limit per caller: 429 + Retry-After on HTTP, MCP error, other callers unaffected, window resets, Redis down lets requests through, Redis keys under the prefix — `tests/unit/test_rate_limit.py`, `tests/integration/test_rate_limit_redis.py`
+- [x] AC5 Daily budget per caller and global refuses ask_docs before any model call; search_docs still works; yesterday does not count — `tests/unit/test_daily_budget.py`
+- [x] AC6 Breaker opens after N failures, fails fast without sending, half-open probe closes or reopens; 4xx and budget errors do not count; ask_docs degrades to sources, search_docs works; metric and alert rule — `tests/unit/test_llm_breaker.py`, `tests/unit/test_monitor_config.py`, promtool
+- [x] AC7 Logical export/restore round-trips mapping, ids and sources (vectors included) into a new index; docstore rebinding writes the new uuid — `tests/unit/test_ops_backup.py`, `tests/integration/test_ops_backup_es.py`
+- [x] AC8 Load-test runner computes throughput, P50/P95 and errors per concurrency — `tests/unit/test_ops_loadtest.py`
+- [x] AC9 (manual) Leak report, backup drill timings, load-test table in docs/reports/P8-report.md.
 
 ## Out of scope
 Running an authorization server (tokens come from the company IdP); token introspection; admin token for ingest over HTTP (no ingest endpoint exists);
 applying the ES snapshot repository (needs an ES restart); Langfuse deletion by doc_id; multi-instance deployment.
 
 ## Handoff (filled at the end)
-- Files:
-- Decisions:
-- Open issues:
-- Review rounds:
+- Files: src/rag/security/tokens.py, access.py; src/rag/serve/{http_app,mcp_server,service,cli,errors,limits}.py; src/rag/llm/{breaker,transport,factory}.py; src/rag/cost/ledger.py; src/rag/eval/access/; src/rag/ops/{backup,loadtest}.py; deploy/prometheus/rules*.yml; deploy/elasticsearch/snapshot.override.yml; README, .env.example; docs/reports/P8-report.md.
+- Decisions: docs/decisions.md 'P8-01'. Scope -> exactly one caller (else forbidden); rate limit fails open; budget from ledger rows with caller; breaker per gateway URL, llm_error category kept.
+- Open issues: snapshot override not applied (needs ES restart); real search P95 3.3 s at concurrency 1 (target 3 s), about 0.35 req/s on CPU rerank; no admin token (no ingest endpoint); no embedding-gateway breaker; mt5/pdf_demo docstores not in the main checkout, not copied.
+- Review rounds: none yet.
