@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -15,11 +16,13 @@ from rag.answer.context import FRAGMENT_TAG, build_context
 from rag.answer.support import (
     SUPPORT_TOOL,
     SupportJudgeConfig,
+    build_judge_model,
     build_support_messages,
     judge_support,
     sentences_from_text,
     support_inputs,
 )
+from rag.config import ServiceSettings
 from rag.testing import FakeChatModel
 from rag.types import AnswerSentence, Chunk, Citation, ErrorCategory
 
@@ -193,3 +196,82 @@ def test_injection_in_fragment_keeps_format() -> None:
     assert [(p.sentence, p.label) for s in result.sentences for p in s.pairs] == [
         (1, "not_supported")
     ]
+
+
+def test_verdict_aliases() -> None:
+    sentences = [_sentence(f"Claim {i}.", "p:a#0") for i in range(6)]
+    verdicts = [
+        "Partially supported",
+        "unsupported",
+        "Not Supported",
+        "not-supported",
+        "partial",
+        "maybe",
+    ]
+    model = FakeChatModel(responses=[_reply(*[(i + 1, 1, v) for i, v in enumerate(verdicts)])])
+    result = _run(judge_support(sentences, CHUNKS, model=model, config=SupportJudgeConfig()))
+    assert [s.pairs[0].label for s in result.sentences] == [
+        "partly",
+        "not_supported",
+        "not_supported",
+        "not_supported",
+        "partly",
+        "unknown",
+    ]
+    assert result.sentences[5].pairs[0].error == "missing_in_output"
+
+
+def test_build_judge_model_and_recorded_settings(tmp_path: Path) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        args = {
+            "judgements": [{"sentence": 1, "fragment": 1, "reason": "r", "verdict": "supported"}]
+        }
+        message = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": SUPPORT_TOOL, "arguments": json.dumps(args)},
+                }
+            ],
+        }
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "served",
+                "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            },
+        )
+
+    settings = ServiceSettings(
+        _env_file=None,  # type: ignore[call-arg]
+        llm_base_url="http://gateway.test/v1",
+        llm_api_key="k",
+        cost_ledger_path=str(tmp_path / "ledger.jsonl"),
+    )
+    config = SupportJudgeConfig(max_tokens=777)
+    model = build_judge_model(settings, config, async_transport=httpx.MockTransport(gateway))
+    result = _run(judge_support(SENTENCES[:1], CHUNKS, model=model, config=config))
+    assert result.sentences[0].status == "supported"
+    (body,) = bodies
+    assert body["model"] == "qwen/qwen3.6-flash"
+    assert body["temperature"] == 0.0
+    # langchain-openai sends the output cap as max_completion_tokens.
+    assert body.get("max_tokens", body.get("max_completion_tokens")) == 777
+    assert body["enable_thinking"] is False
+    assert body["tool_choice"]["function"]["name"] == SUPPORT_TOOL
+    # What is recorded comes from the model that was called, not from the config.
+    assert (result.judge_model, result.judge_temperature) == ("qwen/qwen3.6-flash", 0.0)
+    other = FakeChatModel(responses=[_reply((1, 1, "supported"))])
+    other_result = _run(judge_support(SENTENCES[:1], CHUNKS, model=other, config=config))
+    assert other_result.judge_model == "fake-chat-model"  # the fake's type, not config.model
+    assert other_result.judge_temperature is None

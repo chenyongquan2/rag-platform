@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from rag.answer.support import SupportJudgeConfig
+from rag.answer.support import SupportJudgeConfig, build_judge_model
 from rag.config import ServiceSettings
 from rag.cost import CostLedger
 from rag.eval.retrieval.cli import UsageError, _echo
@@ -41,19 +41,9 @@ DEFAULT_MAX_CNY = 0.6
 
 
 def build_support_model(settings: ServiceSettings, config: SupportJudgeConfig) -> Any:
-    """The judge model: the `offline` profile with the judge's model, output cap and temperature."""
-    from rag.llm import make_chat_model
-
-    profile = getattr(settings, f"chat_{config.profile}").model_copy(
-        update={
-            "model": config.model,
-            "max_tokens": config.max_tokens,
-            "temperature": config.temperature,
-        }
-    )
-    return make_chat_model(
-        config.profile, settings.model_copy(update={f"chat_{config.profile}": profile})
-    )
+    """The judge model, built by `rag.answer.support.build_judge_model` (one builder for the eval
+    and for online sampling)."""
+    return build_judge_model(settings, config)
 
 
 # ---- helpers ------------------------------------------------------------------------------------

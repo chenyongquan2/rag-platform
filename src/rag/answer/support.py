@@ -128,6 +128,9 @@ class SupportResult(BaseModel):
     raw: list[str] = Field(default_factory=list)
     """What each call returned (tool arguments as JSON, or the text when there was no tool)."""
     judge_model: str = ""
+    """The name of the model that was called (`model_name` of a ChatOpenAI), not the config's."""
+    judge_temperature: float | None = None
+    """The temperature of the model that was called; None when the model has none (a fake)."""
     prompt_version: str = ""
 
     @property
@@ -211,6 +214,40 @@ def build_support_messages(
     parts.append("Sentences (JSON):" + json.dumps(listed, ensure_ascii=False))
     parts.append("Pairs to judge as [sentence, fragment]:" + json.dumps(pairs))
     return [SystemMessage(SYSTEM_PROMPT), HumanMessage("\n\n".join(parts))]
+
+
+# ---- the model ---------------------------------------------------------------------------------
+
+
+def build_judge_model(settings: Any, config: SupportJudgeConfig, **kwargs: Any) -> Any:
+    """The judge model: the settings' `config.profile` profile with the judge's model, output cap
+    and temperature (`kwargs` go to `make_chat_model`, e.g. a test transport). The eval and
+    online sampling (P5-02) both build the judge here, so both send the same parameters."""
+    from rag.llm import make_chat_model
+
+    profile = getattr(settings, f"chat_{config.profile}").model_copy(
+        update={
+            "model": config.model,
+            "max_tokens": config.max_tokens,
+            "temperature": config.temperature,
+        }
+    )
+    return make_chat_model(
+        config.profile, settings.model_copy(update={f"chat_{config.profile}": profile}), **kwargs
+    )
+
+
+def _model_name(model: Any) -> str:
+    for attribute in ("model_name", "model"):
+        value = getattr(model, attribute, None)
+        if isinstance(value, str) and value:
+            return value
+    return str(getattr(model, "_llm_type", "") or type(model).__name__)
+
+
+def _model_temperature(model: Any) -> float | None:
+    value = getattr(model, "temperature", None)
+    return float(value) if isinstance(value, int | float) else None
 
 
 # ---- the call ----------------------------------------------------------------------------------
@@ -323,7 +360,11 @@ async def judge_support(
     by_number = {f.number: f for f in fragments}
 
     verdicts: dict[tuple[int, int], tuple[str, str, str | None]] = {}
-    result = SupportResult(judge_model=config.model, prompt_version=config.prompt_version)
+    result = SupportResult(
+        judge_model=_model_name(model),
+        judge_temperature=_model_temperature(model),
+        prompt_version=config.prompt_version,
+    )
     for batch in _batches(inputs, config.max_pairs_per_call):
         used = sorted({n for s in batch for n in s.fragments})
         messages = build_support_messages(
@@ -380,6 +421,7 @@ __all__ = [
     "SupportLabel",
     "SupportResult",
     "SupportSentence",
+    "build_judge_model",
     "build_support_messages",
     "judge_support",
     "sentences_from_text",
