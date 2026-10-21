@@ -58,6 +58,7 @@ class RunEstimate(BaseModel):
     """What a run would call and cost, at the most (nothing is called to make this)."""
 
     files: int
+    files_failed: int = 0
     pages: int
     figures_total: int
     figures_skipped_small: int
@@ -79,7 +80,10 @@ class RunEstimate(BaseModel):
     def summary_lines(self) -> list[str]:
         budget = "no budget" if self.budget_cny is None else f"budget {self.budget_cny:.2f} CNY"
         return [
-            f"files {self.files}, pages {self.pages}",
+            f"files {self.files}, pages {self.pages}"
+            + (
+                f", files that cannot be converted {self.files_failed}" if self.files_failed else ""
+            ),
             f"figures: {self.figures_total} in all, {self.figures_skipped_small} too small, "
             f"{self.figures_cached} cached, {self.figures_to_describe} to describe "
             f"({self.vision_model}): up to {self.image_cost_cny:.4f} CNY",
@@ -142,8 +146,9 @@ def estimate_run(
     budget = pdf_params.get("budget_cny")
 
     sources = list(connector.documents())
-    files = {s.source_rel for s in sources}
-    pages = sum(1 for s in sources if s.ext == ".pdf")
+    failed = {s.source_rel for s in sources if s.extra.get("conversion_error")}
+    files = {s.source_rel for s in sources} - failed
+    pages = sum(1 for s in sources if s.ext == ".pdf" and not s.extra.get("conversion_error"))
     seen: dict[str, bool] = {}  # image hash -> cached
     total = small = 0
     for source in sources:
@@ -202,6 +207,7 @@ def estimate_run(
         fits = False
     return RunEstimate(
         files=len(files),
+        files_failed=len(failed),
         pages=pages,
         figures_total=total,
         figures_skipped_small=small,
@@ -238,7 +244,8 @@ class PdfQualityReport(BaseModel):
         lines = [
             f"kb: {self.kb}",
             f"conversion: {c['files']} files, {c['pages']} pages, {c['figures']} figures, "
-            f"{c['tables']} tables; Docling {c['docling_version']} took {c['engine_seconds']} s "
+            f"{c['tables']} tables, failed files {c.get('failed_files', 0)}; "
+            f"Docling {c['docling_version']} took {c['engine_seconds']} s "
             f"({c['pages_per_second']} pages/s on this CPU; {c['cached_files']} files from cache)",
             f"reader: pages {r.get('pages', 0)}, images seen {r.get('images_seen', 0)}, "
             f"skipped as too small {r.get('images_skipped_small', 0)}, "
@@ -301,6 +308,7 @@ def pdf_quality_report(
         "engine_seconds": round(engine_seconds, 1),
         "pages_per_second": round(pages / engine_seconds, 3) if engine_seconds else None,
         "cached_files": sum(1 for v in done.values() if v["cached"]),
+        "failed_files": len(connector.failures),
         "docling_version": next((v["docling_version"] for v in done.values()), ""),
     }
     kinds = Counter(str(c.metadata.get("chunk_kind", "text")) for c in chunks)

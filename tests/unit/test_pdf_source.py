@@ -306,3 +306,61 @@ def test_image_reader_refuses_a_file_that_is_not_an_image(tmp_path: Path) -> Non
     )
     with pytest.raises(ValueError, match=r"bad\.png"):
         img.load_data(source)
+
+
+# ---- a file that cannot be read (review round 1) -----------------------------------------------
+
+
+def test_pdf_connector_a_corrupt_file_does_not_stop_the_files_after_it(
+    folder: Path, tmp_path: Path
+) -> None:
+    (folder / "a.pdf").write_bytes(b"%PDF a")
+    (folder / "b.pdf").write_bytes(b"corrupt")
+    (folder / "c.pdf").write_bytes(b"%PDF c")
+    conn = connector(folder, tmp_path, FakeEngine(sample_pages(), fail_on=["b.pdf"]))
+    docs = list(conn.documents())
+    ids = [d.doc_id for d in docs]
+    assert ids[:3] == ["pdf_demo:a.pdf#p1", "pdf_demo:a.pdf#p2", "pdf_demo:a.pdf#p3"]
+    assert "pdf_demo:b.pdf" in ids  # one document for the file that failed
+    assert ids[-4:-1] == ["pdf_demo:c.pdf#p1", "pdf_demo:c.pdf#p2", "pdf_demo:c.pdf#p3"]
+    failed = next(d for d in docs if d.doc_id == "pdf_demo:b.pdf")
+    assert "Docling cannot read b.pdf" in failed.extra["conversion_error"]
+    assert failed.source_version.startswith("sha256:")
+    assert list(conn.failures) == ["b.pdf"]
+
+
+def test_pdf_connector_does_not_convert_a_failed_file_twice(folder: Path, tmp_path: Path) -> None:
+    (folder / "b.pdf").write_bytes(b"corrupt")
+    engine = FakeEngine(sample_pages(), fail_on=["b.pdf"])
+    conn = connector(folder, tmp_path, engine)
+    list(conn.documents())
+    calls = engine.calls
+    list(conn.documents())
+    assert engine.calls == calls  # a.pdf comes from the cache, b.pdf is not tried again
+
+
+def test_pdf_reader_raises_for_the_document_of_a_failed_file(folder: Path, tmp_path: Path) -> None:
+    (folder / "b.pdf").write_bytes(b"corrupt")
+    conn = connector(folder, tmp_path, FakeEngine(sample_pages(), fail_on=["b.pdf"]))
+    failed = next(d for d in conn.documents() if d.doc_id == "pdf_demo:b.pdf")
+    rd, _, _ = reader(tmp_path)
+    with pytest.raises(ValueError, match=r"b\.pdf.*Docling cannot read"):
+        rd.load_data(failed)
+
+
+def test_pdf_connector_limits_are_docling_config_keys(folder: Path, tmp_path: Path) -> None:
+    conn = connector(
+        folder, tmp_path, docling={"max_file_mb": 0.00001, "max_pages": 2, "timeout_s": 5}
+    )
+    assert conn.options.max_file_mb == 0.00001
+    assert (conn.options.max_pages, conn.options.timeout_s) == (2, 5)
+    docs = list(conn.documents())
+    # a.pdf and b.pdf are 15 bytes: over the size limit, so each is one failed document
+    assert [d.doc_id for d in docs if d.ext == ".pdf"] == ["pdf_demo:a.pdf", "pdf_demo:b.pdf"]
+    assert "larger than max_file_mb" in docs[0].extra["conversion_error"]
+
+
+def test_pdf_connector_files_must_stay_inside_the_folder(folder: Path, tmp_path: Path) -> None:
+    (tmp_path / "outside.pdf").write_bytes(b"%PDF outside")
+    with pytest.raises(ValueError, match="outside"):
+        list(connector(folder, tmp_path, files=["../outside.pdf"]).documents())

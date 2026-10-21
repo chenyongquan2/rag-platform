@@ -167,6 +167,8 @@ class PdfReader(_Base):
 
     def load_data(self, source: SourceDocument, **_: Any) -> list[Document]:  # type: ignore[override]
         extra = source.extra
+        if extra.get("conversion_error"):  # the connector could not convert the file
+            raise ValueError(f"{source.source_rel}: {extra['conversion_error']}")
         text = source.content.decode("utf-8")
         figures = {int(f["index"]): f for f in extra.get("figures", [])}
         counts = self.stats.counts

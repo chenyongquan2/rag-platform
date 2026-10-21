@@ -180,3 +180,21 @@ def test_main_reports_usage_errors_in_one_line(
     assert main(["--kb", "pdf_demo", "--estimate"], settings=settings) == 1
     assert "does not exist" in capsys.readouterr().err
     assert main(["--kb", "pdf_demo", "--limit", "0"], settings=settings) == 2
+
+
+def test_a_corrupt_file_is_one_counted_failure_and_the_others_are_reported(env) -> None:
+    cfg, settings, cache, make = env
+    connector, proc = make(FakeEngine(sample_pages(), fail_on=["b.pdf"]))
+    folder = connector.root
+    (folder / "b.pdf").write_bytes(b"corrupt")
+    (folder / "c.pdf").write_bytes(b"%PDF c")
+    report = pdf_quality_report(proc, connector)
+    assert list(report.quality.read_errors) == ["pdf_demo:b.pdf"]
+    assert "Docling cannot read b.pdf" in report.quality.read_errors["pdf_demo:b.pdf"]
+    assert report.conversion["failed_files"] == 1
+    assert report.conversion["files"] == 2 and report.conversion["pages"] == 6  # a.pdf, c.pdf
+    assert any("failed files 1" in line for line in report.summary_lines())
+    estimate = estimate_run(
+        cfg, make(FakeEngine(sample_pages(), fail_on=["b.pdf"]))[0], settings, tokenizer=words
+    )
+    assert estimate.pages == 6 and estimate.files_failed == 1

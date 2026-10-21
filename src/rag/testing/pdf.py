@@ -27,12 +27,16 @@ def tiny_png(
 class FakeEngine:
     """A conversion engine that returns the given pages and counts its calls."""
 
-    def __init__(self, pages: Sequence[RawPage]) -> None:
+    def __init__(self, pages: Sequence[RawPage], *, fail_on: Sequence[str] = ()) -> None:
         self.pages = list(pages)
         self.calls = 0
+        self.fail_on = set(fail_on)
+        """File names the engine cannot read (a corrupt file): it raises for them."""
 
     def __call__(self, path: Path, options: DoclingOptions) -> list[RawPage]:
         self.calls += 1
+        if path.name in self.fail_on:
+            raise RuntimeError(f"Docling cannot read {path.name}")
         return [
             RawPage(
                 p.number,

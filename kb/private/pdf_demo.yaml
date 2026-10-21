@@ -20,7 +20,14 @@ source:
   path: data/raw/pdf_demo
   files: null                       # null = every .pdf, .png, .jpg in the folder
   limit: null                       # first N files by name
-  docling: {ocr: false, table_structure: true, images_scale: 2.0, num_threads: 4}
+  docling:
+    ocr: false
+    table_structure: true
+    images_scale: 2.0
+    num_threads: 4
+    max_file_mb: 50     # a larger file is a failed file, the run goes on with the others
+    max_pages: 300      # so is a file with more pages
+    timeout_s: 900      # and a file Docling needs longer than this for
   cache_dir: data/cache/pdf         # converted pages by file hash and Docling version
 language: en
 pipelines:

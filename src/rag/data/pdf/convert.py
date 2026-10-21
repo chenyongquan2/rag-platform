@@ -52,12 +52,19 @@ def docling_version() -> str:
 
 @dataclass(frozen=True)
 class DoclingOptions:
-    """Docling settings; `num_threads` only changes the speed, so it is not in the cache key."""
+    """Docling settings. `num_threads` only changes the speed, and the three limits only decide
+    whether a file is read, so none of them is in the cache key."""
 
     ocr: bool = False
     table_structure: bool = True
     images_scale: float = 1.0
     num_threads: int = 4
+    max_file_mb: float = 50.0
+    """A larger file is refused before Docling starts (a failed file, not a stopped run)."""
+    max_pages: int = 300
+    """A file with more pages is refused (Docling stops at this many pages)."""
+    timeout_s: float | None = 900.0
+    """Docling's time for one file; a file that takes longer is a failed file. None: no limit."""
 
     def fingerprint(self) -> str:
         text = f"ocr={self.ocr};tables={self.table_structure};scale={self.images_scale}"
@@ -237,6 +244,10 @@ def _build(path: Path, sha256: str, options: DoclingOptions, engine: Engine, fol
     seconds = time.perf_counter() - started
     if not raw:
         raise ConversionError(f"{path.name}: the engine returned no pages")
+    if len(raw) > options.max_pages:
+        raise ConversionError(
+            f"{path.name}: {len(raw)} pages, more than max_pages ({options.max_pages})"
+        )
     raw = sorted(raw, key=lambda p: p.number)
     numbered = [_number_figures(p) for p in raw]
     normalised, headings = normalise_headings(numbered)
@@ -328,6 +339,11 @@ def convert_pdf(
     folder = cache_folder(Path(cache_dir), sha256, options)
     if (folder / "converted.json").is_file():
         return load_converted(folder, cached=True)
+    size_mb = path.stat().st_size / (1024 * 1024)
+    if size_mb > options.max_file_mb:
+        raise ConversionError(
+            f"{path.name}: {size_mb:.1f} MB, larger than max_file_mb ({options.max_file_mb})"
+        )
     if engine is None:
         from rag.data.pdf.docling_engine import docling_engine
 

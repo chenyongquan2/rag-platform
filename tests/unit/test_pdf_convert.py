@@ -172,3 +172,39 @@ def test_convert_title_falls_back_to_the_file_name(pdf: Path, tmp_path: Path) ->
     )
     assert result.title == "paper"
     assert result.pages[0].carried == []
+
+
+def test_convert_refuses_a_file_over_the_size_limit_before_the_engine_runs(
+    pdf: Path, tmp_path: Path
+) -> None:
+    engine = FakeEngine(sample_pages())
+    with pytest.raises(ConversionError, match="larger than max_file_mb"):
+        convert_pdf(
+            pdf, cache_dir=tmp_path, options=DoclingOptions(max_file_mb=0.00001), engine=engine
+        )
+    assert engine.calls == 0
+
+
+def test_convert_refuses_more_pages_than_the_cap_and_caches_nothing(
+    pdf: Path, tmp_path: Path
+) -> None:
+    with pytest.raises(ConversionError, match="more than max_pages"):
+        convert_pdf(
+            pdf,
+            cache_dir=tmp_path,
+            options=DoclingOptions(max_pages=2),
+            engine=FakeEngine(sample_pages()),
+        )
+    assert not list(tmp_path.glob("*/converted.json"))
+
+
+def test_the_limits_do_not_change_the_cache_key(pdf: Path, tmp_path: Path) -> None:
+    engine = FakeEngine(sample_pages())
+    convert_pdf(pdf, cache_dir=tmp_path, engine=engine)
+    convert_pdf(
+        pdf,
+        cache_dir=tmp_path,
+        options=DoclingOptions(max_pages=999, max_file_mb=1, timeout_s=1),
+        engine=engine,
+    )
+    assert engine.calls == 1  # the limits decide whether a file is read, not what it gives

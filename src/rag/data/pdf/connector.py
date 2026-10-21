@@ -69,11 +69,18 @@ class PdfDirConnector:
         self.engine = engine
         self.conversions: dict[str, dict[str, Any]] = {}
         """Per PDF file of the last listing: pages, figures, tables, seconds, cached."""
+        self.failures: dict[str, str] = {}
+        """PDF files that could not be converted, with the reason (one line each)."""
+        self._failed: dict[tuple[str, str], str] = {}
 
     def _paths(self) -> list[Path]:
         suffixes = (*PDF_EXTENSIONS, *IMAGE_EXTENSIONS)
         if self.files is not None:
             chosen = [self.root / name for name in self.files]
+            root = self.root.resolve()
+            for name, path in zip(self.files, chosen, strict=True):
+                if not path.resolve().is_relative_to(root):
+                    raise ValueError(f"{name!r} in `files` is outside the folder {self.root}")
             for path in chosen:
                 if not path.is_file():
                     raise FileNotFoundError(f"{path}: listed in `files` but not found")
@@ -88,7 +95,7 @@ class PdfDirConnector:
     def documents(self) -> Iterator[SourceDocument]:
         for path in self._paths():
             if path.suffix.lower() in PDF_EXTENSIONS:
-                yield from self._pdf(path)
+                yield from self._pdf_or_failure(path)
             else:
                 yield self._image(path)
 
@@ -106,6 +113,34 @@ class PdfDirConnector:
             content=raw,
             source_version=f"sha256:{file_sha256(path)[:16]}",
         )
+
+    def _pdf_or_failure(self, path: Path) -> list[SourceDocument]:
+        """The page documents of a PDF; when the file cannot be converted (corrupt, too large,
+        too many pages, too slow) one document that stands for the file and carries the reason,
+        which the reader raises: the ingest job then counts a read failure and goes on with the
+        other files. A file that failed is not tried again in this process."""
+        digest = file_sha256(path)
+        key = (path.name, digest)
+        reason = self._failed.get(key)
+        if reason is None:
+            try:
+                return list(self._pdf(path))
+            except Exception as exc:  # any failure of one file must not stop the others
+                reason = f"{type(exc).__name__}: {' '.join(str(exc).split())[:300]}"
+                self._failed[key] = reason
+        self.failures[path.name] = reason
+        return [
+            SourceDocument(
+                doc_id=make_doc_id(self.kb, path.name),
+                kb=self.kb,
+                source_rel=path.name,
+                source_url=None,
+                ext=".pdf",
+                content=b"",
+                source_version=f"sha256:{digest[:16]}",
+                extra={"conversion_error": reason},
+            )
+        ]
 
     def _pdf(self, path: Path) -> Iterator[SourceDocument]:
         started = time.perf_counter()
