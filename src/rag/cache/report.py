@@ -91,10 +91,31 @@ def _rate(n: int, of: int) -> dict[str, Any]:
     }
 
 
+def _sliced(
+    records: Sequence[Mapping[str, Any]], max_distance: float | None
+) -> list[dict[str, Any]]:
+    """The records as they would read with a threshold of `max_distance`: a would-hit farther
+    away than that was a candidate that a smaller threshold would not have taken (`too_far`)."""
+    if max_distance is None:
+        return [dict(r) for r in records]
+    out: list[dict[str, Any]] = []
+    for r in records:
+        if r.get("status") == "would_hit" and float(r.get("distance") or 0.0) > max_distance:
+            r = {**r, "status": "too_far", "nearest_distance": r.get("distance")}
+        out.append(dict(r))
+    return out
+
+
 def shadow_report(
-    records: Sequence[Mapping[str, Any]], gold: Mapping[str, set[str]] | None = None
+    records: Sequence[Mapping[str, Any]],
+    gold: Mapping[str, set[str]] | None = None,
+    *,
+    max_distance: float | None = None,
 ) -> dict[str, Any]:
+    """The report; with `max_distance` as if the semantic cache had been run with that smaller
+    threshold (the records keep every candidate within the recording threshold)."""
     gold = gold or {}
+    records = _sliced(records, max_distance)
     status = Counter(str(r.get("status")) for r in records)
     lookups = [r for r in records if r.get("status") != "no_vector"]
     hits = [r for r in records if r.get("status") == "would_hit"]
@@ -141,6 +162,7 @@ def shadow_report(
         },
     }
     report["decision"] = _decision(would_hit, wrong_hit)
+    report["max_distance"] = max_distance
     return report
 
 

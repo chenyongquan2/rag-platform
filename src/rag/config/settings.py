@@ -342,7 +342,9 @@ class ServiceSettings(BaseSettings):
     # candidate (chosen on the dev questions of P5-01, docs/reports/P5-report.md), entries live
     # `cache_semantic_ttl_s`, the records go to `<cache_shadow_dir>/shadow.jsonl`, and the stored
     # questions live in `cache_semantic_store` (`memory` in this process, or `es`: index
-    # `cache_semantic_<kb>`).
+    # `cache_semantic_<kb>`). `cache_semantic_lexical_guard`: besides the entity guard of the
+    # design, reject a stored question whose content words differ from the new one's by one or
+    # two words.
     cache_mode: Literal["off", "l1", "l1_shadow"] = "l1_shadow"
     cache_url: str = ""
     cache_key_prefix: str = "rag:l1:"
@@ -357,6 +359,7 @@ class ServiceSettings(BaseSettings):
     cache_lock_poll_ms: int = Field(default=25, gt=0)
     cache_semantic_threshold: float = Field(default=0.15, ge=0.0, le=1.0)
     cache_semantic_ttl_s: int = Field(default=86_400, gt=0)
+    cache_semantic_lexical_guard: bool = True
     cache_semantic_store: Literal["memory", "es"] = "memory"
     cache_shadow_dir: str = "data/observe/cache"
 

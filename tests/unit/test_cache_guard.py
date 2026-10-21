@@ -5,7 +5,13 @@ from __future__ import annotations
 
 import pytest
 
-from rag.cache.semantic import entity_guard, entity_signature
+from rag.cache.semantic import (
+    content_words,
+    entity_guard,
+    entity_signature,
+    lexical_guard,
+    question_guard,
+)
 
 
 @pytest.mark.parametrize(
@@ -21,6 +27,8 @@ from rag.cache.semantic import entity_guard, entity_signature
         ("What is the top 5 result", "what's the top 5 result"),
         ("怎么用 push_to_hub 上传模型", "如何通过 push_to_hub 上传模型"),
         ("how do I upload a model", "how can I upload a model"),
+        ("What does LoRA do?", "what does lora do"),  # an identifier is compared without case
+        ("what is longt5 local attention", "What is LongT5 Local Attention"),
     ],
 )
 def test_questions_with_the_same_entities_pass(new: str, cached: str) -> None:
@@ -31,7 +39,6 @@ def test_questions_with_the_same_entities_pass(new: str, cached: str) -> None:
     ("new", "cached", "reason"),
     [
         ("What does push_to_hub do?", "What does push_to_hub_fastai do?", "identifiers"),
-        ("What does LoRA do?", "What does lora do?", "identifiers"),
         ("transformers 4.36.0 install", "transformers 4.36.1 install", "identifiers"),
         ("How do I use --lr", "How do I use --lr-scheduler", "identifiers"),
         ("How do I use bert-base-uncased", "How do I use bert-large-uncased", "identifiers"),
@@ -84,3 +91,39 @@ def test_a_sentence_initial_question_word_is_not_a_name() -> None:
     assert entity_signature("How do I upload a model").names == frozenset()
     assert entity_signature("What is Spaces").names == frozenset({"Spaces"})
     assert entity_signature("Gradio how to install").names == frozenset({"Gradio"})
+
+
+@pytest.mark.parametrize(
+    ("new", "cached"),
+    [
+        ("How do I push a model to the hub", "How do I pull a model to the hub"),
+        ("what is the purpose of push_to_hub", "what does push_to_hub return"),
+        ("how many classes are in the dataset", "how many classes are in the datasets"),
+        ("which models support fp16", "which models support fp16 training"),
+    ],
+)
+def test_the_lexical_guard_rejects_a_change_of_one_or_two_words(new: str, cached: str) -> None:
+    assert entity_guard(new, cached).ok  # the entities do not see it
+    assert not lexical_guard(new, cached).ok
+    assert not question_guard(new, cached).ok
+    assert question_guard(new, cached, lexical=False).ok
+
+
+@pytest.mark.parametrize(
+    ("new", "cached"),
+    [
+        ("how do I push a model to the hub", "push a model to the hub, how?"),  # same words
+        ("how do I upload a trained model", "what do I call to send my trained model online"),
+        ("怎么上传模型", "如何把模型上传"),  # no word measure for Chinese
+        ("how do I push a model", "how do I push a model"),
+    ],
+)
+def test_the_lexical_guard_lets_other_wordings_and_the_same_words_through(
+    new: str, cached: str
+) -> None:
+    assert lexical_guard(new, cached).ok
+
+
+def test_content_words_skip_stop_words_and_chinese() -> None:
+    assert content_words("How do I push a model?") == frozenset({"push", "model"})
+    assert content_words("怎么上传模型") is None

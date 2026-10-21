@@ -141,19 +141,90 @@ class GuardVerdict:
     """False: neither question has an identifier, name or number (the distance rule is stricter)."""
 
 
+_WORD_FORM = re.compile(r"[\w.\-/]+")
+
+
+def _words_of(question: str) -> frozenset[str]:
+    """The lower-cased words of a question as written (identifiers stay whole, a closing full
+    stop is dropped): what an entity of the other question has to be found among."""
+    text = normalise(question).casefold()
+    return frozenset(w.rstrip(".") for w in _WORD_FORM.findall(text))
+
+
 def entity_guard(new_question: str, cached_question: str) -> GuardVerdict:
-    """Accept only when identifiers, names, numbers and negations are equal (design s12-3)."""
+    """Accept only when identifiers, names, numbers and negations are equal (design s12-3).
+    Identifiers and names are compared without regard to case (`LoRA` is `lora`, a casual
+    rewrite writes names in lower case): each one of a question has to be a whole word of the
+    other. Numbers and negations have to be equal."""
     a, b = entity_signature(new_question), entity_signature(cached_question)
     entities = a.has_entities or b.has_entities
-    if a.tokens != b.tokens:
+    words_a, words_b = _words_of(new_question), _words_of(cached_question)
+    text_a, text_b = normalise(new_question).casefold(), normalise(cached_question).casefold()
+
+    def found_in(entities_of: frozenset[str], words: frozenset[str], text: str) -> bool:
+        # A quoted message has spaces in it: it has to be found as a piece of the text.
+        return all(
+            (e.casefold() in text) if " " in e else (e.casefold().rstrip(".") in words)
+            for e in entities_of
+        )
+
+    if not (found_in(a.tokens, words_b, text_b) and found_in(b.tokens, words_a, text_a)):
         return GuardVerdict(False, "identifiers", entities)
-    if a.names != b.names:
+    if not (found_in(a.names, words_b, text_b) and found_in(b.names, words_a, text_a)):
         return GuardVerdict(False, "names", entities)
     if a.numbers != b.numbers:
         return GuardVerdict(False, "numbers", entities)
     if a.negations != b.negations:
         return GuardVerdict(False, "negation", entities)
     return GuardVerdict(True, "", entities)
+
+
+# ---- the lexical guard (my addition to the design's rule; see the report) --------------------
+
+LEXICAL_MAX_DIFF = 2
+"""Two questions whose content words differ in at most this many words (one word replaced = 2,
+one word added or removed = 1) are different questions: a single-word swap (`push` and `pull`,
+a class name, `2` and `3`) moves a question's vector very little but changes what it asks."""
+_CONTENT_WORD = re.compile(r"[a-z0-9][a-z0-9_.\-]*")
+_STOPWORDS = frozenset(
+    "the a an is are was were be been do does did how what which who whom whose when where why "
+    "to of in on for with by and or can could should would will you your i me my we our us it "
+    "its this that these those as at from into than then there if so also please tell give show "
+    "explain way".split()
+)
+_HAN = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+
+
+def content_words(question: str) -> frozenset[str] | None:
+    """The lower-cased words of an English question without the stop words; None for a question
+    with Han characters (no spaces between its words: not measured here)."""
+    text = normalise(question)
+    if _HAN.search(text):
+        return None
+    return frozenset(w for w in _CONTENT_WORD.findall(text.lower()) if w not in _STOPWORDS)
+
+
+def lexical_guard(new_question: str, cached_question: str) -> GuardVerdict:
+    """Reject a stored question whose content words differ from the new question's by one or two
+    words (`LEXICAL_MAX_DIFF`); the same words in another order or with other stop words pass."""
+    a, b = content_words(new_question), content_words(cached_question)
+    if a is None or b is None:
+        return GuardVerdict(True)
+    if 0 < len(a ^ b) <= LEXICAL_MAX_DIFF:
+        return GuardVerdict(False, "lexical")
+    return GuardVerdict(True)
+
+
+def question_guard(
+    new_question: str, cached_question: str, *, lexical: bool = True
+) -> GuardVerdict:
+    """The entity guard of the design, then (when `lexical`) the lexical guard."""
+    verdict = entity_guard(new_question, cached_question)
+    if verdict.ok and lexical:
+        second = lexical_guard(new_question, cached_question)
+        if not second.ok:
+            return GuardVerdict(False, second.reason, verdict.entities)
+    return verdict
 
 
 # ---- stores ----------------------------------------------------------------------------------
@@ -479,7 +550,9 @@ class ShadowRecorder:
         strict_factor: float = STRICT_FACTOR,
         clock: Callable[[], float] = time.time,
         k: int = 3,
+        lexical: bool = True,
     ) -> None:
+        self.lexical = lexical
         self.store = store
         self.writer = writer
         self.threshold = threshold
@@ -556,13 +629,13 @@ class ShadowRecorder:
         fresh_docs: list[str],
     ) -> None:
         nearest = candidates[0]
-        first_guard = entity_guard(question, nearest.entry.question)
+        first_guard = question_guard(question, nearest.entry.question, lexical=self.lexical)
         record.nearest_distance = round(nearest.distance, 5)
         record.nearest_guard_ok = first_guard.ok
         record.nearest_guard_reason = first_guard.reason or None
         record.status = "too_far"
         for candidate in candidates:
-            guard = entity_guard(question, candidate.entry.question)
+            guard = question_guard(question, candidate.entry.question, lexical=self.lexical)
             limit = self.threshold if guard.entities else self.threshold * self.strict_factor
             if candidate.distance > limit:
                 continue

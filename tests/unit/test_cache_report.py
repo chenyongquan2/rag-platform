@@ -167,3 +167,13 @@ def test_cli_shadow_report(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
     assert code == 0
     assert "would hit" in capsys.readouterr().out
     assert json.loads(out.read_text("utf-8"))["lookups"] == 3
+
+
+def test_a_smaller_threshold_reads_the_far_would_hits_as_too_far() -> None:
+    records = [rec("would_hit", distance=0.04)] * 3 + [rec("would_hit", distance=0.18)] * 2
+    records += [rec("empty")] * 5
+    wide = shadow_report(records)
+    narrow = shadow_report(records, max_distance=0.1)
+    assert wide["would_hit"]["n"] == 5 and narrow["would_hit"]["n"] == 3
+    assert narrow["status"]["too_far"] == 2 and narrow["max_distance"] == 0.1
+    assert wide["max_distance"] is None
