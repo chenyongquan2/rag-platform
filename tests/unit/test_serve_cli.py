@@ -63,7 +63,7 @@ def test_stdio_and_http_start_the_load_and_run(monkeypatch: pytest.MonkeyPatch) 
     assert ran[0] == ("obs", cli.SERVICE_NAME)
     assert ran[1] == (
         "stdio",
-        ["ask_docs", "get_context", "list_knowledge_bases", "search_docs"],
+        ["ask_docs", "feedback", "get_context", "list_knowledge_bases", "search_docs"],
     )
     assert ran[2] == ("shutdown", None)
     host, port, paths = ran[4][1]

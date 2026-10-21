@@ -137,3 +137,7 @@ METRIC_CACHE_SHADOW = "rag.cache.shadow"
 METRIC_MODEL_CALLS = "rag.model.calls"
 METRIC_MODEL_TOKENS = "rag.model.tokens"
 METRIC_MODEL_COST = "rag.model.cost"
+
+# User verdicts (spec P5-02): `rag.feedback` counts them by verdict (useful | not_useful).
+METRIC_FEEDBACK = "rag.feedback"
+FEEDBACK_VERDICT = "rag.feedback.verdict"

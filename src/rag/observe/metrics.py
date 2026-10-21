@@ -121,6 +121,11 @@ class Metrics:
             unit="{request}",
             description="What the shadow-mode semantic cache would have done, by verdict",
         )
+        self.feedback = meter.create_counter(
+            attr.METRIC_FEEDBACK,
+            unit="{verdict}",
+            description="User verdicts on answers (feedback tool and endpoint) by verdict",
+        )
         self.model_calls = meter.create_counter(
             attr.METRIC_MODEL_CALLS,
             unit="{call}",
@@ -215,6 +220,13 @@ class Metrics:
             self.cache_shadow.add(1, {**base, attr.CACHE_SHADOW: verdict})
         except Exception:
             logger.warning("recording cache shadow metrics failed", exc_info=True)
+
+    def record_feedback(self, *, useful: bool) -> None:
+        """One accepted verdict of a user; refused ones (bad id, bad comment) never count."""
+        try:
+            self.feedback.add(1, {attr.FEEDBACK_VERDICT: "useful" if useful else "not_useful"})
+        except Exception:
+            logger.warning("recording feedback metrics failed", exc_info=True)
 
     def record_ledger_row(self, row: Mapping[str, Any]) -> None:
         """One call, its tokens and CNY from one cost ledger line (`rag.cost.add_record_listener`).
