@@ -991,6 +991,7 @@ class SearchService:
             )
             # Keyed by the rated request: a join on `request_id` finds the answer and the verdict.
             call.record = record.model_copy(update={"request_id": rated_request_id})
+            get_observability().metrics.record_feedback(useful=useful)
             return FeedbackResponse(request_id=rated_request_id, recorded=True)
 
     def get_context(

@@ -1,0 +1,5 @@
+# The default overlay of the Collector: adds nothing (docker-compose.yml starts the Collector with
+# deploy/otel-collector.yaml plus the overlay named by COLLECTOR_EXTRA, default "none").
+# Another file in this folder adds a back end: `COLLECTOR_EXTRA=langfuse docker compose up -d
+# otel-collector` (see langfuse.yaml).
+{}

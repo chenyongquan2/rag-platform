@@ -1,11 +1,11 @@
 """MCP tools of the search service (design s16-1; official `mcp` 2.3 SDK, `MCPServer`).
 
-Four tools for coding assistants and other agents: `search_docs`, `ask_docs`, `get_context`,
-`list_knowledge_bases`. The same `MCPServer` runs over stdio (`python -m rag.serve stdio`, one
-process per client) and over streamable-http (mounted at `/mcp` in the HTTP app). The tool
-descriptions are written for the model that reads them: which knowledge bases exist and what
-each holds (those the server's caller may use), when to call the tool, what the arguments mean
-and that the returned text is untrusted.
+Five tools for coding assistants and other agents: `search_docs`, `ask_docs`, `get_context`,
+`list_knowledge_bases`, `feedback` (spec P5-02). The same `MCPServer` runs over stdio
+(`python -m rag.serve stdio`, one process per client) and over streamable-http (mounted at
+`/mcp` in the HTTP app). The tool descriptions are written for the model that reads them: which
+knowledge bases exist and what each holds (those the server's caller may use), when to call
+the tool, what the arguments mean and that the returned text is untrusted.
 
 Each tool runs the synchronous `SearchService` call in a worker thread (anyio copies the
 context, so our request span nests under the SDK's `tools/call` span) and returns a
@@ -36,9 +36,11 @@ from rag.retrieve.filters import CALLER_FILTER_KEYS
 from rag.security.access import Credentials
 from rag.serve.errors import ServiceError
 from rag.serve.schema import (
+    FEEDBACK_COMMENT_CHARS,
     AskResponse,
     ContextResponse,
     ErrorResponse,
+    FeedbackResponse,
     KnowledgeBaseList,
     SearchResponse,
 )
@@ -157,6 +159,16 @@ accepts. Currently:
 {_kb_lines(configs)}"""
 
 
+def feedback_description() -> str:
+    return f"""\
+Tell the knowledge base whether an answer or a set of passages helped. Pass the request_id
+that search_docs or ask_docs returned, and useful=true or useful=false; add a short comment
+(at most {FEEDBACK_COMMENT_CHARS} characters) saying what was missing or wrong when useful is
+false. The verdict is stored with that request and counted in the service's quality numbers;
+it does not change any later answer. Call it once per request, after you know whether the
+result was good. Do not put secrets or personal data in the comment."""
+
+
 def _credentials(transport: str) -> Credentials:
     """What the transport knows about the sender; a verified OAuth token from P8 on."""
     token = get_access_token()
@@ -195,7 +207,7 @@ async def _finish(call: Awaitable[BaseModel]) -> CallToolResult:
 
 
 def build_mcp_server(service: SearchService, *, transport: str = "stdio") -> MCPServer:
-    """The MCP server with the three tools over `service`. `transport` names the transport in
+    """The MCP server with the five tools over `service`. `transport` names the transport in
     the credentials (`stdio` or `streamable-http`)."""
     configs = service.visible_configs(Credentials(transport=transport))
     mcp: MCPServer = MCPServer(
@@ -292,6 +304,27 @@ def build_mcp_server(service: SearchService, *, transport: str = "stdio") -> MCP
     async def list_knowledge_bases() -> Annotated[CallToolResult, KnowledgeBaseList]:
         return await _run(service.list_knowledge_bases, credentials=_credentials(transport))
 
+    async def feedback(
+        request_id: Annotated[
+            str, Field(description="The request_id of the search_docs or ask_docs result.")
+        ],
+        useful: Annotated[
+            bool,
+            Field(strict=True, description="true: the result helped; false: it did not."),
+        ],
+        comment: Annotated[
+            str | None,
+            Field(description=f"Optional, at most {FEEDBACK_COMMENT_CHARS} characters."),
+        ] = None,
+    ) -> Annotated[CallToolResult, FeedbackResponse]:
+        return await _run(
+            service.feedback,
+            credentials=_credentials(transport),
+            rated_request_id=request_id,
+            useful=useful,
+            comment=comment,
+        )
+
     mcp.add_tool(
         search_docs,
         name="search_docs",
@@ -318,6 +351,19 @@ def build_mcp_server(service: SearchService, *, transport: str = "stdio") -> MCP
         title="Read around a passage",
         description=get_context_description(configs),
         annotations=read_only,
+    )
+    mcp.add_tool(
+        feedback,
+        name="feedback",
+        title="Rate a result",
+        description=feedback_description(),
+        # Writes one line to the request log: not read-only, but it changes nothing a caller sees.
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
     )
     mcp.add_tool(
         list_knowledge_bases,

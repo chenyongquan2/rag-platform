@@ -1,0 +1,13 @@
+# Grafana reads this at start-up (spec P5-02): one data source, the Prometheus of the same
+# compose profile. The uid is what the dashboard JSON refers to.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s

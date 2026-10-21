@@ -31,7 +31,7 @@ pytestmark = pytest.mark.integration
 
 REPO_ROOT = repo_path(".")
 LOAD_TIMEOUT_S = 300.0
-TOOLS = {"search_docs", "ask_docs", "get_context", "list_knowledge_bases"}
+TOOLS = {"search_docs", "ask_docs", "get_context", "list_knowledge_bases", "feedback"}
 QUESTION_SET = "evals/datasets/hf_docs/huggingface_doc_qa_eval.jsonl"
 KNOWN_QID = "huggingface_doc_qa_eval:025"
 KNOWN_PAGE = "hf_docs:huggingface/hf-endpoints-documentation/blob/main/docs/source/guides/logs.mdx"

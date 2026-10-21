@@ -20,6 +20,7 @@ from typing import Any
 
 from rag.config import ServiceSettings
 from rag.observe import init_observability, shutdown_observability
+from rag.observe.health import DependencyChecker, register_dependency_gauge
 from rag.serve.http_app import build_http_app
 from rag.serve.mcp_server import build_mcp_server
 from rag.serve.server import make_server
@@ -84,7 +85,10 @@ def main(
         # Records of fake questions stay out of the file of real ones.
         settings = settings.model_copy(update={"business_record_path": DEV_FAKE_RECORDS})
 
-    init_observability(settings, SERVICE_NAME)
+    obs = init_observability(settings, SERVICE_NAME)
+    if obs is not None and obs.mode != "off":
+        # Spec P5-02: can this process reach Elasticsearch and Redis? Read at every export.
+        register_dependency_gauge(obs.meter, DependencyChecker.from_settings(settings))
     service = service_factory(settings)
     try:
         if args.command == "stdio":

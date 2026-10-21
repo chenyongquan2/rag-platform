@@ -14,7 +14,7 @@ from typing import Any
 from opentelemetry.metrics import Meter
 
 from rag.observe import attributes as attr
-from rag.observe.context import current_request
+from rag.observe.context import current_request, current_request_is_probe
 from rag.types import ErrorCategory
 
 logger = logging.getLogger(__name__)
@@ -65,6 +65,15 @@ TOP_RERANK_SCORE_BUCKETS: tuple[float, ...] = (
 
 def _drop_none(attributes: Mapping[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in attributes.items() if v is not None}
+
+
+def _labels(attributes: Mapping[str, Any]) -> dict[str, Any]:
+    """The attributes without None values, plus `rag.request.probe=1` inside a request the
+    scheduled probe sent (spec P5-02), so dashboards and alerts about users can leave it out."""
+    out = _drop_none(attributes)
+    if current_request_is_probe():
+        out[attr.REQUEST_PROBE] = "1"
+    return out
 
 
 class Metrics:
@@ -121,6 +130,11 @@ class Metrics:
             unit="{request}",
             description="What the shadow-mode semantic cache would have done, by verdict",
         )
+        self.feedback = meter.create_counter(
+            attr.METRIC_FEEDBACK,
+            unit="{verdict}",
+            description="User verdicts on answers (feedback tool and endpoint) by verdict",
+        )
         self.model_calls = meter.create_counter(
             attr.METRIC_MODEL_CALLS,
             unit="{call}",
@@ -147,7 +161,7 @@ class Metrics:
     ) -> None:
         """One finished request; each category counts once (degraded and rerank_timeout also in
         their own counters)."""
-        base = _drop_none({attr.KB: kb, attr.TOOL: tool})
+        base = _labels({attr.KB: kb, attr.TOOL: tool})
         try:
             self.requests.add(1, {**base, attr.OUTCOME: outcome})
             for category in dict.fromkeys(error_categories):
@@ -164,7 +178,7 @@ class Metrics:
     ) -> None:
         try:
             self.step_duration.record(
-                duration_s, _drop_none({attr.STEP: step, attr.KB: kb, attr.OUTCOME: outcome})
+                duration_s, _labels({attr.STEP: step, attr.KB: kb, attr.OUTCOME: outcome})
             )
         except Exception:
             logger.warning("recording step duration failed", exc_info=True)
@@ -179,7 +193,7 @@ class Metrics:
     ) -> None:
         """Quality signals of one search (design s15-1): a not-found answer, and the best rerank
         score (None when the rerank scored nothing, e.g. after a timeout before the first batch)."""
-        base = _drop_none({attr.KB: kb, attr.TOOL: tool})
+        base = _labels({attr.KB: kb, attr.TOOL: tool})
         try:
             if not_found:
                 self.not_found.add(1, base)
@@ -196,13 +210,22 @@ class Metrics:
         layer: str,
         outcome: str,
         not_stored_reason: str = "",
+        reason: str = "",
     ) -> None:
         """One request's way through a cache layer; a miss whose result was not written also
-        counts under its reason."""
-        base = _drop_none({attr.KB: kb, attr.TOOL: tool})
+        counts under its reason. `reason` (why a request bypassed the cache or hit an error:
+        `breaker_open`, `read_off`, the store's error) is a label of the request count itself, so
+        an alert can tell "the breaker is open" from "this call may not read the cache"."""
+        base = _labels({attr.KB: kb, attr.TOOL: tool})
         try:
             self.cache_requests.add(
-                1, {**base, attr.CACHE_LAYER: layer, attr.CACHE_OUTCOME: outcome}
+                1,
+                {
+                    **base,
+                    attr.CACHE_LAYER: layer,
+                    attr.CACHE_OUTCOME: outcome,
+                    **({attr.CACHE_REASON: reason} if reason else {}),
+                },
             )
             if not_stored_reason:
                 self.cache_not_stored.add(1, {**base, attr.CACHE_REASON: not_stored_reason})
@@ -210,11 +233,18 @@ class Metrics:
             logger.warning("recording cache metrics failed", exc_info=True)
 
     def record_cache_shadow(self, *, kb: str | None, tool: str, verdict: str) -> None:
-        base = _drop_none({attr.KB: kb, attr.TOOL: tool})
+        base = _labels({attr.KB: kb, attr.TOOL: tool})
         try:
             self.cache_shadow.add(1, {**base, attr.CACHE_SHADOW: verdict})
         except Exception:
             logger.warning("recording cache shadow metrics failed", exc_info=True)
+
+    def record_feedback(self, *, useful: bool) -> None:
+        """One accepted verdict of a user; refused ones (bad id, bad comment) never count."""
+        try:
+            self.feedback.add(1, {attr.FEEDBACK_VERDICT: "useful" if useful else "not_useful"})
+        except Exception:
+            logger.warning("recording feedback metrics failed", exc_info=True)
 
     def record_ledger_row(self, row: Mapping[str, Any]) -> None:
         """One call, its tokens and CNY from one cost ledger line (`rag.cost.add_record_listener`).
@@ -223,7 +253,7 @@ class Metrics:
         caller per day). Calls made outside a request, or in a thread that did not copy the
         request's context, have no caller attribute."""
         request = current_request()
-        base = _drop_none(
+        base = _labels(
             {
                 attr.MODEL_KIND: row.get("kind"),
                 attr.GEN_AI_REQUEST_MODEL: row.get("model"),
