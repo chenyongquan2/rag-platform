@@ -138,6 +138,11 @@ METRIC_MODEL_CALLS = "rag.model.calls"
 METRIC_MODEL_TOKENS = "rag.model.tokens"
 METRIC_MODEL_COST = "rag.model.cost"
 
+# Reachability of the stores the service needs (spec P5-02): gauge, 1 up and 0 down, per
+# dependency (elasticsearch | redis); checked from the app's side, with the app's own settings.
+METRIC_DEPENDENCY_UP = "rag.dependency.up"
+DEPENDENCY = "rag.dependency"
+
 # User verdicts (spec P5-02): `rag.feedback` counts them by verdict (useful | not_useful).
 METRIC_FEEDBACK = "rag.feedback"
 FEEDBACK_VERDICT = "rag.feedback.verdict"

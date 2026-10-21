@@ -277,6 +277,11 @@ class ServiceSettings(BaseSettings):
     business_record_path: str = "data/observe/records/business.jsonl"
     business_record_max_bytes: int = Field(default=20_000_000, gt=0)
     business_record_backups: int = Field(default=5, ge=0)
+    # Reachability gauge of Elasticsearch and Redis (spec P5-02): each check waits at most
+    # `dependency_check_timeout_s`; a verdict is reused for `dependency_check_ttl_s` seconds, so
+    # a metric export every 30 s never pings more often than that.
+    dependency_check_timeout_s: float = Field(default=1.5, gt=0)
+    dependency_check_ttl_s: float = Field(default=10.0, gt=0)
     # JSON log lines in `<log_dir>/<service name>.jsonl` (relative to the repo root; empty: no
     # file); stderr gets lines at `log_stderr_level` and above (OFF: none).
     log_dir: str = "data/observe/logs"
