@@ -39,7 +39,7 @@
 
 ## 已知问题
 - P6-01：转换失败的 PDF 在同一个进程里不会重试；文件少时一个坏 PDF 就超过默认 5% 的读取失败上限，整次摄取停下（不写任何东西）；公式保留为 formula-not-decoded，没有页眉页脚清洗规则；跨页的表格读成两张；扫描件、OCR、多栏顺序没评测；长表格的标题在每一块里重复（VGG 表 1 切成 6 块）；22 道题里 pdf-c02 所有变体都找不到。
-- 2026-10-21 P5-02 开发时子代理执行了 docker compose --profile langfuse down -v，删掉了 ES 数据卷（全部索引）和 Redis 数据；已从文档库和向量缓存重建 kb_hf_docs_v1、kb_mt5_v1、fake_kb_hf_docs_v1，kb_pdf_demo_v1 也在，数量都对，花费 0；Redis 里的数据代号计数和缓存清空了；P2-01 留作回滚的旧索引版本没有了。CLAUDE.md 已加规则禁止 down 和删卷。三个 serve、rerank 集成测试文件依赖手工建的 fake_kb_hf_docs，被删后要用 python -m rag.ingest.job --kb hf_docs --limit 50 --fake-embed 重建。
+- 2026-10-21 P5-02 开发时子代理执行了 docker compose --profile langfuse down -v，删掉了 ES 数据卷（全部索引）和 Redis 数据；已从文档库和向量缓存重建 kb_hf_docs_v1、kb_mt5_v1、fake_kb_hf_docs_v1，kb_pdf_demo_v1 也在，数量都对，花费 0；Redis 里的数据代号计数和缓存清空了；P2-01 留作回滚的旧索引版本没有了。CLAUDE.md 已加规则禁止 down 和删卷。重建后的索引换了 uuid，主目录和共享目录里原来的文档库还记着旧 uuid，下一次摄取会把每页当成新页（预算检查会拦下）；已用 P5-02 工作目录里重建时生成的文档库替换（旧文件备份在 C:/workspace/rag-platform-data/backup-docstore-20261021/），之后在 hf_docs 上跑了一次摄取，结果是 0 新增、0 更新、2617 不变、花费 0。三个 serve、rerank 集成测试文件依赖手工建的 fake_kb_hf_docs，被删后要用 python -m rag.ingest.job --kb hf_docs --limit 50 --fake-embed 重建。
 - P5-01：语义缓存守卫的盲区：普通名词之间的词序和角色互换、「Who/Whom」、没有否定词或反义字的中文对（如上传/下载）要靠距离阈值；也会误拒一些真正的同义改写（how can I / how do I、max / maximum）。
 - P5-01：带头的结果不能共享时（例如降级），所有等待者各自重算，N 个相同请求最多算 N 次而不是 1 次；两进程的 Redis 锁只用两个缓存对象模拟过；评审的 55 对没有放进题集；第一批的保留集没有用新守卫重算。
 - P5-01：一个质量不高但干净的回答会给同权限组的所有人用最多 1 小时（没找到的 10 分钟），只能用 rag.cache drop 清；ES 里语义缓存的旧数据代号条目要等 1 天才过期。
