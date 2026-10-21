@@ -143,6 +143,16 @@ METRIC_MODEL_COST = "rag.model.cost"
 METRIC_DEPENDENCY_UP = "rag.dependency.up"
 DEPENDENCY = "rag.dependency"
 
+# Scheduled probe (spec P5-02, `rag.monitor.probe`): runs by kind (search | ask) and outcome
+# (ok | error | insane), the duration of each, whether the last run was good, and when the last
+# good run was (seconds since the epoch).
+METRIC_PROBE_RUNS = "rag.probe.runs"
+METRIC_PROBE_DURATION = "rag.probe.duration"
+METRIC_PROBE_SUCCESS = "rag.probe.success"
+METRIC_PROBE_LAST_SUCCESS = "rag.probe.last_success_timestamp"
+PROBE_KIND = "rag.probe.kind"
+PROBE_OUTCOME = "rag.probe.outcome"
+
 # User verdicts (spec P5-02): `rag.feedback` counts them by verdict (useful | not_useful).
 METRIC_FEEDBACK = "rag.feedback"
 FEEDBACK_VERDICT = "rag.feedback.verdict"

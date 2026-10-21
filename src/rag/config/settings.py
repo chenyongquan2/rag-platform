@@ -282,6 +282,39 @@ class ServiceSettings(BaseSettings):
     # a metric export every 30 s never pings more often than that.
     dependency_check_timeout_s: float = Field(default=1.5, gt=0)
     dependency_check_ttl_s: float = Field(default=10.0, gt=0)
+    # Scheduled probe (spec P5-02, `python -m rag.monitor probe`): one fixed `search_docs` request
+    # every `probe_interval_s` seconds to the running service (`probe_url`, empty: the service's
+    # own host and port). The answer is sane when the first passage's source (path, URL or title)
+    # contains `probe_expected`, and the result is not degraded. The ask check costs model calls:
+    # off by default, at most one per `probe_ask_interval_s` and `probe_ask_daily_cap` per UTC
+    # day (counted in `probe_state_path`, so a restart does not reset it).
+    probe_url: str = ""
+    probe_kb: str = "hf_docs"
+    probe_query: str = "How do I upload a model to the Hugging Face Hub with push_to_hub?"
+    probe_expected: str = "push_to_hub"
+    probe_top_k: int = Field(default=3, ge=1, le=20)
+    probe_interval_s: float = Field(default=60.0, gt=0)
+    probe_timeout_s: float = Field(default=20.0, gt=0)
+    probe_metric_export_interval_s: float = Field(default=10.0, gt=0)
+    probe_ask_enabled: bool = False
+    probe_ask_question: str = "How do I upload a model to the Hugging Face Hub with push_to_hub?"
+    probe_ask_interval_s: float = Field(default=1800.0, gt=0)
+    probe_ask_timeout_s: float = Field(default=45.0, gt=0)
+    probe_ask_daily_cap: int = Field(default=3, ge=0)
+    probe_state_path: str = "data/observe/probe_state.json"
+    # Alerts (spec P5-02): Prometheus posts to the receiver (`python -m rag.monitor receiver`)
+    # at `alert_receiver_host:alert_receiver_port` (Alertmanager's 9093 + 20000); it writes
+    # `alert_log_path` and, when `ALERT_WEBHOOK_URL` is set, posts each change there too.
+    alert_receiver_host: str = "127.0.0.1"
+    alert_receiver_port: int = Field(default=29093, gt=0, lt=65536)
+    alert_log_path: str = "data/observe/alerts.jsonl"
+    alert_webhook_url: SecretStr = SecretStr("")
+    # Trace files of the Collector (`python -m rag.monitor prune`): anything matching the pattern
+    # older than the days, or beyond the total size, goes (the newest file always stays).
+    trace_retention_dir: str = "data/otel"
+    trace_retention_pattern: str = "traces*"
+    trace_retention_days: float = Field(default=3.0, gt=0)
+    trace_retention_max_mb: int = Field(default=100, gt=0)
     # JSON log lines in `<log_dir>/<service name>.jsonl` (relative to the repo root; empty: no
     # file); stderr gets lines at `log_stderr_level` and above (OFF: none).
     log_dir: str = "data/observe/logs"
