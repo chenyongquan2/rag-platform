@@ -319,6 +319,13 @@ def estimate_table_cost(ledger: CostLedger, model: str, table_tokens: list[int])
 
 # ---- gateway clients -------------------------------------------------------------------------
 
+NO_THINKING: dict[str, Any] = {"enable_thinking": False}
+"""Request body field that turns the thinking mode of the Qwen models off. Without it the
+gateway's `qwen/qwen3.6-flash` spends the whole output cap on reasoning for a table and returns an
+empty answer (`finish_reason: length`, measured in P6-01: 30 of 30 table summaries and 6 of 15
+figures came back empty with a cap of 400 to 600 tokens); with it a summary takes about 35
+output tokens."""
+
 LANGUAGE_NAMES = {"en": "English", "zh": "Chinese"}
 
 IMAGE_PROMPT = (
@@ -367,9 +374,15 @@ class GatewayVisionDescriber:
     """Describes a figure with a vision model of the gateway."""
 
     def __init__(
-        self, chat: BaseChatModel, *, model: str, ledger: CostLedger, max_px: int = 1024
+        self,
+        chat: BaseChatModel,
+        *,
+        model: str,
+        ledger: CostLedger,
+        max_px: int = 1024,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
-        self.chat = chat
+        self.chat: Any = chat.bind(extra_body=extra_body) if extra_body else chat
         self.model = model
         self.ledger = ledger
         self.max_px = max_px
@@ -402,8 +415,9 @@ class GatewayTableSummarizer:
         model: str,
         ledger: CostLedger,
         max_table_chars: int = 6000,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
-        self.chat = chat
+        self.chat: Any = chat.bind(extra_body=extra_body) if extra_body else chat
         self.model = model
         self.ledger = ledger
         self.max_table_chars = max_table_chars
@@ -472,12 +486,19 @@ def shared_service(
 
             if vision_model and service.describer is None:
                 service.describer = GatewayVisionDescriber(
-                    chat(vision_model, 600), model=vision_model, ledger=ledger, max_px=max_px
+                    chat(vision_model, 600),
+                    model=vision_model,
+                    ledger=ledger,
+                    max_px=max_px,
+                    extra_body=NO_THINKING,
                 )
                 service.image_estimate_cny = estimate_image_cost(ledger, vision_model, 1)
             if text_model and service.summarizer is None:
                 service.summarizer = GatewayTableSummarizer(
-                    chat(text_model, 400), model=text_model, ledger=ledger
+                    chat(text_model, 400),
+                    model=text_model,
+                    ledger=ledger,
+                    extra_body=NO_THINKING,
                 )
                 service.table_estimate_cny = estimate_table_cost(ledger, text_model, [1000])
         return service

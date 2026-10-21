@@ -48,6 +48,8 @@ __all__ = [
 
 CAPTION = re.compile(r"^\s*(?:table|fig(?:ure)?\.?)\s*[A-Z]?\d+|^\s*[表图]\s*\d+", re.IGNORECASE)
 """A paragraph that starts like a caption: `Table 2.`, `Figure 3:`, `Fig. 4`, `表 1`."""
+TABLE_CAPTION = re.compile(r"^\s*(?:table\s*[A-Z]?\d+|表\s*\d+)", re.IGNORECASE)
+"""A caption that names a table; a `Figure` caption above a table counts when no figure is near."""
 _WHITELIST_CONTEXT = {"embed_keys": "embed_keys", "llm_keys": "llm_keys"}
 SUMMARY_MODES = ("model", "rule", "off")
 TEXT, TABLE, TABLE_SUMMARY = "text", "table", "table_summary"
@@ -56,6 +58,12 @@ TEXT, TABLE, TABLE_SUMMARY = "text", "table", "table_summary"
 def _is_caption(block: str) -> bool:
     text = block.strip()
     return bool(text) and "\n\n" not in text and text.count("\n") <= 2 and bool(CAPTION.match(text))
+
+
+def _figure_near(blocks: Sequence[str]) -> bool:
+    """A figure (its marker or description) in these blocks: a figure caption right after it
+    belongs to the figure, not to the table that follows."""
+    return any("<!-- figure" in b or IMAGE_MARKER_PREFIX in b for b in blocks)
 
 
 def _copy(node: BaseNode, text: str, node_id: str, **metadata: Any) -> TextNode:
@@ -140,12 +148,21 @@ class TableChunks(TransformComponent):
                 out.append(_copy(node, body, f"{node.node_id}.x{made}", chunk_kind=TEXT))
                 made += 1
 
-        for block, kind in blocks:
+        skip = -1
+        for i, (block, kind) in enumerate(blocks):
+            if i == skip:
+                continue
             if kind != TABLE:
                 pending.append(block)
                 continue
             caption: str | None = None
-            if pending and _is_caption(pending[-1]):
+            above = pending[-1] if pending and _is_caption(pending[-1]) else None
+            below = blocks[i + 1][0] if i + 1 < len(blocks) and blocks[i + 1][1] == TEXT else None
+            if above is not None and TABLE_CAPTION.match(above):
+                caption = pending.pop()
+            elif below is not None and _is_caption(below) and TABLE_CAPTION.match(below):
+                caption, skip = below, i + 1
+            elif above is not None and not _figure_near(pending[-3:-1]):
                 caption = pending.pop()
             flush()
             k = counters.get(doc_id, 0)

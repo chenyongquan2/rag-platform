@@ -135,15 +135,58 @@ def make_test_pdf(path: Path) -> Path:
     pdf.set_font("Helvetica", "", 11)
     pdf.multi_cell(0, 6, "Figure 1 shows the pressure over time for the Zephyr pump.")
     x0, y0 = 30, 60
-    pdf.set_draw_color(0, 0, 0)
-    pdf.line(x0, y0 + 60, x0 + 120, y0 + 60)
-    pdf.line(x0, y0, x0, y0 + 60)
-    pdf.set_draw_color(200, 0, 0)
-    pdf.set_line_width(0.8)
-    pdf.line(x0, y0 + 50, x0 + 40, y0 + 20)
-    pdf.line(x0 + 40, y0 + 20, x0 + 120, y0 + 10)
-    pdf.set_xy(25, y0 + 66)
+    chart = io.BytesIO()
+    pressure_chart().save(chart, format="PNG")
+    chart.seek(0)
+    pdf.image(chart, x=x0, y=y0, w=120)
+    pdf.set_xy(25, y0 + 86)
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 6, "Figure 1: Pressure rises quickly and then levels off.")
     path.write_bytes(bytes(pdf.output()))
+    return path
+
+
+def pressure_chart() -> Image.Image:
+    """A raster line chart for the test PDF (an embedded image, which Docling finds as a figure)."""
+    image = Image.new("RGB", (480, 320), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line([40, 20, 40, 280], fill="black", width=3)
+    draw.line([40, 280, 460, 280], fill="black", width=3)
+    draw.line([40, 250, 160, 90, 460, 50], fill=(200, 0, 0), width=5)
+    return image
+
+
+DEMO_CHART_VALUES = {"Q1": 12, "Q2": 18, "Q3": 9, "Q4": 25}
+"""The numbers drawn in the demo chart (million USD); the evaluation questions rely on them."""
+
+
+def make_demo_chart(path: Path) -> Path:
+    """The standalone image of the `pdf_demo` knowledge base: a bar chart of quarterly revenue
+    drawn here (no outside source), so the answers to questions about it are known."""
+    from PIL import ImageFont
+
+    width, height = 640, 420
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    title_font = ImageFont.load_default(size=22)
+    label_font = ImageFont.load_default(size=18)
+    draw.text(
+        (40, 16), "Quarterly revenue (million USD), fiscal year 2025", fill="black", font=title_font
+    )
+    left, bottom, top = 70, 360, 80
+    draw.line([left, top, left, bottom], fill="black", width=2)
+    draw.line([left, bottom, width - 30, bottom], fill="black", width=2)
+    unit = (bottom - top) / 30
+    for i, (name, value) in enumerate(DEMO_CHART_VALUES.items()):
+        x0 = left + 40 + i * 130
+        y0 = bottom - value * unit
+        draw.rectangle([x0, y0, x0 + 80, bottom], fill=(40, 90, 200))
+        draw.text((x0 + 22, y0 - 26), str(value), fill="black", font=label_font)
+        draw.text((x0 + 26, bottom + 8), name, fill="black", font=label_font)
+    for tick in (0, 10, 20, 30):
+        y = bottom - tick * unit
+        draw.line([left - 6, y, left, y], fill="black", width=2)
+        draw.text((left - 40, y - 9), str(tick), fill="black", font=label_font)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(path, format="PNG")
     return path

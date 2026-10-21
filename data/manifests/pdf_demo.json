@@ -1,0 +1,44 @@
+{
+  "kb": "pdf_demo",
+  "note": "Download manifest of the pdf_demo knowledge base (spec P6-01). The PDFs are not committed: fetch each url into data/raw/pdf_demo/<file> and check the sha256. The papers are the authors' arXiv versions, read for a private demo on this machine only.",
+  "files": [
+    {
+      "file": "1512.03385.pdf",
+      "url": "https://arxiv.org/pdf/1512.03385",
+      "title": "Deep Residual Learning for Image Recognition (ResNet)",
+      "sha256": "1e0651b6810ecba34a3dbc5b5b0209226f889004607c1f203540a48d64e5a93a",
+      "bytes": 819383,
+      "pages": 12
+    },
+    {
+      "file": "1502.03167.pdf",
+      "url": "https://arxiv.org/pdf/1502.03167",
+      "title": "Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift",
+      "sha256": "bdc69e0b568f41d8d3181cc9077a461f58fcdd1c70c9f49efe60a05ee6109655",
+      "bytes": 173548,
+      "pages": 11
+    },
+    {
+      "file": "1409.1556.pdf",
+      "url": "https://arxiv.org/pdf/1409.1556",
+      "title": "Very Deep Convolutional Networks for Large-Scale Image Recognition (VGG)",
+      "sha256": "83728f9efc21081792902b4c17a4657022d1e4a92ec81655c2427f4ef0755e50",
+      "bytes": 200010,
+      "pages": 14
+    },
+    {
+      "file": "1412.6980.pdf",
+      "url": "https://arxiv.org/pdf/1412.6980",
+      "title": "Adam: A Method for Stochastic Optimization",
+      "sha256": "eab9c73ae2ceda884b94830bda99312254bac4806f6c9f045cbab90721ecda31",
+      "bytes": 584641,
+      "pages": 15
+    }
+  ],
+  "generated": [
+    {
+      "file": "quarterly_revenue.png",
+      "how": "uv run python scripts/p6_01_make_demo_chart.py (drawn by rag.testing.pdf.make_demo_chart; Q1 12, Q2 18, Q3 9, Q4 25 million USD)"
+    }
+  ]
+}

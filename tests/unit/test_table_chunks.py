@@ -130,6 +130,39 @@ def test_table_chunks_make_the_table_its_own_chunk_with_caption() -> None:
     assert nodes[1].metadata["title_path"] == "Paper > 3 Results"
 
 
+def test_table_chunks_take_the_table_caption_below_the_table_and_keep_the_figure_above() -> None:
+    """Docling often puts a table's caption after it, right below the caption of the figure
+    above (ResNet, Table 2): the table gets the `Table` caption below it, not the figure's."""
+    text = (
+        "<!-- figure 1 -->\n\nFigure 4. Training on ImageNet.\n\n"
+        + table(2)
+        + "\n\nTable 2. Top-1 error on validation.\n\nThe discussion follows."
+    )
+    nodes = run([document(text)], MarkdownSplit(), table_chunks())
+    kinds = [n.metadata["chunk_kind"] for n in nodes]
+    assert kinds == ["text", "table", "text"]
+    body = nodes[1].get_content(MetadataMode.NONE)
+    assert body.startswith("Table 2. Top-1 error on validation.\n\n| Model | Error |")
+    assert "Figure 4. Training on ImageNet." in nodes[0].get_content(MetadataMode.NONE)
+    assert nodes[2].get_content(MetadataMode.NONE) == "The discussion follows."
+
+
+def test_table_chunks_a_figure_caption_above_a_table_is_its_caption_when_no_figure_is_near() -> (
+    None
+):
+    """The Batch Normalization paper calls a table `Figure 3`."""
+    text = "Some text.\n\nFigure 3: Steps to reach the accuracy.\n\n" + table(2)
+    nodes = run([document(text)], MarkdownSplit(), table_chunks())
+    assert nodes[1].get_content(MetadataMode.NONE).startswith("Figure 3: Steps to reach")
+
+
+def test_table_chunks_the_caption_above_wins_over_one_below() -> None:
+    text = "Table 1. Above.\n\n" + table(2) + "\n\nTable 2. Below, for the next table."
+    nodes = run([document(text)], MarkdownSplit(), table_chunks())
+    assert nodes[0].get_content(MetadataMode.NONE).startswith("Table 1. Above.")
+    assert nodes[1].get_content(MetadataMode.NONE) == "Table 2. Below, for the next table."
+
+
 def test_table_chunks_keep_a_paragraph_that_is_not_a_caption() -> None:
     text = "The next table shows errors.\n\n" + table(2)
     nodes = run([document(text)], MarkdownSplit(), table_chunks())
