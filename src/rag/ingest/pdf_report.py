@@ -36,11 +36,11 @@ from rag.data.pdf.connector import IMAGE_EXTENSIONS, PdfDirConnector
 from rag.ingest.build import KbProcessor
 from rag.ingest.clean import RemovalGuardError
 from rag.ingest.describe import (
-    IMAGE_PROMPT_VERSION,
     TABLE_PROMPT_VERSION,
     ModelTextCache,
     estimate_image_cost,
     estimate_table_cost,
+    image_version,
     sha256_hex,
 )
 from rag.ingest.report import WARN_RATIO, QualityReport, quality_report
@@ -145,6 +145,8 @@ def estimate_run(
     cache = ModelTextCache(repo_path(cache_path))
     budget = pdf_params.get("budget_cny")
 
+    language = "und" if cfg.language == "auto" else cfg.language  # what the reader passes
+    language_version = image_version(language)
     sources = list(connector.documents())
     failed = {s.source_rel for s in sources if s.extra.get("conversion_error")}
     files = {s.source_rel for s in sources} - failed
@@ -171,7 +173,7 @@ def estimate_run(
             if shortest < min_px:
                 small += 1
             elif sha not in seen:
-                hit = cache.get("image", vision_model, IMAGE_PROMPT_VERSION, sha) is not None
+                hit = cache.get("image", vision_model, language_version, sha) is not None
                 seen[sha] = hit
     cached_figures = sum(seen.values())
     to_describe = 0 if not describing else len(seen) - cached_figures

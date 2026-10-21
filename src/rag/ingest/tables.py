@@ -32,7 +32,7 @@ from llama_index.core.schema import BaseNode, MetadataMode, TextNode, TransformC
 
 from rag.ingest.chunk import TokenizerFn, _blocks, doc_id_of, metadata_tokens, trim_block
 from rag.ingest.describe import IMAGE_MARKER_PREFIX, ModelTextService
-from rag.ingest.markdown import split_table, table_header_lines
+from rag.ingest.markdown import is_table_row, split_table, table_header_lines
 from rag.ingest.meta import DEFAULT_EMBED_KEYS, DEFAULT_LLM_KEYS, apply_whitelist
 from rag.registry import steps
 
@@ -210,8 +210,15 @@ def join_table_parts(texts: Sequence[str]) -> tuple[str, str]:
     return caption, "\n".join(table_lines)
 
 
+_UNESCAPED_BAR = re.compile(r"(?<!\\)\|")
+
+
 def _cells(row: str) -> list[str]:
-    return [c.strip() for c in row.strip().strip("|").split("|")]
+    """The cells of a Markdown table row; a bar escaped with a backslash is part of the cell."""
+    inner = row.strip()
+    inner = inner[1:] if inner.startswith("|") else inner
+    inner = inner[:-1] if inner.endswith("|") and not inner.endswith("\\|") else inner
+    return [c.strip().replace("\\|", "|") for c in _UNESCAPED_BAR.split(inner)]
 
 
 def rule_summary(caption: str, table: str, *, max_rows: int = 12) -> str:
@@ -219,12 +226,16 @@ def rule_summary(caption: str, table: str, *, max_rows: int = 12) -> str:
     lines = [ln for ln in table.split("\n") if ln.strip()]
     head_n = table_header_lines(lines)
     columns = [c for c in _cells(lines[0]) if c] if lines else []
-    rows = [_cells(ln) for ln in lines[head_n:]]
+    # Only whole rows: the pieces of a row that was cut inside (an oversized row) are no cells.
+    rows = [_cells(ln) for ln in lines[head_n:] if is_table_row(ln) and ln.strip().endswith("|")]
     firsts: list[str] = []
     for cells in rows:
         if cells and cells[0] and cells[0] not in firsts:
             firsts.append(cells[0])
-    parts = [caption.rstrip(".") + "." if caption else "", f"Columns: {', '.join(columns)}."]
+    parts = [
+        caption.rstrip(".") + "." if caption else "",
+        f"Columns: {', '.join(columns)}." if columns else "",
+    ]
     listed = "; ".join(firsts[:max_rows]) + ("; ..." if len(firsts) > max_rows else "")
     parts.append(f"{len(rows)} rows: {listed}." if firsts else f"{len(rows)} rows.")
     return " ".join(p for p in parts if p)
@@ -328,10 +339,27 @@ class TableSummary(TransformComponent):
         return out
 
 
+CONTINUED = "[Image description (written by a model), continued: "
+"""Opens the next chunk of a figure description that `token_split` cut: every chunk with a piece
+of the description says that a model wrote it."""
+
+
+def _description_is_open(text: str) -> bool:
+    """The last figure description in the text does not end in it (the splitter cut it)."""
+    start = text.rfind(IMAGE_MARKER_PREFIX)
+    if start < 0:
+        return False
+    return not text[start:].split("\n\n", 1)[0].rstrip().endswith("]")
+
+
 @steps.register("mark_generated_text")
 class MarkGeneratedText(TransformComponent):
     """`has_generated_text` = the chunk holds a model-written figure description, or is a table
-    summary (design s5-3: the prompt must be able to say the text was written by a model)."""
+    summary (design s5-3: the prompt must be able to say the text was written by a model).
+
+    A description longer than the chunk cap is cut by `token_split`; the chunks after the first
+    start with `CONTINUED` (the marker sentence of the first one) and carry the flag too, so no
+    piece of model-written text reads like a quote from the document."""
 
     context_params: ClassVar[dict[str, str]] = _WHITELIST_CONTEXT
     embed_keys: list[str] = Field(default_factory=lambda: list(DEFAULT_EMBED_KEYS))
@@ -342,9 +370,19 @@ class MarkGeneratedText(TransformComponent):
         return "mark_generated_text"
 
     def __call__(self, nodes: Sequence[BaseNode], **kwargs: Any) -> list[BaseNode]:
+        open_page: str | None = None
         for node in nodes:
-            generated = bool(node.metadata.get("has_generated_text")) or (
-                IMAGE_MARKER_PREFIX in node.get_content(MetadataMode.NONE)
+            text = node.get_content(MetadataMode.NONE)
+            page = doc_id_of(node)
+            continued = open_page == page and node.metadata.get("chunk_kind", TEXT) == TEXT
+            if continued:
+                text = CONTINUED + text.lstrip()
+                node.set_content(text)
+            open_page = page if _description_is_open(text) else None
+            generated = (
+                bool(node.metadata.get("has_generated_text"))
+                or continued
+                or IMAGE_MARKER_PREFIX in text
             )
             node.metadata["has_generated_text"] = generated
             apply_whitelist(node, self.embed_keys, self.llm_keys)

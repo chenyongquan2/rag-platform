@@ -209,3 +209,31 @@ def test_the_processor_hands_its_settings_to_readers_and_steps_that_call_a_model
     assert summary._settings is mine
     md = load_kb_config(repo_path("kb/public/hf_docs.yaml"), kb_root=KB_ROOT)
     KbProcessor(md, settings=mine, tokenizer=words)  # readers without `settings` still build
+
+
+def test_pipeline_version_ignores_the_budget_and_cache_of_the_table_summary_step(
+    cfg: KnowledgeBaseConfig,
+) -> None:
+    """Like the reader's, the table summary step's budget and cache file say how a run is paid
+    for, not what it writes."""
+
+    def version(**params: object) -> str:
+        pipe = cfg.pipelines[".pdf"]
+        steps = [
+            s.model_copy(update={"params": {**s.params, **params}})
+            if s.name == "table_summary"
+            else s
+            for s in pipe.steps
+        ]
+        changed = cfg.model_copy(
+            update={
+                "pipelines": {**cfg.pipelines, ".pdf": pipe.model_copy(update={"steps": steps})}
+            }
+        )
+        return pipeline_version(changed, ".pdf", tokenizer_model="m")
+
+    base = version()
+    assert version(budget_cny=9.0) == base
+    assert version(cache_path="elsewhere.sqlite3") == base
+    assert version(model="another-model") != base  # the model decides the text
+    assert version(mode="rule") != base

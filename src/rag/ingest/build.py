@@ -68,7 +68,8 @@ def _hashed(step: StepConfig) -> dict[str, Any]:
     """A step as it goes into the pipeline version: the removal-guard limits are left out, so
     tuning a limit does not make every page look changed."""
     dumped = step.model_dump()
-    dumped["params"] = {k: v for k, v in dumped["params"].items() if k not in GUARD_PARAMS}
+    left_out = (*GUARD_PARAMS, *READER_RUN_PARAMS)
+    dumped["params"] = {k: v for k, v in dumped["params"].items() if k not in left_out}
     return dumped
 
 

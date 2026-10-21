@@ -34,6 +34,15 @@ from PIL import Image
 from rag.cost import CostLedger
 
 IMAGE_PROMPT_VERSION = "img1"
+
+
+def image_version(language: str) -> str:
+    """Prompt version of an image description in `language`: the English texts (the first ones
+    made) keep `img1`, another language gets its own entries, so a knowledge base that changes
+    its language does not get the old English descriptions back."""
+    return IMAGE_PROMPT_VERSION if language in ("en", "") else f"{IMAGE_PROMPT_VERSION}:{language}"
+
+
 TABLE_PROMPT_VERSION = "tbl1"
 """Part of the cache key: change a prompt, bump its version, and the old texts are not reused."""
 
@@ -246,7 +255,8 @@ class ModelTextService:
         if self.describer is None:
             raise RuntimeError("no image describer is configured")
         key = sha256_hex(png)
-        hit = self.cache.get("image", self.describer.model, IMAGE_PROMPT_VERSION, key)
+        version = image_version(language)
+        hit = self.cache.get("image", self.describer.model, version, key)
         if hit is not None:
             self.stats.image_cache_hits += 1
             return hit.text
@@ -260,7 +270,7 @@ class ModelTextService:
         self.cache.put(
             "image",
             self.describer.model,
-            IMAGE_PROMPT_VERSION,
+            version,
             key,
             reply.text,
             prompt_tokens=reply.prompt_tokens,
@@ -325,6 +335,13 @@ gateway's `qwen/qwen3.6-flash` spends the whole output cap on reasoning for a ta
 empty answer (`finish_reason: length`, measured in P6-01: 30 of 30 table summaries and 6 of 15
 figures came back empty with a cap of 400 to 600 tokens); with it a summary takes about 35
 output tokens."""
+
+
+def extra_body_for(model: str) -> dict[str, Any] | None:
+    """The request fields a model needs: the thinking switch for the Qwen models, nothing for
+    any other model (an unknown field may be refused by another provider)."""
+    return dict(NO_THINKING) if "qwen" in model.lower() else None
+
 
 LANGUAGE_NAMES = {"en": "English", "zh": "Chinese"}
 
@@ -471,6 +488,15 @@ def shared_service(
         if service is None:
             service = ModelTextService(cache=ModelTextCache(path), guard=SpendGuard(budget_cny))
             _SHARED[key] = service
+        for role, wanted, held in (
+            ("vision", vision_model, service.describer),
+            ("table summary", text_model, service.summarizer),
+        ):
+            if wanted and held is not None and held.model != wanted:
+                raise ValueError(
+                    f"the model service of {path.name} already uses {held.model!r} for the "
+                    f"{role} role; {wanted!r} cannot be added (one model per role and cache file)"
+                )
         if (vision_model and service.describer is None) or (
             text_model and service.summarizer is None
         ):
@@ -490,7 +516,7 @@ def shared_service(
                     model=vision_model,
                     ledger=ledger,
                     max_px=max_px,
-                    extra_body=NO_THINKING,
+                    extra_body=extra_body_for(vision_model),
                 )
                 service.image_estimate_cny = estimate_image_cost(ledger, vision_model, 1)
             if text_model and service.summarizer is None:
@@ -498,7 +524,7 @@ def shared_service(
                     chat(text_model, 400),
                     model=text_model,
                     ledger=ledger,
-                    extra_body=NO_THINKING,
+                    extra_body=extra_body_for(text_model),
                 )
                 service.table_estimate_cny = estimate_table_cost(ledger, text_model, [1000])
         return service

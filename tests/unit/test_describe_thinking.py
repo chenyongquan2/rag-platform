@@ -65,3 +65,71 @@ def test_shared_service_gateway_clients_have_the_thinking_mode_off(tmp_path: Pat
         assert service.summarizer.chat.kwargs == expected  # type: ignore[attr-defined]
     finally:
         reset_shared_services()
+
+
+def test_the_thinking_switch_is_sent_to_qwen_models_only() -> None:
+    from rag.ingest.describe import extra_body_for
+
+    assert extra_body_for("qwen/qwen3.6-flash") == {"enable_thinking": False}
+    assert extra_body_for("Qwen3.8-max") == {"enable_thinking": False}
+    for other in ("deepseek-v4-flash", "google/gemini-3.5-flash-lite", "gpt-5.5"):
+        assert extra_body_for(other) is None
+
+
+def test_shared_service_does_not_send_the_switch_to_another_model(tmp_path: Path) -> None:
+    reset_shared_services()
+    settings = ServiceSettings(
+        _env_file=None,  # type: ignore[call-arg]
+        chat_backend="fake",
+        cost_ledger_path=str(tmp_path / "ledger.jsonl"),
+    )
+    try:
+        service = shared_service(
+            settings,
+            vision_model="deepseek-v4-flash",  # a model with a price that is not a Qwen model
+            text_model="deepseek-v4-flash",
+            cache_path=tmp_path / "t.sqlite3",
+        )
+        assert service.describer is not None and service.summarizer is not None
+        assert not hasattr(service.describer.chat, "kwargs")  # not wrapped: no extra_body
+        assert not hasattr(service.summarizer.chat, "kwargs")
+    finally:
+        reset_shared_services()
+
+
+def test_shared_service_refuses_a_second_model_for_the_same_role(tmp_path: Path) -> None:
+    import pytest
+
+    reset_shared_services()
+    settings = ServiceSettings(
+        _env_file=None,  # type: ignore[call-arg]
+        chat_backend="fake",
+        cost_ledger_path=str(tmp_path / "ledger.jsonl"),
+    )
+    cache = tmp_path / "t.sqlite3"
+    try:
+        shared_service(settings, vision_model="qwen/qwen3.6-flash", cache_path=cache)
+        with pytest.raises(ValueError, match="already uses"):
+            shared_service(settings, vision_model="google/gemini-3.5-flash-lite", cache_path=cache)
+        shared_service(settings, text_model="deepseek-v4-flash", cache_path=cache)
+        with pytest.raises(ValueError, match="already uses"):
+            shared_service(settings, text_model="qwen/qwen3.6-flash", cache_path=cache)
+        shared_service(settings, vision_model="qwen/qwen3.6-flash", cache_path=cache)  # same: fine
+    finally:
+        reset_shared_services()
+
+
+def test_a_description_in_another_language_is_not_taken_from_the_cache(tmp_path: Path) -> None:
+    from rag.ingest.describe import ModelTextCache, ModelTextService
+    from rag.testing.pdf import FakeVision
+
+    vision = FakeVision()
+    service = ModelTextService(cache=ModelTextCache(tmp_path / "c.sqlite3"), describer=vision)
+    png = tiny_png()
+    service.describe_image(png, caption="", language="en")
+    service.describe_image(png, caption="", language="en")
+    assert vision.calls == 1
+    service.describe_image(png, caption="", language="zh")
+    assert vision.calls == 2  # another language is another text
+    service.describe_image(png, caption="", language="zh")
+    assert vision.calls == 2

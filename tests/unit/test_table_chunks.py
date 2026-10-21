@@ -423,3 +423,63 @@ def test_token_split_default_output_equals_the_output_before_p6_01() -> None:
         "| name8 | 8.5 |\n| name9 | 9.5 |\n| name10 | 10.5 |\n| name11 | 11.5 |"
         "\n\nAfter.\n\n```\ncode\n```",
     ]
+
+
+def test_table_ids_count_three_tables_in_one_section() -> None:
+    pieces = [table(2, cols=(name, "x")) for name in ("A", "C", "E")]
+    text = f"{pieces[0]}\n\nbetween one\n\n{pieces[1]}\n\nbetween two\n\n{pieces[2]}"
+    nodes = run([document(text)], MarkdownSplit(), table_chunks())
+    ids = [n.metadata["table_id"] for n in nodes if n.metadata["chunk_kind"] == "table"]
+    assert ids == [f"{DOC}#t0", f"{DOC}#t1", f"{DOC}#t2"]
+
+
+MARK = f"{IMAGE_MARKER_PREFIX}, not part of the original document)"
+
+
+def test_a_long_figure_description_keeps_its_marker_and_flag_in_every_part() -> None:
+    sentences = " ".join(f"Sentence number {i} says something about the curve." for i in range(12))
+    text = f"Figure 2: Training.\n\n{MARK}: {sentences}]\n\nThe text goes on after the figure."
+    nodes = run(
+        [document(text)],
+        MarkdownSplit(),
+        TokenSplit(max_tokens=40, tokenizer=words),
+        MarkGeneratedText(embed_keys=[], llm_keys=["title_path", "source_rel"]),
+    )
+    parts = [n for n in nodes if "Sentence number" in n.get_content(MetadataMode.NONE)]
+    assert len(parts) >= 3  # the description was cut
+    for part in parts:
+        assert part.metadata["has_generated_text"] is True
+    for part in parts[1:]:  # each cut-off part opens with the marker sentence
+        body = part.get_content(MetadataMode.NONE)
+        assert body.startswith("[Image description (written by a model")
+    # every part is a balanced bracket: opened with the marker, closed at its end or by the next
+    first = parts[0].get_content(MetadataMode.NONE)
+    assert MARK in first and "continued" not in first
+    assert all("continued" in p.get_content(MetadataMode.NONE)[:80] for p in parts[1:])
+    # the flag sits exactly on the chunks that hold description text
+    assert [n.metadata["has_generated_text"] for n in nodes] == [
+        "Sentence number" in n.get_content(MetadataMode.NONE) for n in nodes
+    ]
+
+
+def test_a_short_description_is_marked_once_and_not_changed() -> None:
+    text = f"Figure 1: Curve.\n\n{MARK}: A rising curve.]\n\nMore text."
+    nodes = run(
+        [document(text)],
+        MarkdownSplit(),
+        TokenSplit(max_tokens=60, tokenizer=words),
+        MarkGeneratedText(embed_keys=[], llm_keys=[]),
+    )
+    (node,) = nodes
+    assert node.get_content(MetadataMode.NONE) == text and node.metadata["has_generated_text"]
+
+
+def test_rule_summary_edge_cases() -> None:
+    escaped = "| Name | A \\| B |\n|---|---|\n| x \\| y | 1 |"
+    text = rule_summary("", escaped)
+    assert "Columns: Name, A | B." in text and "x | y" in text
+    assert "Columns: ." not in rule_summary("", "|  |  |\n|---|---|\n| a | b |")
+    # the pieces of a row that was cut inside are no rows: only whole rows give first-column values
+    pieces = "| Name | Value |\n|---|---|\n| whole | 1 |\n| cut row starts | and\nends here, no bar"
+    summary = rule_summary("", pieces)
+    assert "whole" in summary and "ends here" not in summary
