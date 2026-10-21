@@ -176,8 +176,12 @@ class RedisCacheBackend:
         key_prefix: str = "rag:l1:",
         generation_key_prefix: str | None = None,
         generation: Callable[[str], int] | None = None,
+        generation_client: Redis | None = None,
     ) -> None:
         self.client = client
+        # The counter lives in the Redis ingestion writes to (`redis_url`), which may not be the
+        # one the entries live in (`cache_url`).
+        self.generation_client = generation_client if generation_client is not None else client
         self.key_prefix = key_prefix
         if generation is None:
             from rag.index.generation import DEFAULT_KEY_PREFIX, get_data_generation
@@ -187,7 +191,7 @@ class RedisCacheBackend:
             )
 
             def generation(kb: str) -> int:
-                return get_data_generation(client, kb, key_prefix=gen_prefix)
+                return get_data_generation(self.generation_client, kb, key_prefix=gen_prefix)
 
         self._generation = generation
 

@@ -363,3 +363,20 @@ def test_hits_and_misses_are_counted_per_tool() -> None:
         points = metric_points(obs, attr.METRIC_CACHE)
     got = {(p[0]["rag.tool"], p[0]["rag.cache.outcome"]): p[1].value for p in points}
     assert got == {("ask_docs", "miss"): 1, ("ask_docs", "hit"): 1}
+
+
+def test_ask_answers_can_be_left_out_of_the_cache_by_setting() -> None:
+    cache = _layer(cache_ask_answers=False)
+    service, backend, _ = _service(cache, cache_ask_answers=False)
+    first, second = _ask(service), _ask(service)
+    assert first.cache is None and second.cache is None and len(backend.calls) == 2
+    assert cache.exact.backend.live_keys() == []  # type: ignore[attr-defined]
+
+
+def test_the_structured_output_method_is_part_of_the_answer_version() -> None:
+    from rag.cache.keys import answer_config_version
+
+    cfg = _cfg()
+    a = answer_config_version(cfg, agent_settings())
+    b = answer_config_version(cfg, agent_settings(chat_structured_output_method="json_mode"))
+    assert a != b

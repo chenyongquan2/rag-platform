@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001 (Chinese punctuation is test data)
 """Spec P5-01 AC10 and AC8: the cache pair generator and the committed test set."""
 
 from __future__ import annotations
@@ -131,7 +132,7 @@ def test_build_is_deterministic_and_pair_ids_are_unique() -> None:
 
 def test_a_question_gets_at_most_three_text_counter_examples() -> None:
     pairs = cp.build_pairs(SMALL)
-    per_question = Counter(p.source_qid for p in cp.text_pairs(pairs))
+    per_question = Counter(p.source_qid for p in cp.text_pairs(pairs) if p.slice == "v1")
     assert per_question and max(per_question.values()) <= cp.PER_QUESTION
 
 
@@ -243,3 +244,60 @@ def test_the_file_reads_back_with_chinese_text_intact(
     out = tmp_path / "pairs.jsonl"
     cp.write_pairs(committed, out)
     assert out.read_bytes() == DATASET.read_bytes()
+
+
+# ---- the second slice (review round 1): classes the first guard could not see ----------------
+
+
+def test_word_order_swap_exchanges_the_first_two_identifiers() -> None:
+    assert cp.word_order_swap("What is the difference between BERT and GPT-2?", "s") == (
+        "What is the difference between GPT-2 and BERT?"
+    )
+    assert cp.word_order_swap("How do I convert AutoModel into evaluate_loop?", "s") == (
+        "How do I convert evaluate_loop into AutoModel?"
+    )
+    assert cp.word_order_swap("What does push_to_hub do?", "s") is None  # one identifier only
+
+
+def test_word_order_swap_exchanges_the_two_sides_of_an_or_between_plain_words() -> None:
+    assert cp.word_order_swap("Is it safer to use safetensors or pickle?", "s") == (
+        "Is it safer to use pickle or safetensors?"
+    )
+
+
+def test_wh_swap_changes_the_question_word() -> None:
+    assert cp.wh_swap("What is the purpose of X?", "s") != "What is the purpose of X?"
+    out = cp.wh_swap("How do I push a model?", "s")
+    assert out is not None and not out.startswith("How ") and out.endswith("do I push a model?")
+    assert cp.wh_swap("Show me the docs", "s") is None
+
+
+def test_modal_swap_changes_the_first_modal() -> None:
+    assert cp.modal_swap("Which options can I use?", "s") == "Which options should I use?"
+    assert cp.modal_swap("Which options should I use?", "s") == "Which options must I use?"
+    assert cp.modal_swap("Which options exist?", "s") is None
+
+
+def test_zh_antonym_swap_changes_one_chinese_word() -> None:
+    assert cp.zh_antonym_swap("如何启用混合精度训练？", "s") == "如何禁用混合精度训练？"
+    assert cp.zh_antonym_swap("怎么把模型上传到 Hub？", "s") == "怎么把模型下载到 Hub？"
+    assert cp.zh_antonym_swap("这是什么？", "s") is None
+
+
+def test_the_second_slice_is_separate_and_the_first_is_what_it_was(
+    committed: list[cp.Pair],
+) -> None:
+    v1 = [p for p in committed if p.slice == "v1"]
+    v2 = [p for p in committed if p.slice == "v2"]
+    assert len(v1) == 574 and sum(p.kind == "counter" for p in v1) == 474  # as before
+    assert {p.category for p in v2} == set(cp.V2_CATEGORIES)
+    for category in cp.V2_CATEGORIES:
+        for split in ("dev", "holdout"):
+            n = sum(1 for p in v2 if p.category == category and p.split == split)
+            assert n >= 4, (category, split, n)
+    assert all(p.kind == "counter" and not p.b_ctx for p in v2)
+    assert {"word_order_swap", "wh_swap", "modal_swap", "zh_antonym_swap"} == cp.V2_CATEGORIES
+
+
+def test_the_exact_cache_keeps_the_second_slice_apart_too(committed: list[cp.Pair]) -> None:
+    assert [p for p in committed if p.slice == "v2" and cp.l1_shares(p)] == []

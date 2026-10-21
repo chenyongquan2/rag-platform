@@ -176,9 +176,10 @@ def answer_config_version(cfg: KnowledgeBaseConfig, settings: ServiceSettings) -
         if name.startswith("agent_") and name not in _AGENT_SETTINGS_NOT_IN_VERSION
     }
     payload = {
-        "kb_config": cfg.model_dump(mode="json", exclude={"description"}),
+        "kb_config": cfg.model_dump(mode="json", exclude={"description", "cache"}),
         "chat_model": settings.chat_model,
         "chat_backend": settings.chat_backend,
+        "structured_output": settings.chat_structured_output_method,
         "chat_profiles": {
             name: getattr(settings, f"chat_{name}").model_dump(mode="json")
             for name in ("online", "cheap", "offline")

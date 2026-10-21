@@ -223,6 +223,8 @@ def measure_replay(settings: ServiceSettings, out: Path, *, n: int = 400) -> dic
     try:
         requests = build_workload(question_pool(), n, zipf_s=1.0, variant_share=0.15, seed=7)
         records = replay_search(service, CREDS, requests, kb=KB, deadline_ms=30_000)
+        if service.cache is not None:
+            service.cache.flush_shadow(60.0)  # the shadow lookups run beside the requests
     finally:
         service.close()
         shutdown_observability()

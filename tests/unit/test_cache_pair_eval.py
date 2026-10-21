@@ -212,3 +212,58 @@ def test_estimate_only_makes_no_request(capsys: pytest.CaptureFixture[str]) -> N
         == 0
     )
     assert "embedding estimate" in capsys.readouterr().out
+
+
+def test_the_final_file_is_not_overwritten_without_force(tmp_path: Path) -> None:
+    from rag.cache.cli import main
+    from rag.testing import observe_settings
+
+    out = tmp_path / "out"
+    args = ["pairs", "evaluate", "--final", "--out", str(out)]
+    assert main(args, settings=observe_settings(), embedder=_hash_vectors) == 0
+    final = out / "pairs_eval_final.json"
+    first = final.read_text("utf-8")
+    final.write_text(first.replace('"threshold"', '"threshold_kept"', 1), encoding="utf-8")
+    assert main(args, settings=observe_settings(), embedder=_hash_vectors) == 4
+    assert "threshold_kept" in final.read_text("utf-8")  # untouched
+    assert main([*args, "--force"], settings=observe_settings(), embedder=_hash_vectors) == 0
+    assert "threshold_kept" not in final.read_text("utf-8")
+
+
+def test_a_slice_is_evaluated_on_its_own_at_a_given_threshold(tmp_path: Path) -> None:
+    from rag.cache.cli import main
+    from rag.cache.pairs import read_pairs
+    from rag.config import repo_path
+    from rag.testing import observe_settings
+
+    out = tmp_path / "out"
+    code = main(
+        [
+            "pairs",
+            "evaluate",
+            "--slice",
+            "v2",
+            "--tag",
+            "before",
+            "--threshold",
+            "0.06",
+            "--final",
+            "--out",
+            str(out),
+        ],
+        settings=observe_settings(),
+        embedder=_hash_vectors,
+    )
+    assert code == 0
+    result = json.loads((out / "pairs_eval_v2_before_final.json").read_text("utf-8"))
+    assert result["threshold"] == 0.06  # given, not chosen
+    pairs = read_pairs(repo_path("evals/datasets/hf_docs/cache_pairs.jsonl"))
+    v2 = [p for p in pairs if p.slice == "v2" and p.split == "dev"]
+    assert result["dev"]["pairs"] == len(v2)
+    assert set(result["dev"]["by_category"]) <= {
+        "word_order_swap",
+        "wh_swap",
+        "modal_swap",
+        "zh_antonym_swap",
+    }
+    assert result["summary"]["counter"] == sum(p.slice == "v2" for p in pairs)

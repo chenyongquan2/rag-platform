@@ -14,12 +14,16 @@ it only records, it never changes `run.result`.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 from opentelemetry.trace import Span
 
 from rag.cache.exact import CacheRun, Codec, ExactCache
+from rag.cache.info import CacheInfo
 from rag.cache.keys import CacheKeyFields, answer_config_version, make_fields
 from rag.cache.rules import (
     Entry,
@@ -31,6 +35,7 @@ from rag.cache.rules import (
     search_from_payload,
     search_payload,
 )
+from rag.cache.store import CircuitBreaker
 from rag.config import KnowledgeBaseConfig, ServiceSettings
 from rag.observe import attributes as attr
 from rag.observe import get_observability
@@ -38,7 +43,6 @@ from rag.types import AskResult, RetrievalResult
 
 if TYPE_CHECKING:
     from rag.cache.semantic import ShadowRecorder
-    from rag.serve.schema import CacheInfo
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +60,88 @@ ASK_CODEC: Codec[AskResult] = Codec(
 )
 
 
+SHADOW_MAX_PENDING = 16
+"""Shadow lookups that may wait for the one worker; the next one is dropped (and counted)."""
+SHADOW_BREAKER_FAILURES = 5
+SHADOW_BREAKER_OPEN_S = 30.0
+SHADOW_LOG_EVERY_S = 60.0
+
+
+class _ShadowRunner:
+    """One worker thread for the shadow lookups, with a bounded queue and a breaker: a slow or
+    broken semantic store costs the requests nothing, and fills neither memory nor the log."""
+
+    def __init__(self, max_pending: int) -> None:
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cache-shadow")
+        self._pending = 0
+        self._lock = threading.Lock()
+        self._idle = threading.Condition(self._lock)
+        self._max_pending = max_pending
+        self._breaker = CircuitBreaker(
+            failures=SHADOW_BREAKER_FAILURES, open_s=SHADOW_BREAKER_OPEN_S
+        )
+        self._last_logged = float("-inf")
+
+    def submit(self, work: Callable[[], None], kb: str) -> bool:
+        metrics = get_observability().metrics
+        if not self._breaker.allow():
+            metrics.record_cache_shadow(kb=kb, tool="search_docs", verdict="skipped")
+            return False
+        with self._lock:
+            if self._pending >= self._max_pending:
+                full = True
+            else:
+                full = False
+                self._pending += 1
+        if full:
+            metrics.record_cache_shadow(kb=kb, tool="search_docs", verdict="dropped")
+            return False
+        try:
+            self._executor.submit(self._run, work, kb)
+        except RuntimeError:  # closed
+            self._done()
+            return False
+        return True
+
+    def _run(self, work: Callable[[], None], kb: str) -> None:
+        try:
+            work()
+            self._breaker.success()
+        except Exception as exc:
+            self._breaker.failure()
+            get_observability().metrics.record_cache_shadow(
+                kb=kb, tool="search_docs", verdict="failed"
+            )
+            now = time.monotonic()
+            if now - self._last_logged >= SHADOW_LOG_EVERY_S:
+                self._last_logged = now
+                logger.warning(
+                    "shadow semantic cache failed: %s (more failures are counted, not logged)",
+                    type(exc).__name__,
+                )
+            logger.debug("shadow semantic cache failure", exc_info=True)
+        finally:
+            self._done()
+
+    def _done(self) -> None:
+        with self._idle:
+            self._pending -= 1
+            self._idle.notify_all()
+
+    def wait(self, timeout_s: float) -> bool:
+        deadline = time.monotonic() + timeout_s
+        with self._idle:
+            while self._pending > 0:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                self._idle.wait(left)
+        return True
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
 class ResultCache:
     """L1 for `search_docs` and `ask_docs`, plus the shadow recorder of L2 when there is one."""
 
@@ -65,20 +151,24 @@ class ResultCache:
         settings: ServiceSettings,
         *,
         shadow: ShadowRecorder | None = None,
+        shadow_max_pending: int = SHADOW_MAX_PENDING,
     ) -> None:
         self.exact = exact
         self.settings = settings
         self.shadow = shadow
-        self._answer_versions: dict[str, tuple[int, str]] = {}
+        self._runner = _ShadowRunner(shadow_max_pending) if shadow is not None else None
+        # kb -> (the config object the version was made from, version). The object is kept so
+        # its identity cannot be reused by another config after garbage collection.
+        self._answer_versions: dict[str, tuple[KnowledgeBaseConfig, str]] = {}
 
     # ---- keys --------------------------------------------------------------------------------
 
     def answer_version(self, cfg: KnowledgeBaseConfig) -> str:
         known = self._answer_versions.get(cfg.kb)
-        if known is not None and known[0] == id(cfg):
+        if known is not None and known[0] is cfg:
             return known[1]
         version = answer_config_version(cfg, self.settings)
-        self._answer_versions[cfg.kb] = (id(cfg), version)
+        self._answer_versions[cfg.kb] = (cfg, version)
         return version
 
     def _fields(
@@ -176,23 +266,33 @@ class ResultCache:
         run: CacheRun[RetrievalResult],
         vector_of: Callable[[str], list[float] | None] | None,
     ) -> None:
-        """L2 in shadow mode: record what it would have done; never raises, never changes the
-        result."""
-        assert self.shadow is not None
-        try:
-            self.shadow.observe(
-                kb=cfg.kb,
+        """L2 in shadow mode: hand the work to the background runner and go on. It records what
+        the semantic cache would have done; it never changes the result and the request never
+        waits for it."""
+        assert self.shadow is not None and self._runner is not None
+        recorder = self.shadow
+        fresh = run.result
+        generation = run.generation if run.generation is not None else 0
+        kb = cfg.kb
+
+        def work() -> None:
+            recorder.observe(
+                kb=kb,
                 question=question,
                 filters=filters,
                 acl_groups=acl_groups,
                 top_k=top_k,
                 config_version=config_version,
-                data_generation=run.generation if run.generation is not None else 0,
-                fresh=run.result,
+                data_generation=generation,
+                fresh=fresh,
                 vector=vector_of(question) if vector_of is not None else None,
             )
-        except Exception:
-            logger.warning("shadow semantic cache failed", exc_info=True)
+
+        self._runner.submit(work, kb)
+
+    def flush_shadow(self, timeout_s: float = 10.0) -> bool:
+        """Wait until the queued shadow work has run (tests, shutdown); False on time-out."""
+        return self._runner.wait(timeout_s) if self._runner is not None else True
 
     async def ask(
         self,
@@ -235,6 +335,7 @@ class ResultCache:
                     "thread_id": "",
                     "question": question,
                     "tokens_used": 0,
+                    "resume_token": None,
                 }
             )
 
@@ -258,8 +359,6 @@ class ResultCache:
 
     @staticmethod
     def info(run: CacheRun[Any]) -> CacheInfo:
-        from rag.serve.schema import CacheInfo
-
         hit = run.outcome in ("hit", "shared")
         return CacheInfo(
             layer=LAYER,
@@ -317,9 +416,13 @@ class ResultCache:
         return self.exact.drop_prefix(f"{self.settings.search_index_prefix}{kb}:")
 
     def close(self) -> None:
-        client = getattr(self.exact.backend, "client", None)
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                logger.warning("closing the cache client failed", exc_info=True)
+        if self._runner is not None:
+            self._runner.close()
+        backend = self.exact.backend
+        for name in ("client", "generation_client"):
+            client = getattr(backend, name, None)
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    logger.warning("closing the cache client failed", exc_info=True)

@@ -125,3 +125,26 @@ def test_a_second_writer_does_not_fail_when_the_index_already_exists(
     store.add(part, _vec(0.0), _entry("a", 1000.0), ttl_s=FOREVER)
     other.add(part, _vec(0.1), _entry("b", 1000.0), ttl_s=FOREVER)  # makes no new index
     assert len(store.search(part, _vec(0.0), k=5, now=1001.0)) == 2
+
+
+def test_expired_entries_are_deleted_from_the_index(
+    es: Elasticsearch, index_prefix: str, part: Partition
+) -> None:
+    import time
+
+    purging = EsSemanticStore(
+        es, dim=DIM, index_prefix=index_prefix, refresh=True, request_timeout_s=10.0, purge_every=3
+    )
+    try:
+        purging.add(part, _vec(0.0), _entry("old one", 1000.0), ttl_s=10)
+        purging.add(part, _vec(0.1), _entry("old two", 1000.0), ttl_s=10)
+        purging.add(part, _vec(0.2), _entry("fresh", 5000.0), ttl_s=FOREVER)  # the 3rd write
+        name = purging.index_name(part.kb)
+        for _ in range(50):  # the delete is started, not waited for
+            es.indices.refresh(index=name)
+            if es.count(index=name)["count"] == 1:
+                break
+            time.sleep(0.2)
+        assert es.count(index=name)["count"] == 1
+    finally:
+        purging.drop(part.kb)

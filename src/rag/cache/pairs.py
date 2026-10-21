@@ -156,6 +156,69 @@ class Pair:
     """Differences of the second request's context from `DEFAULT_CTX` (the first has none)."""
     expect_share: bool = False
     """The two requests should share an L1 entry."""
+    slice: str = "v1"
+    """`v1`: the first set of classes (the threshold was chosen on its dev part and its holdout
+    part was evaluated once); `v2`: the classes added in review round 1 (word order, question
+    word, modal, Chinese opposites), reported on their own."""
+
+
+V2_CATEGORIES = frozenset({"word_order_swap", "wh_swap", "modal_swap", "zh_antonym_swap"})
+"""Classes added in review round 1; the question sets and the v1 pairs are untouched by them."""
+
+WH_SWAPS = {
+    "what": "how",
+    "how": "why",
+    "which": "what",
+    "where": "when",
+    "when": "where",
+    "why": "how",
+    "who": "what",
+}
+MODAL_SWAPS = {
+    "can": "should",
+    "should": "must",
+    "could": "would",
+    "would": "could",
+    "will": "can",
+    "must": "can",
+    "may": "must",
+}
+_MODAL = re.compile(r"\b(can|should|could|would|will|must|may)\b")
+_OR_PAIR = re.compile(r"\b([A-Za-z][\w\-]{3,}) or ([A-Za-z][\w\-]{3,})\b")
+ZH_ANTONYMS = [
+    ("启用", "禁用"),
+    ("上传", "下载"),
+    ("创建", "删除"),
+    ("添加", "移除"),
+    ("开始", "停止"),
+    ("输入", "输出"),
+    ("增加", "减少"),
+    ("加载", "保存"),
+    ("公开", "私有"),
+    ("最大", "最小"),
+    ("安装", "卸载"),
+    ("本地", "远程"),
+    ("打开", "关闭"),
+]
+ZH_EXTRA: dict[str, str] = {
+    "zh_extra:01": "如何启用混合精度训练？",
+    "zh_extra:02": "怎么把模型上传到 Hub？",
+    "zh_extra:03": "如何下载数据集的某个分片？",
+    "zh_extra:04": "怎么创建一个私有仓库？",
+    "zh_extra:05": "如何在 Space 里添加环境变量？",
+    "zh_extra:06": "如何开始一次推理端点的部署？",
+    "zh_extra:07": "怎么设置输入的最大长度？",
+    "zh_extra:08": "如何增加训练的批大小？",
+    "zh_extra:09": "怎么加载本地的分词器？",
+    "zh_extra:10": "如何启用梯度检查点？",
+    "zh_extra:11": "公开模型和私有模型的访问权限有什么区别？",
+    "zh_extra:12": "如何禁用日志上传？",
+    "zh_extra:13": "怎么删除一个数据集仓库？",
+    "zh_extra:14": "如何减少显存占用？",
+    "zh_extra:15": "怎么停止一个正在运行的训练任务？",
+    "zh_extra:16": "如何保存微调后的模型？",
+}
+"""Hand-written Chinese questions (dev: 01 to 11, holdout: 12 to 16) for the Chinese opposites."""
 
 
 def _h(*parts: str) -> int:
@@ -344,6 +407,66 @@ def aspect_change(question: str, seed: str) -> str | None:
     return None
 
 
+def word_order_swap(question: str, seed: str) -> str | None:
+    """The first two identifiers exchange places (`BERT and GPT-2` to `GPT-2 and BERT`), or the
+    two plain words around an `or` do (`safetensors or pickle`)."""
+    found = [t for t in identifiers(question) if _kind_of(t) not in {"version", "path"}]
+    for i, first in enumerate(found):
+        for second in found[i + 1 :]:
+            a, b = question.find(first), question.find(second)
+            if a < 0 or b < 0 or first == second:
+                continue
+            if a > b:
+                first, second = second, first
+            marker = "\x00"
+            out = (
+                question.replace(first, marker, 1)
+                .replace(second, first, 1)
+                .replace(marker, second, 1)
+            )
+            if out != question:
+                return out
+    match = _OR_PAIR.search(question)
+    if match and match.group(1).lower() != match.group(2).lower():
+        return (
+            question[: match.start()]
+            + f"{match.group(2)} or {match.group(1)}"
+            + question[match.end() :]
+        )
+    return None
+
+
+def wh_swap(question: str, seed: str) -> str | None:
+    """The question word at the start becomes another one (`what` to `how`, `how` to `why`)."""
+    first = question.split(" ", 1)[0]
+    new = WH_SWAPS.get(first.lower())
+    if new is None:
+        return None
+    return (new.capitalize() if first[0].isupper() else new) + question[len(first) :]
+
+
+def modal_swap(question: str, seed: str) -> str | None:
+    """The first modal verb becomes another one (`can` to `should`)."""
+    match = _MODAL.search(question)
+    if match is None:
+        return None
+    return question[: match.start()] + MODAL_SWAPS[match.group(1)] + question[match.end() :]
+
+
+def zh_antonym_swap(question: str, seed: str) -> str | None:
+    """The first Chinese word of the list becomes its opposite (`启用` and `禁用`)."""
+    best: tuple[int, str, str] | None = None
+    for left, right in ZH_ANTONYMS:
+        for old, new in ((left, right), (right, left)):
+            at = question.find(old)
+            if at >= 0 and (best is None or at < best[0]):
+                best = (at, old, new)
+    if best is None:
+        return None
+    at, old, new = best
+    return question[:at] + new + question[at + len(old) :]
+
+
 TEXT_MUTATIONS: dict[str, Callable[[str, str], str | None]] = {
     "identifier_case": identifier_case,
     "version_bump": version_bump,
@@ -404,7 +527,48 @@ def build_pairs(sources: Mapping[str, Sequence[tuple[str, str]]]) -> list[Pair]:
         pairs.extend(_counter_context(split, questions))
         pairs.extend(_counter_language(split, questions))
         pairs.extend(_positives(split, questions))
+    for split in sorted(sources):
+        pairs.extend(_counter_v2(split, list(sources[split])))
     return pairs
+
+
+WH_SHARE = 3
+"""One question in this many gets a question-word swap (it applies to nearly every question)."""
+
+
+def _counter_v2(split: str, questions: Sequence[tuple[str, str]]) -> list[Pair]:
+    """The second slice: made after the first, and not counted in its per-question limit, so the
+    first slice is what it was."""
+    out: list[Pair] = []
+
+    def add(qid: str, category: str, a: str, b: str | None) -> None:
+        if b is not None and b != a:
+            out.append(
+                Pair(
+                    f"{split}:{qid.split(':')[-1]}:{category}",
+                    split,
+                    "counter",
+                    category,
+                    qid,
+                    a,
+                    b,
+                    slice="v2",
+                )
+            )
+
+    for qid, question in questions:
+        add(qid, "word_order_swap", question, word_order_swap(question, qid))
+        if _h(qid, "wh") % WH_SHARE == 0:
+            add(qid, "wh_swap", question, wh_swap(question, qid))
+        add(qid, "modal_swap", question, modal_swap(question, qid))
+        if qid in ZH_TRANSLATIONS:
+            zh = ZH_TRANSLATIONS[qid]
+            add(qid, "zh_antonym_swap", zh, zh_antonym_swap(zh, qid))
+    extra_ids = sorted(ZH_EXTRA)
+    mine = extra_ids[:11] if split == "dev" else extra_ids[11:]
+    for qid in mine:
+        add(qid, "zh_antonym_swap", ZH_EXTRA[qid], zh_antonym_swap(ZH_EXTRA[qid], qid))
+    return out
 
 
 def _counter_text(

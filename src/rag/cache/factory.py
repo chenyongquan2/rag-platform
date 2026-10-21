@@ -32,14 +32,21 @@ def cache_config(settings: ServiceSettings) -> CacheConfig:
 
 
 def make_cache_backend(settings: ServiceSettings) -> RedisCacheBackend:
-    client = make_redis_client(
-        settings.cache_url or settings.redis_url, socket_timeout=settings.cache_timeout_ms / 1000.0
+    timeout = settings.cache_timeout_ms / 1000.0
+    url = settings.cache_url or settings.redis_url
+    client = make_redis_client(url, socket_timeout=timeout)
+    # The data generation counter is written by ingestion to `redis_url`: read it there.
+    generation_client = (
+        client
+        if url == settings.redis_url
+        else make_redis_client(settings.redis_url, socket_timeout=timeout)
     )
     return RedisCacheBackend(
         client,
         key_prefix=settings.cache_key_prefix,
         # The counter ingestion bumps lives under the same prefix the search chains read it with.
         generation_key_prefix=f"{DEFAULT_KEY_PREFIX}{settings.search_index_prefix}",
+        generation_client=generation_client,
     )
 
 

@@ -112,9 +112,8 @@ def test_the_lexical_guard_rejects_a_change_of_one_or_two_words(new: str, cached
 @pytest.mark.parametrize(
     ("new", "cached"),
     [
-        ("how do I push a model to the hub", "push a model to the hub, how?"),  # same words
         ("how do I upload a trained model", "what do I call to send my trained model online"),
-        ("怎么上传模型", "如何把模型上传"),  # no word measure for Chinese
+        ("怎么上传模型", "如何把模型上传到远程仓库中去"),  # many other characters
         ("how do I push a model", "how do I push a model"),
     ],
 )
@@ -124,6 +123,46 @@ def test_the_lexical_guard_lets_other_wordings_and_the_same_words_through(
     assert lexical_guard(new, cached).ok
 
 
-def test_content_words_skip_stop_words_and_chinese() -> None:
-    assert content_words("How do I push a model?") == frozenset({"push", "model"})
-    assert content_words("怎么上传模型") is None
+def test_content_words_skip_stop_words_but_keep_question_words_and_modals() -> None:
+    assert content_words("Can I push a model?") == frozenset({"can", "push", "model"})
+    assert content_words("How do I push a model?") == frozenset({"how", "push", "model"})
+
+
+def test_a_chinese_question_is_measured_by_its_characters_and_latin_words() -> None:
+    assert content_words("怎么上传 Hub 模型?") == frozenset(
+        {"如", "何", "上", "传", "hub", "模", "型"}  # 怎么 and 如何 are one word
+    )
+
+
+@pytest.mark.parametrize(
+    ("new", "cached", "reason"),
+    [
+        # the identifiers are the same but in the other order
+        ("difference between BERT and GPT-2", "difference between GPT-2 and BERT", "order"),
+        ("convert evaluate_loop into AutoModel", "convert AutoModel into evaluate_loop", "order"),
+        # the same plain words in the other order
+        (
+            "is it safer to use safetensors or pickle",
+            "is it safer to use pickle or safetensors",
+            "order",
+        ),
+        # another question word or another modal is one word of difference
+        ("why is the loss nan", "how is the loss nan", "lexical"),
+        ("when can I use fp16 training", "where can I use fp16 training", "lexical"),
+        ("which options can I set", "which options should I set", "lexical"),
+        ("how do I use this", "what do I use this", "lexical"),
+        # a Chinese word and its opposite
+        ("如何启用混合精度训练", "如何禁用混合精度训练", "lexical"),
+        ("怎么把模型上传到 Hub", "怎么把模型下载到 Hub", "lexical"),
+        ("先加载模型再训练", "先训练再加载模型", "order"),
+    ],
+)
+def test_review_round_one_blind_spots_are_rejected(new: str, cached: str, reason: str) -> None:
+    verdict = question_guard(new, cached)
+    assert not verdict.ok and verdict.reason == reason, verdict
+
+
+def test_the_identifier_order_is_part_of_the_entity_guard() -> None:
+    verdict = entity_guard("BERT versus GPT-2 speed", "GPT-2 versus BERT speed")
+    assert not verdict.ok and verdict.reason == "order"
+    assert entity_guard("BERT and GPT-2", "bert and gpt-2").ok  # case is still no difference

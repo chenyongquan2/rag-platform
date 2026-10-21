@@ -518,7 +518,7 @@ class SearchService:
                 return fresh
 
             run = None
-            if self._cache is None:
+            if self._cache is None or not cfg.cache:
                 result = compute()
             else:
                 run = self._cache.search(
@@ -672,7 +672,12 @@ class SearchService:
                 )
 
             run = None
-            if self._cache is None or resume_token is not None:
+            if (
+                self._cache is None
+                or not cfg.cache
+                or not self.settings.cache_ask_answers
+                or resume_token is not None
+            ):
                 # A call that continues a question asked back is never cached (its result
                 # depends on the caller's reply).
                 result = await run_graph()

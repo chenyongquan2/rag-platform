@@ -277,6 +277,10 @@ class KnowledgeBaseConfig(_Strict):
     access: AccessConfig = Field(default_factory=AccessConfig)
     answer: AnswerConfig = Field(default_factory=AnswerConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    cache: bool = True
+    """Results of this knowledge base may be kept in the result cache (spec P5-01). Off for a
+    knowledge base whose answers must not be stored in Redis (private pages): no lookup, no
+    write, no `cache` field in the response. Not part of any config version."""
 
     @model_validator(mode="after")
     def _skip_score_is_not_below_the_threshold(self) -> Self:

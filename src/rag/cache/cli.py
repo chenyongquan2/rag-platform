@@ -94,6 +94,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also evaluate the holdout part, once, at the threshold chosen on the dev part",
     )
+    ev.add_argument(
+        "--force", action="store_true", help="with --final: overwrite a final file that exists"
+    )
+    ev.add_argument("--slice", default="v1", choices=["v1", "v2"], help="which pair classes")
+    ev.add_argument("--tag", default="", help="added to the name of the result file")
+    ev.add_argument(
+        "--threshold",
+        type=float,
+        help="use this distance threshold instead of choosing one on the dev part",
+    )
     return parser
 
 
@@ -144,7 +154,17 @@ def _pairs_evaluate(
     from rag.cache.pairs import evaluate_l1, read_pairs
     from rag.cost.ledger import BudgetExceeded, check_budget
 
-    pairs = read_pairs(repo_path(args.pairs))
+    pairs = [p for p in read_pairs(repo_path(args.pairs)) if p.slice == args.slice]
+    stem = "pairs_eval" + ("" if args.slice == "v1" else f"_{args.slice}")
+    stem += f"_{args.tag}" if args.tag else ""
+    out = repo_path(args.out)
+    final_path = out / f"{stem}_final.json"
+    if args.final and final_path.exists() and not args.force:
+        print(
+            f"{final_path} exists: the holdout part is evaluated once; --force overwrites it",
+            file=sys.stderr,
+        )
+        return 4
     dev = [p for p in pairs if p.split == "dev"]
     holdout = [p for p in pairs if p.split == "holdout"]
     paraphrases = paraphrase_pairs(repo_path("evals/datasets/hf_docs"))
@@ -167,7 +187,7 @@ def _pairs_evaluate(
         vectors, counts = embedder(texts), {"fake": len(texts)}
     print(f"vectors from: {counts}")
     rows = sweep(dev, vectors, paraphrases, THRESHOLDS)
-    threshold = choose_threshold(rows)
+    threshold = args.threshold if args.threshold is not None else choose_threshold(rows)
     result: dict[str, object] = {
         "summary": summary(pairs),
         "l1": evaluate_l1(pairs),
@@ -176,14 +196,16 @@ def _pairs_evaluate(
         "threshold": threshold,
         "dev": evaluate_split(dev, vectors, threshold),
     }
-    name = "pairs_eval.json"
+    target = out / f"{stem}.json"
     if args.final:
         result["holdout"] = evaluate_split(holdout, vectors, threshold)
-        name = "pairs_eval_final.json"
-    out = repo_path(args.out)
+        target = final_path
+        if args.force and target.exists():
+            print(f"overwriting {target} (--force)", file=sys.stderr)
     out.mkdir(parents=True, exist_ok=True)
-    (out / name).write_text(json.dumps(result, indent=2, default=list), encoding="utf-8")
-    print(f"threshold chosen on dev: {threshold}; wrote {out / name}")
+    target.write_text(json.dumps(result, indent=2, default=list), encoding="utf-8")
+    how = "given" if args.threshold is not None else "chosen on dev"
+    print(f"threshold {how}: {threshold}; wrote {target}")
     return 0
 
 

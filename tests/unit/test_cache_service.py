@@ -292,3 +292,32 @@ def test_concurrent_identical_searches_compute_once() -> None:
     assert sorted(r.request_id for r in responses) == sorted(f"c{i}" for i in range(12))
     assert all(r.chunks for r in responses)
     assert sorted(r.cache.outcome for r in responses).count("miss") == 1
+
+
+def test_a_knowledge_base_can_opt_out_of_the_cache() -> None:
+    cache, backend = _layer()
+    private = KnowledgeBaseConfig(
+        kb="hf_docs", language="en", access=AccessConfig(callers=["*"]), cache=False
+    )
+    pipeline = FakeSearchPipeline("hf_docs")
+    service = SearchService(
+        observe_settings(),
+        configs={"hf_docs": private},
+        builder=FakePipelineBuilder({"hf_docs": pipeline}),
+        cache=cache,
+    )
+    service.load()
+    one, two = _search(service), _search(service)
+    assert len(pipeline.calls) == 2 and one.cache is None and two.cache is None
+    assert backend.live_keys() == [] and backend.calls == {}
+
+
+def test_the_opt_out_does_not_change_any_config_version() -> None:
+    from rag.cache.keys import answer_config_version
+    from rag.retrieve.pipeline import search_config_version
+
+    settings = observe_settings()
+    on = KnowledgeBaseConfig(kb="hf_docs")
+    off = KnowledgeBaseConfig(kb="hf_docs", cache=False)
+    assert search_config_version(on, settings, "m") == search_config_version(off, settings, "m")
+    assert answer_config_version(on, settings) == answer_config_version(off, settings)

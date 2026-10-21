@@ -17,6 +17,7 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from rag.cache.info import CacheInfo
 from rag.retrieve.filters import CALLER_FILTER_KEYS
 from rag.serve.errors import error_message
 from rag.types import (
@@ -31,24 +32,6 @@ from rag.types import (
 
 def _untrusted(chunks: list[Chunk]) -> list[Chunk]:
     return [c if c.untrusted else c.model_copy(update={"untrusted": True}) for c in chunks]
-
-
-class CacheInfo(BaseModel):
-    """How the result cache served this request (s12, spec P5-01); the response field `cache`
-    is null when the service runs without a cache layer."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    layer: str = Field(description="The cache layer that was asked: l1 (exact).")
-    hit: bool = Field(description="The result came from the cache or from an identical request.")
-    outcome: str = Field(
-        description="hit; shared (waited for an identical request that was running); miss "
-        "(computed, written when complete); bypass (cache not used: breaker open, or a call "
-        "that must not read it); error (the cache store failed, the result was computed)."
-    )
-    age_s: float | None = Field(
-        default=None, description="Seconds since the cached result was made (hit only)."
-    )
 
 
 class SearchResponse(BaseModel):

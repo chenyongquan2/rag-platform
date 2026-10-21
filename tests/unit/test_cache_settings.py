@@ -21,7 +21,8 @@ def test_defaults_are_explicit() -> None:
     assert s.cache_max_value_bytes == 262_144
     assert (s.cache_breaker_failures, s.cache_breaker_open_s) == (5, 5.0)
     assert (s.cache_lock_ttl_ms, s.cache_lock_wait_ms, s.cache_lock_poll_ms) == (30_000, 3_000, 25)
-    assert s.cache_semantic_store == "es" and s.cache_semantic_lexical_guard is True
+    assert s.cache_ask_answers is True  # deviation from design s12-1 (decisions.md)
+    assert s.cache_semantic_store == "memory" and s.cache_semantic_lexical_guard is True
     assert 0 < s.cache_semantic_threshold <= 0.5
 
 
@@ -100,3 +101,20 @@ def test_the_bare_service_has_no_cache_and_from_settings_builds_one() -> None:
         observe_settings(cache_mode="off"), configs={}, builder=FakePipelineBuilder({})
     )
     assert off.cache is None
+
+
+def test_the_data_generation_is_read_from_the_redis_that_ingestion_writes() -> None:
+    """Ingestion adds 1 to the counter in `redis_url`; a cache in another Redis must read it
+    there, or a changed page would keep matching."""
+    other = make_cache_backend(
+        observe_settings(cache_url="redis://127.0.0.1:3/1", redis_url="redis://127.0.0.1:4/2")
+    )
+    assert other.client.connection_pool.connection_kwargs["port"] == 3
+    assert other.generation_client is not other.client
+    assert other.generation_client.connection_pool.connection_kwargs["port"] == 4
+    assert other.generation_client.connection_pool.connection_kwargs["db"] == 2
+    same = make_cache_backend(observe_settings(redis_url="redis://127.0.0.1:4/2"))
+    assert same.generation_client is same.client  # one Redis: one client
+    for backend in (other, same):
+        backend.client.close()
+        backend.generation_client.close()

@@ -165,7 +165,7 @@ def test_a_close_question_with_the_same_entities_would_hit(tmp_path: Path) -> No
     recorder, store, path = _recorder(tmp_path)
     _observe(recorder, "how do i push a model with push_to_hub", vec(1.0))
     record = _observe(
-        recorder, "what is the way to push a model with push_to_hub", near(vec(1.0), 0.1)
+        recorder, "in order to upload my trained model i call push_to_hub", near(vec(1.0), 0.1)
     )
     assert record.status == "would_hit" and record.guard_ok is True
     assert record.distance == pytest.approx(1 - np.cos(0.1), abs=1e-4)
@@ -174,7 +174,7 @@ def test_a_close_question_with_the_same_entities_would_hit(tmp_path: Path) -> No
     lines = [json.loads(x) for x in path.read_text("utf-8").splitlines()]
     assert [x["status"] for x in lines] == ["empty", "would_hit"]
     assert lines[1]["question_hash"] == question_hash(
-        "what is the way to push a model with push_to_hub"
+        "in order to upload my trained model i call push_to_hub"
     )
     assert lines[1]["candidate_hash"] == question_hash("how do i push a model with push_to_hub")
 
@@ -201,13 +201,21 @@ def test_a_question_beyond_the_threshold_is_too_far(tmp_path: Path) -> None:
 
 def test_a_question_without_entities_needs_a_stricter_distance(tmp_path: Path) -> None:
     recorder, _, _ = _recorder(tmp_path, threshold=0.2, strict_factor=0.5)
-    _observe(recorder, "how do i upload a model", vec(1.0))
+    _observe(recorder, "how do i upload my trained model", vec(1.0))
     # distance 0.15: inside 0.2 but outside 0.2 * 0.5
-    record = _observe(recorder, "how can i upload a model", near(vec(1.0), np.arccos(0.85)))
+    record = _observe(
+        recorder,
+        "in order to upload my trained model i call something",
+        near(vec(1.0), np.arccos(0.85)),
+    )
     assert record.status == "too_far"
     recorder2, _, _ = _recorder(tmp_path, threshold=0.2, strict_factor=0.5)
-    _observe(recorder2, "how do i upload a model", vec(1.0))
-    close = _observe(recorder2, "how can i upload a model", near(vec(1.0), np.arccos(0.95)))
+    _observe(recorder2, "how do i upload my trained model", vec(1.0))
+    close = _observe(
+        recorder2,
+        "in order to upload my trained model i call something",
+        near(vec(1.0), np.arccos(0.95)),
+    )
     assert close.status == "would_hit" and close.entities is False
 
 
@@ -216,7 +224,7 @@ def test_a_wrong_hit_has_a_different_top_chunk(tmp_path: Path) -> None:
     _observe(recorder, "how do i push a model with push_to_hub", vec(1.0), _fresh(1, 2, 3))
     record = _observe(
         recorder,
-        "what is the way to push a model with push_to_hub",
+        "in order to upload my trained model i call push_to_hub",
         near(vec(1.0), 0.05),
         _fresh(2, 1, 3),
     )
@@ -274,7 +282,7 @@ def _scrub(response: Any) -> dict[str, Any]:
 def test_the_returned_result_is_byte_identical_with_shadow_mode_on_and_off(tmp_path: Path) -> None:
     questions = [
         "how do i push a model with push_to_hub",
-        "what is the way to push a model with push_to_hub",
+        "in order to upload my trained model i call push_to_hub",
         "How do I push a model with push_to_hub?",
         "push_to_hub_fastai how to",
         "where are the docs",
@@ -283,10 +291,10 @@ def test_the_returned_result_is_byte_identical_with_shadow_mode_on_and_off(tmp_p
     off = _service(None, VectorPipeline("hf_docs"))
     settings = observe_settings()
     recorder, _, path = _recorder(tmp_path, threshold=0.5)
-    shadow = _service(
-        ResultCache(ExactCache(MemoryCacheBackend(), CacheConfig()), settings, shadow=recorder),
-        VectorPipeline("hf_docs"),
+    shadow_cache = ResultCache(
+        ExactCache(MemoryCacheBackend(), CacheConfig()), settings, shadow=recorder
     )
+    shadow = _service(shadow_cache, VectorPipeline("hf_docs"))
     plain = ResultCache(ExactCache(MemoryCacheBackend(), CacheConfig()), settings)
     l1_only = _service(plain, VectorPipeline("hf_docs"))
     for q in questions:
@@ -295,6 +303,7 @@ def test_the_returned_result_is_byte_identical_with_shadow_mode_on_and_off(tmp_p
         c = _scrub(l1_only.search_docs(creds, kb="hf_docs", query=q))
         assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
         assert json.dumps(a, sort_keys=True) == json.dumps(c, sort_keys=True)
+    assert shadow_cache.flush_shadow(10.0)  # the lookups run beside the requests
     statuses = [json.loads(x)["status"] for x in path.read_text("utf-8").splitlines()]
     # One record per question (every question missed L1 and had a complete result): the first
     # finds nothing, the next two are close and have the same entities, the fourth is close but
@@ -326,10 +335,12 @@ def test_shadow_runs_only_after_a_miss_with_a_complete_result(tmp_path: Path) ->
     service = _service(cache, VectorPipeline("hf_docs", result=degraded))
     creds = Credentials(transport="http")
     service.search_docs(creds, kb="hf_docs", query="how do i push a model")
+    assert cache.flush_shadow(10.0)
     assert store.size() == 0  # an incomplete result is never a reference for later questions
     good = _service(cache, VectorPipeline("hf_docs"))
     good.search_docs(creds, kb="hf_docs", query="how do i push a model")
     good.search_docs(creds, kb="hf_docs", query="how do i push a model")  # L1 hit: no shadow
+    assert cache.flush_shadow(10.0)
     assert store.size() == 1
 
 
@@ -358,6 +369,7 @@ class FakeEs:
         self.searches: list[dict[str, Any]] = []
         self.indexed: list[dict[str, Any]] = []
         self.hits: list[dict[str, Any]] = []
+        self.purges: list[dict[str, Any]] = []
 
     def options(self, **kwargs: Any) -> FakeEs:
         return self
@@ -371,6 +383,10 @@ class FakeEs:
 
     def close(self) -> None:
         pass
+
+    def delete_by_query(self, **kwargs: Any) -> dict[str, Any]:
+        self.purges.append(kwargs)
+        return {}
 
 
 def test_es_store_creates_its_index_filters_by_partition_and_converts_the_score() -> None:
@@ -435,3 +451,26 @@ def test_the_question_vector_comes_from_the_l0_cache_and_never_from_the_model() 
     assert search.query_vector("how do i push") == pytest.approx(vector)
     assert search.query_vector("another question") is None
     assert search_over(inner).query_vector("how do i push") is None  # a model with no L0 cache
+
+
+def test_es_store_deletes_expired_entries_every_n_writes() -> None:
+    es = FakeEs()
+    store = EsSemanticStore(es, dim=DIM, purge_every=3)  # type: ignore[arg-type]
+    for i in range(7):
+        store.add(PART, vec(1.0), _entry(f"q{i}", at=1000.0 + i), ttl_s=100)
+    assert len(es.purges) == 2  # after the 3rd and the 6th write
+    purge = es.purges[0]
+    assert purge["index"] == "cache_semantic_hf_docs"
+    assert purge["query"] == {"range": {"expires_at": {"lte": 1002.0}}}
+    assert purge["conflicts"] == "proceed" and purge["wait_for_completion"] is False
+
+
+def test_a_purge_that_fails_does_not_fail_the_write() -> None:
+    class Broken(FakeEs):
+        def delete_by_query(self, **kwargs: Any) -> dict[str, Any]:
+            raise ConnectionError("down")
+
+    es = Broken()
+    store = EsSemanticStore(es, dim=DIM, purge_every=1)  # type: ignore[arg-type]
+    store.add(PART, vec(1.0), _entry("q", at=1000.0), ttl_s=100)
+    assert len(es.indexed) == 1

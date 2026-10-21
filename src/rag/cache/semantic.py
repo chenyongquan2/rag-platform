@@ -40,7 +40,6 @@ import numpy as np
 from rag.agent.rules import normalise, protected_tokens
 from rag.answer.prompts import answer_language
 from rag.cache.keys import acl_hash, canonical_question, filters_hash
-from rag.observe import attributes as attr
 from rag.observe import get_observability
 from rag.observe.rotating import RotatingJsonlWriter
 from rag.types import RetrievalResult
@@ -92,6 +91,8 @@ class Signature:
     names: frozenset[str]
     numbers: tuple[str, ...]
     negations: frozenset[str]
+    token_order: tuple[str, ...] = ()
+    """The identifiers in the order they are written."""
 
     @property
     def has_entities(self) -> bool:
@@ -130,7 +131,8 @@ def entity_signature(question: str) -> Signature:
     negations = {w for w in lowered if w in _NEGATION_WORDS}
     negations.update(m.group(0).lower() for m in _NEGATION_N_T.finditer(text))
     negations.update(c for c in text if c in _ZH_NEGATIONS)
-    return Signature(tokens, names, tuple(numbers), frozenset(negations))
+    order = tuple(str(t) for t in protected_tokens(text))
+    return Signature(tokens, names, tuple(numbers), frozenset(negations), order)
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,27 @@ def _words_of(question: str) -> frozenset[str]:
     stop is dropped): what an entity of the other question has to be found among."""
     text = normalise(question).casefold()
     return frozenset(w.rstrip(".") for w in _WORD_FORM.findall(text))
+
+
+def _word_list(question: str) -> list[str]:
+    text = normalise(question).casefold()
+    return [w.rstrip(".") for w in _WORD_FORM.findall(text)]
+
+
+def _in_order(tokens: tuple[str, ...], words: list[str]) -> bool:
+    """The identifiers (those of one question) stand in the other question's words in the same
+    order. An identifier the other question does not have is not this check's business (the
+    set check has refused it already); a quoted message (it has spaces) is skipped."""
+    last = -1
+    for token in tokens:
+        token = token.casefold().rstrip(".")
+        if " " in token or token not in words:
+            continue
+        at = words.index(token)
+        if at < last:
+            return False
+        last = at
+    return True
 
 
 def entity_guard(new_question: str, cached_question: str) -> GuardVerdict:
@@ -172,6 +195,11 @@ def entity_guard(new_question: str, cached_question: str) -> GuardVerdict:
         return GuardVerdict(False, "identifiers", entities)
     if not (found_in(a.names, words_b, text_b) and found_in(b.names, words_a, text_a)):
         return GuardVerdict(False, "names", entities)
+    if not (
+        _in_order(a.token_order, _word_list(cached_question))
+        and _in_order(b.token_order, _word_list(new_question))
+    ):
+        return GuardVerdict(False, "order", entities)  # the same identifiers, exchanged
     if a.numbers != b.numbers:
         return GuardVerdict(False, "numbers", entities)
     if a.negations != b.negations:
@@ -184,34 +212,68 @@ def entity_guard(new_question: str, cached_question: str) -> GuardVerdict:
 LEXICAL_MAX_DIFF = 2
 """Two questions whose content words differ in at most this many words (one word replaced = 2,
 one word added or removed = 1) are different questions: a single-word swap (`push` and `pull`,
-a class name, `2` and `3`) moves a question's vector very little but changes what it asks."""
+a class name, `2` and `3`, `why` and `how`, `can` and `should`) moves a question's vector very
+little but changes what it asks. For Chinese, which has no spaces between words, the units are
+characters, and a two-character word replaced by another one is up to 4 (`LEXICAL_MAX_DIFF_HAN`)."""
+LEXICAL_MAX_DIFF_HAN = 4
 _CONTENT_WORD = re.compile(r"[a-z0-9][a-z0-9_.\-]*")
 _STOPWORDS = frozenset(
-    "the a an is are was were be been do does did how what which who whom whose when where why "
-    "to of in on for with by and or can could should would will you your i me my we our us it "
-    "its this that these those as at from into than then there if so also please tell give show "
-    "explain way".split()
+    "the a an is are was were be been do does did to of in on for with by and or you your i me "
+    "my we our us it its this that these those as at from into than then there if so also "
+    "please tell give show explain way".split()
 )
+# What is left in: the question words (`what`, `how`, `why`, ...) and the modal verbs (`can`,
+# `should`, ...). Changing one of them changes what is asked, and they are the words that moved
+# a vector least in the review's probes.
 _HAN = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+_HAN_CHAR = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+_ZH_STOP_CHARS = frozenset("的了是在吗呢吧啊请问把")
+_ZH_SAME_WORDS = (("怎么", "如何"), ("怎样", "如何"), ("什么样", "什么"))
 
 
-def content_words(question: str) -> frozenset[str] | None:
-    """The lower-cased words of an English question without the stop words; None for a question
-    with Han characters (no spaces between its words: not measured here)."""
+def content_sequence(question: str) -> tuple[str, ...]:
+    """The content words of a question, in order and lower-cased: English words without the stop
+    words; for a question with Han characters, its Han characters (without a few particles) and
+    its Latin words."""
     text = normalise(question)
     if _HAN.search(text):
-        return None
-    return frozenset(w for w in _CONTENT_WORD.findall(text.lower()) if w not in _STOPWORDS)
+        for old, new in _ZH_SAME_WORDS:
+            text = text.replace(old, new)
+        units: list[str] = []
+        pending = ""
+        for ch in text.lower():
+            if _HAN_CHAR.match(ch):
+                if pending:
+                    units.append(pending)
+                    pending = ""
+                if ch not in _ZH_STOP_CHARS:
+                    units.append(ch)
+            elif ch.isalnum() or ch in "_.-":
+                pending += ch
+            elif pending:
+                units.append(pending)
+                pending = ""
+        if pending:
+            units.append(pending)
+        return tuple(u for u in units if u not in _STOPWORDS)
+    return tuple(w for w in _CONTENT_WORD.findall(text.lower()) if w not in _STOPWORDS)
+
+
+def content_words(question: str) -> frozenset[str]:
+    return frozenset(content_sequence(question))
 
 
 def lexical_guard(new_question: str, cached_question: str) -> GuardVerdict:
     """Reject a stored question whose content words differ from the new question's by one or two
-    words (`LEXICAL_MAX_DIFF`); the same words in another order or with other stop words pass."""
-    a, b = content_words(new_question), content_words(cached_question)
-    if a is None or b is None:
-        return GuardVerdict(True)
-    if 0 < len(a ^ b) <= LEXICAL_MAX_DIFF:
+    words, or are the same words in another order. Other stop words pass."""
+    seq_a, seq_b = content_sequence(new_question), content_sequence(cached_question)
+    a, b = frozenset(seq_a), frozenset(seq_b)
+    han = bool(_HAN.search(new_question) or _HAN.search(cached_question))
+    limit = LEXICAL_MAX_DIFF_HAN if han else LEXICAL_MAX_DIFF
+    if 0 < len(a ^ b) <= limit:
         return GuardVerdict(False, "lexical")
+    if a == b and seq_a != seq_b:
+        return GuardVerdict(False, "order")
     return GuardVerdict(True)
 
 
@@ -361,7 +423,8 @@ class EsSemanticStore:
     """Stored questions in Elasticsearch, index `<index_prefix>cache_semantic_<kb>` (design
     s12-1): the partition is a `filter` of the kNN search, expiry a range on `expires_at`.
     `flat` vector index: exact distances (the index holds some thousand questions). A new entry
-    is searchable after the index refresh (one second; `refresh=True` waits for it, for tests)."""
+    is searchable after the index refresh (one second; `refresh=True` waits for it, for tests).
+    Every `purge_every` writes it deletes the expired entries."""
 
     def __init__(
         self,
@@ -371,7 +434,10 @@ class EsSemanticStore:
         index_prefix: str = "",
         refresh: bool = False,
         request_timeout_s: float = 0.5,
+        purge_every: int = 500,
     ) -> None:
+        self.purge_every = purge_every
+        self._writes = 0
         self.es = es.options(request_timeout=request_timeout_s)
         self._admin = es
         self.dim = dim
@@ -498,6 +564,23 @@ class EsSemanticStore:
             },
             refresh="true" if self.refresh else "false",
         )
+        self._writes += 1
+        if self.purge_every > 0 and self._writes % self.purge_every == 0:
+            self._purge(index, entry.created_at)
+
+    def _purge(self, index: str, now: float) -> None:
+        """Delete what has expired (the `expires_at` range is only a filter of the search, so
+        without this the index would grow for ever). Started, not waited for; a failure is
+        left for the next time."""
+        try:
+            self.es.delete_by_query(
+                index=index,
+                query={"range": {"expires_at": {"lte": now}}},
+                conflicts="proceed",
+                wait_for_completion=False,
+            )
+        except Exception:
+            logger.debug("purge of %s failed", index, exc_info=True)
 
     def drop(self, kb: str) -> None:
         """Delete the index of `kb` (admin; entries of an old data generation are never
@@ -690,12 +773,6 @@ class ShadowRecorder:
         get_observability().metrics.record_cache_shadow(
             kb=record.kb, tool="search_docs", verdict=record.status
         )
-        try:
-            from opentelemetry import trace
-
-            trace.get_current_span().set_attribute(attr.CACHE_SHADOW, record.status)
-        except Exception:  # a span attribute is never worth a failure
-            logger.debug("could not set the shadow span attribute", exc_info=True)
         return record
 
 

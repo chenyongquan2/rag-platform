@@ -33,7 +33,7 @@ import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from concurrent.futures import Future
+from concurrent.futures import Future, InvalidStateError
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -90,6 +90,11 @@ class _LeaderFailed(Exception):  # noqa: N818 - private signal, not an error of 
     """The leader of a flight ended without a result (it raised or was cancelled)."""
 
 
+class _Unshareable(Exception):  # noqa: N818 - private signal, not an error of the caller
+    """The leader's result is not one the cache would store (incomplete, a clarification, ...):
+    followers compute their own instead of being handed it."""
+
+
 class _Flights:
     """The computations in progress, one future per key."""
 
@@ -107,17 +112,52 @@ class _Flights:
             return future, True
 
     def finish(
-        self, key: str, future: Future[CacheRun[Any]], run: CacheRun[Any] | None = None
+        self,
+        key: str,
+        future: Future[CacheRun[Any]],
+        run: CacheRun[Any] | None = None,
+        *,
+        shareable: bool = True,
     ) -> None:
         """Remove the flight, then wake the followers (so a follower that retries never finds
-        a flight that is over)."""
+        a flight that is over). `run` is handed to them only when `shareable`; without a `run`
+        the leader failed. Never raises: a future somebody cancelled is left alone."""
         with self._lock:
             if self._open.get(key) is future:
                 del self._open[key]
-        if run is not None:
-            future.set_result(run)
+        if future.done():
+            return
+        with contextlib.suppress(InvalidStateError):
+            if run is not None and shareable:
+                future.set_result(run)
+            elif run is not None:
+                future.set_exception(_Unshareable())
+            else:
+                future.set_exception(_LeaderFailed())
+
+
+def _own_waiter(flight: Future[CacheRun[Any]]) -> asyncio.Future[CacheRun[Any]]:
+    """A future of this event loop that follows `flight`. Cancelling it (a time-out, a client
+    that left) does not touch `flight`, which other requests and the leader share
+    (`asyncio.wrap_future` would cancel it)."""
+    loop = asyncio.get_running_loop()
+    waiter: asyncio.Future[CacheRun[Any]] = loop.create_future()
+
+    def copy(done: Future[CacheRun[Any]]) -> None:
+        if waiter.done():
+            return
+        error = done.exception()
+        if error is not None:
+            waiter.set_exception(error)
         else:
-            future.set_exception(_LeaderFailed())
+            waiter.set_result(done.result())
+
+    def on_done(done: Future[CacheRun[Any]]) -> None:
+        with contextlib.suppress(RuntimeError):  # the loop is closed: nobody is waiting
+            loop.call_soon_threadsafe(copy, done)
+
+    flight.add_done_callback(on_done)
+    return waiter
 
 
 def _ms(since: float) -> float:
@@ -226,6 +266,13 @@ class ExactCache:
         return CacheRun(result, "bypass", reason="read_off", key=key)
 
     @staticmethod
+    def _shareable(run: CacheRun[T], codec: Codec[T]) -> bool:
+        """A result goes to the followers only when the cache would store it (a hit always
+        did): an incomplete one, a clarification with its resume token or a result of another
+        caller's deadline must not be handed to requests that did not make it."""
+        return run.outcome == "hit" or codec.verdict(run.result).ok
+
+    @staticmethod
     def _follow(shared: CacheRun[T], adapt: Callable[[T], T] | None, began: float) -> CacheRun[T]:
         result = adapt(shared.result) if adapt is not None else shared.result
         outcome = shared.outcome if shared.outcome == "hit" else "shared"
@@ -274,7 +321,7 @@ class ExactCache:
                     return self._lead(flight, key, fields, compute, codec, decode, wait, began)
                 try:
                     return self._follow(flight.result(timeout=wait), adapt, began)
-                except FutureTimeout:
+                except (FutureTimeout, _Unshareable):
                     break
                 except _LeaderFailed:
                     continue
@@ -301,7 +348,7 @@ class ExactCache:
         except BaseException:
             self._flights.finish(key, flight)
             raise
-        self._flights.finish(key, flight, run)
+        self._flights.finish(key, flight, run, shareable=self._shareable(run, codec))
         return run
 
     def _lead_inner(
@@ -345,15 +392,20 @@ class ExactCache:
         return run
 
     def _poll(self, key: str, wait: float, decode: Callable[[Entry], T]) -> CacheRun[T] | None:
-        deadline = time.monotonic() + wait
+        """Wait for another process's entry: at most `lock_wait_ms` (and `wait`), and not
+        after that process has released its lock (it finished, with nothing to store)."""
+        deadline = time.monotonic() + min(wait, self.config.lock_wait_ms / 1000.0)
         while time.monotonic() < deadline:
             time.sleep(self.config.lock_poll_ms / 1000.0)
             try:
+                lock_gone = self._guard(self.backend.get, key + ":lock") is None
                 entry = self._read(key)
             except CacheUnavailable:
                 return None
             if entry is not None:
                 return self._hit(entry, decode, key, self._clock())
+            if lock_gone:
+                return None
         return None
 
     # ---- the same, for a computation that is a coroutine -------------------------------------
@@ -389,8 +441,8 @@ class ExactCache:
                         flight, key, fields, compute, codec, decode, wait, began
                     )
                 try:
-                    shared = await asyncio.wait_for(asyncio.wrap_future(flight), timeout=wait)
-                except TimeoutError:
+                    shared = await asyncio.wait_for(_own_waiter(flight), timeout=wait)
+                except (TimeoutError, _Unshareable):
                     break
                 except _LeaderFailed:
                     continue
@@ -418,7 +470,7 @@ class ExactCache:
         except BaseException:
             self._flights.finish(key, flight)
             raise
-        self._flights.finish(key, flight, run)
+        self._flights.finish(key, flight, run, shareable=self._shareable(run, codec))
         return run
 
     async def _alead_inner(
@@ -464,15 +516,18 @@ class ExactCache:
     async def _apoll(
         self, key: str, wait: float, decode: Callable[[Entry], T]
     ) -> CacheRun[T] | None:
-        deadline = time.monotonic() + wait
+        deadline = time.monotonic() + min(wait, self.config.lock_wait_ms / 1000.0)
         while time.monotonic() < deadline:
             await asyncio.sleep(self.config.lock_poll_ms / 1000.0)
             try:
+                lock = await asyncio.to_thread(self._guard, self.backend.get, key + ":lock")
                 entry = await asyncio.to_thread(self._read, key)
             except CacheUnavailable:
                 return None
             if entry is not None:
                 return self._hit(entry, decode, key, self._clock())
+            if lock is None:
+                return None
         return None
 
     # ---- admin -------------------------------------------------------------------------------

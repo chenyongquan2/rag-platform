@@ -347,6 +347,7 @@ class ServiceSettings(BaseSettings):
     # two words.
     cache_mode: Literal["off", "l1", "l1_shadow"] = "l1_shadow"
     cache_url: str = ""
+    cache_ask_answers: bool = True
     cache_key_prefix: str = "rag:l1:"
     cache_timeout_ms: int = Field(default=50, gt=0)
     cache_ttl_s: int = Field(default=3600, gt=0)
@@ -360,7 +361,7 @@ class ServiceSettings(BaseSettings):
     cache_semantic_threshold: float = Field(default=0.15, ge=0.0, le=1.0)
     cache_semantic_ttl_s: int = Field(default=86_400, gt=0)
     cache_semantic_lexical_guard: bool = True
-    cache_semantic_store: Literal["memory", "es"] = "es"
+    cache_semantic_store: Literal["memory", "es"] = "memory"
     cache_shadow_dir: str = "data/observe/cache"
 
     # Search service process (spec P0-09, design s16-1, s16-4). Until P8 (OAuth) every request

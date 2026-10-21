@@ -25,6 +25,7 @@ from mcp import ClientSession, StdioServerParameters, stdio_client
 
 from rag.config import ServiceSettings, repo_path
 from rag.eval.questions import load_question_set
+from rag.testing.server import server_env
 
 pytestmark = pytest.mark.integration
 
@@ -107,17 +108,18 @@ def test_mcp_stdio_end_to_end(es: Elasticsearch, tmp_path: Path) -> None:
         command=uv,
         args=["run", "python", "-m", "rag.serve", "stdio"],
         cwd=REPO_ROOT,
-        env={
-            # The stdio client passes only a safe subset of the environment; settings come from
-            # the repo's .env (cwd) plus these.
-            "EMBED_BACKEND": "fake",
-            "SEARCH_INDEX_PREFIX": "fake_",
-            "HF_HUB_OFFLINE": "1",
-            "BUSINESS_RECORD_PATH": str(records),
-            "LOG_DIR": str(tmp_path / "logs"),
-            "OTEL_AUTO_INSTRUMENT": "false",
+        # The stdio client passes only a safe subset of the environment; settings come from the
+        # repo's .env (cwd) plus these. `server_env` turns the result cache off: its entries
+        # (an hour) would be served to the next run of this test, with no retrieval and no trace.
+        env=server_env(
+            EMBED_BACKEND="fake",
+            SEARCH_INDEX_PREFIX="fake_",
+            HF_HUB_OFFLINE="1",
+            BUSINESS_RECORD_PATH=str(records),
+            LOG_DIR=str(tmp_path / "logs"),
+            OTEL_AUTO_INSTRUMENT="false",
             **({"HF_HOME": os.environ["HF_HOME"]} if "HF_HOME" in os.environ else {}),
-        },
+        ),
     )
     question = known_question()
 
