@@ -41,7 +41,10 @@ docker compose down                                 # stop (Elasticsearch data s
 | Elasticsearch (single node, Basic, 2 GB heap) | `docker.elastic.co/elasticsearch/elasticsearch:9.5.5` | `http://127.0.0.1:29200` |
 | Redis cache (allkeys-lru, 256 MB, no persistence) | `redis:8.10.2-alpine` | `redis://127.0.0.1:26379/0` |
 | OTel Collector (OTLP in; traces to Jaeger and `data/otel/traces.jsonl`, at most 4 x 20 MB; metrics in Prometheus format) | `otel/opentelemetry-collector-contrib:0.162.0` | gRPC `127.0.0.1:24317`, HTTP `127.0.0.1:24318`, metrics `http://127.0.0.1:28889/metrics` |
-| Jaeger (all-in-one, in-memory) | `jaegertracing/jaeger:2.22.0` | UI `http://127.0.0.1:36686` |
+| Jaeger (all-in-one, in-memory, at most 20000 traces: `deploy/jaeger.yaml`) | `jaegertracing/jaeger:2.22.0` | UI `http://127.0.0.1:36686` |
+| Prometheus (profile `monitoring`, 7 days or 1 GB) | `prom/prometheus:v2.54.1` | `http://127.0.0.1:29090` |
+| Grafana (profile `monitoring`; dashboard "RAG platform overview") | `grafana/grafana:11.3.0` | `http://127.0.0.1:23000` |
+| Langfuse v3 (profile `langfuse`, several GB; see Monitoring) | `langfuse/langfuse:3` and five more | `http://127.0.0.1:23001` |
 
 Host ports are the standard port + 20000 and bound to 127.0.0.1 only. **Elasticsearch security is
 disabled** (no TLS, no password) for local development; never expose this setup beyond the machine.
@@ -163,6 +166,50 @@ flags, timings, trace id) go to `data/observe/records/business.jsonl`. Records a
 size; `data/observe/` is git-ignored. Attribute and metric names live in
 `rag/observe/attributes.py`. Tests use `rag.testing.memory_observability()` (`OTEL_MODE=memory`);
 `OTEL_MODE=off` records nothing.
+
+## Monitoring (P5-02)
+
+Metrics flow app -> Collector -> Prometheus -> Grafana and the alert rules. The default
+`docker compose up -d` is unchanged; the monitoring services are a profile:
+
+```bash
+docker compose --profile monitoring up -d       # Prometheus 29090, Grafana 23000 (about 100 MB at rest, limits 512 + 384 MB)
+docker compose --profile monitoring stop        # stop them, data stays in the prometheus-data and grafana-data volumes
+uv run python -m rag.monitor receiver           # alerts -> data/observe/alerts.jsonl (and ALERT_WEBHOOK_URL when set)
+uv run python -m rag.monitor probe              # one fixed search_docs request every 60 s, as metrics
+uv run python -m rag.monitor prune [--dry-run]  # delete trace files past 3 days / 100 MB (safety net)
+uv run python -m rag.eval.online_sample --n 20  # judge 20 random recent requests (about 0.06 CNY); not scheduled
+```
+
+- **Dashboard** `deploy/grafana/dashboards/rag-overview.json` (12 panels: request rate, error rate and
+  categories, P50/P95 of `search_docs` and `ask_docs`, cache hit rate, rerank timeouts and degraded
+  results, tokens, CNY, model calls, probe and dependency state, probe latency and feedback). It is
+  provisioned from the file: edit the file, not the page. Anyone on the machine may view it; the admin
+  password is `GRAFANA_ADMIN_PASSWORD` in `.env` (default `admin`).
+- **Alerts** `deploy/prometheus/rules.yml` (13 rules; the comments say where each threshold comes from and
+  `rules_test.yml` unit-tests them with `promtool`). Prometheus sends them to the receiver on the host
+  (`host.docker.internal:29093`), which writes one line when an alert starts and one when it ends.
+  Set `ALERT_WEBHOOK_URL` to also post each line (JSON with a `text` field) to a chat webhook; the URL is
+  never logged.
+- **Probe** `SEARCH` every `PROBE_INTERVAL_S` (60) against `PROBE_URL` (default: this machine's service),
+  expecting `PROBE_EXPECTED` in the first passage's source. The `ask_docs` check costs model calls: off by
+  default (`PROBE_ASK_ENABLED=true` turns it on), once per `PROBE_ASK_INTERVAL_S` (1800) and at most
+  `PROBE_ASK_DAILY_CAP` (3) a day, counted in `data/observe/probe_state.json`.
+- **Feedback** the MCP tool `feedback(request_id, useful, comment?)` and `POST /v1/feedback` write one
+  business record keyed by the rated request and count `rag_feedback_total{verdict}`.
+- **Retention** Collector trace file: 20 MB x 4 files, 3 days (`deploy/otel-collector.yaml`); Jaeger: 20000
+  traces in memory (`deploy/jaeger.yaml`); Prometheus: 7 days or 1 GB. `rag.monitor prune` removes
+  `data/otel/traces*` files past `TRACE_RETENTION_DAYS` / `TRACE_RETENTION_MAX_MB`.
+- **Langfuse** (LLM-call view of the traces): Langfuse v3 needs Postgres, ClickHouse, Redis and MinIO next to
+  its two app containers (about 3 GB, `docker compose --profile langfuse up -d`). Not started by default. v2
+  (Postgres only) has no OTLP endpoint, so it cannot take what the Collector sends. To use it:
+  `uv run python -m rag.monitor langfuse-env` (writes the secrets to `.env`), start the profile, then
+  `COLLECTOR_EXTRA=langfuse docker compose up -d otel-collector`; undo with `docker compose up -d
+  otel-collector` and `docker compose --profile langfuse down`. Details and what was tested:
+  `docs/reports/P5-report.md` section 2.
+
+After this change the Collector and Jaeger containers must be recreated once to read their new config
+files (`docker compose up -d otel-collector jaeger`); Elasticsearch and Redis are not touched.
 
 ## Retrieval
 

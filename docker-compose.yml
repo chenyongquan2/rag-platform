@@ -189,7 +189,7 @@ services:
   # ---- profile `langfuse` (spec P5-02): Langfuse v3 for the LLM-call view of traces ----------------
   # Langfuse v3 needs Postgres, ClickHouse, Redis (with no eviction) and S3-compatible storage
   # (MinIO) besides its two application containers. v2 (Postgres only) has no OTLP endpoint, so it
-  # could not receive what the Collector sends. Secrets: `uv run python scripts/langfuse_env.py`
+  # could not receive what the Collector sends. Secrets: `uv run python -m rag.monitor langfuse-env`
   # writes them to .env. Start: docker compose --profile langfuse up -d, then switch the
   # Collector on (deploy/otel/langfuse.yaml). Stop and free the memory: docker compose --profile
   # langfuse down (add -v to also delete its data).
@@ -320,7 +320,7 @@ services:
     environment:
       <<: *langfuse-env
       # A first project with API keys and a first user, so no sign-up page is needed: the keys are
-      # what the Collector overlay authenticates with (LANGFUSE_BASIC_AUTH, see scripts/langfuse_env.py).
+      # what the Collector overlay authenticates with (LANGFUSE_BASIC_AUTH, see rag.monitor langfuse-env).
       LANGFUSE_INIT_ORG_ID: rag-platform
       LANGFUSE_INIT_ORG_NAME: rag-platform
       LANGFUSE_INIT_PROJECT_ID: rag-local

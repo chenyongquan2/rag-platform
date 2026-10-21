@@ -3,6 +3,7 @@
     uv run python -m rag.monitor probe      # the scheduled probe: runs until Ctrl-C
     uv run python -m rag.monitor receiver   # the local alert receiver: runs until Ctrl-C
     uv run python -m rag.monitor prune      # delete old trace files once (--dry-run to look)
+    uv run python -m rag.monitor langfuse-env   # add the missing Langfuse secrets to .env
 
 Settings come from `ServiceSettings` (`probe_*`, `alert_*`, `trace_retention_*`; env or `.env`).
 """
@@ -22,6 +23,7 @@ import httpx
 from rag.config import ServiceSettings
 from rag.config.paths import repo_path
 from rag.monitor.alert_receiver import AlertReceiver, serve
+from rag.monitor.langfuse_env import ensure_env
 from rag.monitor.probe import ProbeConfig, Prober, run_forever
 from rag.monitor.prune import prune_files
 from rag.observe import init_observability, shutdown_observability
@@ -38,6 +40,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("receiver", help="receive Prometheus alerts into data/observe/alerts.jsonl")
     p_prune = sub.add_parser("prune", help="delete old trace files")
     p_prune.add_argument("--dry-run", action="store_true", help="list, do not delete")
+    p_env = sub.add_parser(
+        "langfuse-env", help="write the Langfuse secrets that are missing to .env"
+    )
+    p_env.add_argument("--env-file", default=".env", help="default: .env at the repo root")
     return parser
 
 
@@ -65,6 +71,10 @@ def main(argv: Sequence[str] | None = None, *, settings: ServiceSettings | None 
         print(f"{verb} {len(removed)} file(s)")
         for path in removed:
             print(f"  {path}")
+        return 0
+    if args.command == "langfuse-env":
+        added = ensure_env(repo_path(args.env_file))
+        print("added to the env file: " + (", ".join(added) if added else "nothing, all present"))
         return 0
     stop = threading.Event()
     if args.command == "receiver":
