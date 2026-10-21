@@ -210,7 +210,7 @@ def test_config_version_of_a_knowledge_base_without_the_flag_is_unchanged() -> N
     settings = ServiceSettings(_env_file=None)  # type: ignore[call-arg]
     cfg = KnowledgeBaseConfig(kb=KB)
     # The version as it was computed before the setting existed: the setting is not in the dump.
-    dump = cfg.model_dump(mode="json", exclude={"description", "agent"})
+    dump = cfg.model_dump(mode="json", exclude={"description", "agent", "cache"})
     dump["retrieval"].pop("dedupe_by_page_key")
     payload = {
         "kb_config": dump,

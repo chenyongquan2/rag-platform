@@ -106,6 +106,21 @@ class Metrics:
             description="Best rerank score of each search (sigmoid, 0 to 1)",
             explicit_bucket_boundaries_advisory=list(TOP_RERANK_SCORE_BUCKETS),
         )
+        self.cache_requests = meter.create_counter(
+            attr.METRIC_CACHE,
+            unit="{request}",
+            description="Requests by cache layer and outcome (hit, shared, miss, bypass, error)",
+        )
+        self.cache_not_stored = meter.create_counter(
+            attr.METRIC_CACHE_NOT_STORED,
+            unit="{result}",
+            description="Results the cache did not write, by reason (degraded, too_large, ...)",
+        )
+        self.cache_shadow = meter.create_counter(
+            attr.METRIC_CACHE_SHADOW,
+            unit="{request}",
+            description="What the shadow-mode semantic cache would have done, by verdict",
+        )
         self.model_calls = meter.create_counter(
             attr.METRIC_MODEL_CALLS,
             unit="{call}",
@@ -172,6 +187,34 @@ class Metrics:
                 self.top_rerank_score.record(float(top_rerank_score), base)
         except Exception:
             logger.warning("recording retrieval metrics failed", exc_info=True)
+
+    def record_cache(
+        self,
+        *,
+        kb: str | None,
+        tool: str,
+        layer: str,
+        outcome: str,
+        not_stored_reason: str = "",
+    ) -> None:
+        """One request's way through a cache layer; a miss whose result was not written also
+        counts under its reason."""
+        base = _drop_none({attr.KB: kb, attr.TOOL: tool})
+        try:
+            self.cache_requests.add(
+                1, {**base, attr.CACHE_LAYER: layer, attr.CACHE_OUTCOME: outcome}
+            )
+            if not_stored_reason:
+                self.cache_not_stored.add(1, {**base, attr.CACHE_REASON: not_stored_reason})
+        except Exception:
+            logger.warning("recording cache metrics failed", exc_info=True)
+
+    def record_cache_shadow(self, *, kb: str | None, tool: str, verdict: str) -> None:
+        base = _drop_none({attr.KB: kb, attr.TOOL: tool})
+        try:
+            self.cache_shadow.add(1, {**base, attr.CACHE_SHADOW: verdict})
+        except Exception:
+            logger.warning("recording cache shadow metrics failed", exc_info=True)
 
     def record_ledger_row(self, row: Mapping[str, Any]) -> None:
         """One call, its tokens and CNY from one cost ledger line (`rag.cost.add_record_listener`).
