@@ -4,6 +4,7 @@ __pycache__/
 .env
 .env.*
 .pytest_cache/
+.testmondata*
 .ruff_cache/
 .coverage
 data/raw/

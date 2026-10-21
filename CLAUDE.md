@@ -23,6 +23,7 @@ Multi-knowledge-base RAG platform. The design is fixed in `docs/design/rag-platf
 ## Tests
 
 - Markers: `unit` (default, no network, no Docker, seconds), `integration` (needs the local Docker services: Elasticsearch, Redis), `llm` (calls the real model gateway; costs money; **never runs by default**).
+- While developing, run only the tests you touch (`uv run pytest tests/unit/test_x.py`). The pre-commit hook runs only the tests affected by your change (pytest-testmon; the first run in a fresh checkout builds a baseline, about 4 minutes). Run the whole suite in parallel before you report or merge: `uv run pytest -n 4` (about 1.5 minutes, versus about 4 minutes serial).
 - Default `uv run pytest` runs only `unit`. `uv run pytest -m integration` needs `docker compose up -d`. `uv run pytest -m llm` only when a spec says so.
 - Do not edit an existing test to make it pass unless the spec changed; say why in the commit body.
 - Unit tests use deterministic fakes (`rag.testing.FakeEmbedding`, `FakeChatModel`), never LlamaIndex `MockLLM` (it silently echoes the prompt).

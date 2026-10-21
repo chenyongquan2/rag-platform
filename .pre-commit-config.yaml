@@ -42,7 +42,11 @@ repos:
 
       - id: pytest-unit
         name: unit tests (pytest, unit marker only)
-        entry: uv run --frozen pytest -q -x
+        # Only the tests that touch changed code (pytest-testmon). `-m` would switch testmon off,
+        # so the unit selection is by directory here. The first run in a fresh checkout builds the
+        # testmon baseline (about 4 minutes); later commits run in seconds to about a minute.
+        # Run the whole suite before you report or merge: `uv run pytest -n 4` (about 1.5 minutes).
+        entry: uv run --frozen pytest -q -x -o addopts=-ra --strict-markers --testmon tests/unit tests/web
         language: system
         pass_filenames: false
         types_or: [python, toml, yaml]
