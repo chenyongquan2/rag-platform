@@ -313,8 +313,8 @@ class ServiceSettings(BaseSettings):
     # `online_eval_max_cny` of its own spend.
     online_eval_n: int = Field(default=20, ge=1)
     online_eval_window_hours: float = Field(default=168.0, gt=0)
-    online_eval_max_cny: float = Field(default=0.10, gt=0)
-    online_eval_est_cny_per_call: float = Field(default=0.003, gt=0)
+    online_eval_max_cny: float = Field(default=0.20, gt=0)
+    online_eval_est_cny_per_call: float = Field(default=0.007, gt=0)
     online_eval_report_dir: str = "data/reports/online"
     # Alerts (spec P5-02): Prometheus posts to the receiver (`python -m rag.monitor receiver`)
     # at `alert_receiver_host:alert_receiver_port` (Alertmanager's 9093 + 20000); it writes

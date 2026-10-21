@@ -88,6 +88,8 @@ def test_candidates_are_recent_answered_requests_with_a_question_and_chunks(tmp_
             _record("no-chunks", final=[]),
             _record("no-question", extra={}),
             _record("blank-question", extra={"query": "   "}),
+            _record("probe-1a2b3c4d5e6f7a8b"),  # the scheduled probe's own requests
+            _record("probe-9f8e7d6c5b4a3921", tool="ask_docs"),
             _record("feedback", tool="feedback", extra={"useful": True}),
             _record("list", tool="list_knowledge_bases", extra={"knowledge_bases": ["a"]}),
             _record("cancelled", flags=["client_cancelled"]),

@@ -5,7 +5,8 @@
 #   COLLECTOR_EXTRA=langfuse docker compose up -d otel-collector    # the Collector adds this exporter
 #
 # Back to the default: `docker compose up -d otel-collector` (COLLECTOR_EXTRA unset) and
-# `docker compose --profile langfuse down`.
+# `docker compose --profile langfuse rm -sf langfuse-web langfuse-worker langfuse-clickhouse
+# langfuse-minio langfuse-redis langfuse-postgres` (not `down`: it would remove Elasticsearch too).
 #
 # Langfuse takes OTLP over HTTP only, at /api/public/otel (no gRPC; design s15-1), with Basic
 # authentication: base64("<public key>:<secret key>") of the project keys that

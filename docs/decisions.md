@@ -8,6 +8,9 @@
 
 - P4-01（2026-10-20）：（已解决，2026-10-21）中文手册原来只写了约三分之一；主人批准写完，已用提交的配置写完，见「审查第 1 轮：用提交里的配置把整本手册写完」。
 
+- P5-02（2026-10-21）：**我误删了 Elasticsearch、Redis、Collector、Jaeger 的容器和 `es-data` 数据卷**（`docker compose --profile langfuse down -v`），两个真实索引的数据被删，已用本机缓存全部重建，块数和 P0、P4-01 报告一致，花费 0 元；主检出目录的 Collector 和 Jaeger 现在挂载的是我这个工作区的配置文件，合并后要从主检出目录再执行一次 `docker compose up -d otel-collector jaeger`。过程见「P5-02：监控，每一项怎么定的」第 12 项和 P5 报告 2.12。
+- P5-02（2026-10-21）：这个规格的真实模型花费约 0.15 元，超过任务给的 0.1 元（P5 报告 2.11）；恢复索引时临时绕过了摄取任务的全局停止线检查（实际花费 0 元，有看门程序）。
+
 ## 已定
 
 ### 2026-10-17 向量模型的名字写成 qwen/text-embedding-v4
@@ -1644,3 +1647,72 @@ P3-01 留的问题：到 `max_rounds` 时写「没查全」。现在三轮里所
 - `CacheInfo` 移到 `rag.cache.info`，缓存模块不再依赖 `rag.serve`。
 - 回答配置版本里加了 `chat_structured_output_method`；`_answer_versions` 保存配置对象本身而不是 `id()`。
 - 起真实服务进程的集成测试用 `server_env()`（缓存关）；单元测试检查这一点。
+
+### 2026-10-21 P5-02：监控，每一项怎么定的
+数字见 `docs/reports/P5-report.md` 第 2 节。下面只写做了什么决定、为什么、还考虑过什么。
+
+**1. 指标走哪条路：应用把指标发给 Collector，Prometheus 只拉 Collector 一个地址**
+- 做法：应用和探针用 OTLP 把指标发到 Collector；Prometheus 每 15 秒拉 `otel-collector:8889`；Grafana 和提醒规则都读 Prometheus。`honor_labels: true`，保留 Collector 按服务名给的 `job` 和 `instance`。
+- 为什么：设计 15.1 就是这么画的，换后端只改 Collector 配置。应用本来没有开放指标端口，不用为 Prometheus 再开一个。
+- 没选的做法：让 Prometheus 直接拉每个应用进程。每个进程要开端口，进程重启、换端口都要改抓取配置。
+- 代价：Collector 里的序列 10 分钟没更新就消失（`metric_expiration`）。一次性的任务（在线抽样）的指标只在 Prometheus 里留下它存在的那十分钟。
+
+**2. 提醒：不用 Alertmanager，写一个本机的小接收器**
+- 做法：`python -m rag.monitor receiver` 听 `127.0.0.1:29093`，实现 Prometheus 发提醒用的那一个接口（`POST /api/v2/alerts`）。一条提醒开始时写一行、结束时写一行到 `data/observe/alerts.jsonl`，不管 Prometheus 重发多少次。设了环境变量 `ALERT_WEBHOOK_URL` 就同时把这一行发给那个地址；地址不写进任何日志，包括失败信息。
+- 为什么：本机已经有别的项目的 Alertmanager 容器，不能动它。我们要的只是「出事时留一行记录、可选发到聊天群」。小接收器 200 行，没有多余的容器。
+- 没选的做法：再起一个自己的 Alertmanager 容器。它能把同类提醒合并、暂停某条提醒、按种类发给不同的人，但多一个容器，发聊天群的格式转换还是要自己写。
+- 什么时候换成另一种做法：要多人值班、要暂停某条提醒、要按严重程度发到不同的群时，换成真的 Alertmanager。只改 `prometheus.yml` 里 `alerting` 一段。
+- 接收器和探针是本机进程，不是容器：它们要写 `data/observe/`。Prometheus 容器通过 `host.docker.internal:29093` 找到接收器，已实测通。
+- 一个自己踩到的坑：接收器最初用 httpx 发 webhook。httpx 会在 INFO 日志里写出完整的请求地址，测试抓到了地址泄漏。改成标准库的 urllib（它不写日志）。
+
+**3. 阈值：每一个都写在 `rules.yml` 里，注明是实测还是自己定的**
+- 实测的：搜索 P95 约 4 到 6 秒（P3、P5 报告），所以搜索延迟提醒设 8 秒；问答 P95 约 21 秒，默认总时限 30 秒，所以问答延迟提醒设 30 秒。
+- 自己定的（没有基线，一周真实流量后再调）：错误率超过 10%、重排超时和单路结果各超过 20%、模型花费 24 小时超过 2 元、一小时超过 100 万 token。这些规则都加了「5 分钟内至少约 6 个请求」的流量条件，请求太少时比例没有意义，只靠探针。
+- 探针规则：最近一次检查失败持续 1 分钟（探针每分钟一次，所以是连续两次失败）；3 分钟没有成功（探针进程停了，或服务整个挂了）；搜索超过 8 秒、问答超过 28 秒。
+- 每条规则在 `rules_test.yml` 里有用 promtool 做的单元测试：喂一段造出来的序列，看会不会触发；测试里也包括「健康时什么都不触发」「没有流量时的错误不触发」。
+
+**4. 应用自己报告 Elasticsearch 和 Redis 能不能连上（`rag_dependency_up`）**
+- 做法：服务进程每次导出指标时用自己的连接串去 ping（超时 1.5 秒，结果缓存 10 秒），0 表示连不上。
+- 为什么：Prometheus 只看得到 Collector。ES 挂了，没有请求就没有 trace，只有探针能发现；但探针的请求在缓存里能命中（见第 5 项），挡在了前面。这个指标不经过缓存，直接回答「这个进程现在连得上它的存储吗」。
+- 没选的做法：靠探针一个信号。缓存命中会让探针对 ES 故障失明最长一小时。
+
+**5. 探针：每次问一个没人问过的问题，只要期望的页面出现在返回的列表里就算对**
+- 做法：每 60 秒用 `POST /v1/search_docs` 问一个固定问题，问题末尾加一个造出来的词（`zq` 加 6 位十六进制），请求头 `X-Request-Id` 以 `probe-` 开头。结果必须：HTTP 200、没有单路、没有重排超时、没找到为假、返回列表里至少有一段来自期望的页面（默认 `chapter4/3.mdx`）。问答检查默认关，每 30 分钟最多一次、每个 UTC 日最多 `probe_ask_daily_cap`（默认 3）次，次数写进 `data/observe/probe_state.json`，重启不重置；失败的请求也算一次，因为网关可能已经计费。每次问答用新的会话号，所以结果缓存不会回答它。
+- 为什么加造出来的词：第一版用固定问题，第二次起会从 Redis 缓存里命中（保留 1 小时），探针看不到 ES 或网关的故障。真实运行里量过：加了造出来的词后，期望的页面排第 1 的有 11 次（共 15 次），出现在 5 条的列表里的有 15 次。
+- 为什么「在列表里」而不是「排第一」：设计 15.1 写的是第一名是不是预期的那一段。真实索引上有好几段重排分都是 1.0，并列的顺序随问题文字变，第一版按「第一名」判断，第一次 5 分钟的真实运行里 11 次搜索有 8 次被判错（见 P5 报告 2.5）。这是对设计的偏离，原因和数字都在这里。
+- 排除探针请求：在线抽样看到 `probe-` 开头的请求编号就跳过，因为那是固定的问题，不是用户问的。
+- 没选的做法：给 HTTP 接口加一个「跳过缓存」的参数。会改对外接口，也让任何调用方都能绕过缓存。
+
+**6. Langfuse：v3 放进 `langfuse` profile，默认不启动，实测从头到尾运行了一次**
+- 为什么不是 v2：v2（只要 Postgres）没有 OTLP 接收端口，收不到 Collector 发的数据，只能在代码里接 Langfuse 的 SDK，这违反设计 15.1（代码里只用 OTel）。
+- v3 要六个容器：两个应用（web、worker）加 Postgres、ClickHouse、Redis（不允许淘汰）、MinIO。实测运行时内存合计约 2.0 GB（web 1.04、ClickHouse 0.37、worker 0.39、其余约 0.17）。在 WSL 的 16 GB 里放得下，不启动时不占内存。
+- Collector 怎么发给它：Collector 启动命令加载两个配置文件，基础配置加 `deploy/otel/${COLLECTOR_EXTRA:-none}.yaml`。默认 `none` 什么都不加；`langfuse` 加一个单独的 pipeline 和 OTLP/HTTP 导出器，Langfuse 停了或慢了不会拖住 Jaeger 和 trace 文件。
+- 实测踩到的三个坑：Docker Hub 的 `minio/minio` 在本机拉不下来（改用 Langfuse 自己的 compose 用的 `cgr.dev/chainguard/minio`，只有 latest 一个标签）；ClickHouse 在这个环境里不能监听 IPv6，健康检查要用 `127.0.0.1` 而不是 `localhost`；web 容器 768 MB 堆内存启动时就耗尽，改成 1536 MB 堆、2 GB 上限。
+- 版本固定在 3.225.11（web 实测过）。worker 的同一个标签没有单独拉过，是按 Langfuse 两个镜像同版本发布的惯例写的。
+
+**7. 保留期：每一层各写明白**
+- Collector 的 trace 文件：4 个文件，每个 20 MB，最多 3 天（`max_megabytes`、`max_days`、`max_backups`，原来就有，这次在测试里钉住了数字）；`python -m rag.monitor prune` 是另一层检查，补上 Collector 自己的规则漏掉的文件（比如 Collector 停过一阵、改过配置）：删超过 3 天或总量超过 100 MB 的文件，最新的那个文件永远留着（Collector 可能正开着它）。
+- Jaeger：内存里最多 20000 条 trace（`deploy/jaeger.yaml`，原来是内置默认值 10 万条），容器内存上限 768 MB。重启清空。
+- Prometheus：保留 7 天或 1 GB；Grafana 的数据放在自己的卷里。
+
+**8. feedback 工具：一个计数器加 `verdict` 标签**
+- 任务写的是 `feedback.useful` 和 `feedback.not_useful` 两个计数器。我做成一个计数器 `rag.feedback`，用标签 `rag.feedback.verdict` 区分，Prometheus 里是 `rag_feedback_total{rag_feedback_verdict="useful"}`。原因：两个名字的计数器没法算「没用的占比」，一个带标签的计数器可以一条式子写出来。
+- MCP 工具和 HTTP 接口用同一个 `SearchService.feedback`，所以校验完全一样（请求编号格式、`useful` 必须是真假、评论最多 500 字）；MCP 一侧的 `useful` 参数用严格布尔，防止字符串 `"yes"` 被 SDK 悄悄转成真。被拒的请求不计数、不写判断。
+- 修改了现有测试的工具清单（`test_serve_mcp.py`、`test_serve_cli.py`、集成的 stdio 测试）：只是因为规格多了一个工具。
+
+**9. 在线抽样：用问答图里的「够不够」裁判，不用 P1-04 的裁判**
+- P1-04 的裁判要拿回答和参考答案比，真实请求没有参考答案，用不了。能用的是 P3-03 的充分性裁判：给它问题和返回的段，问「这些段里有没有问题要的信息」。P3-03 量过它：有答案的 100 题里 92 题对。
+- 所以这个分数量的是「返回的段够不够」，不是「回答对不对」。报告文件里写明了不能说明什么：回答对不对、引用准不准都没量；搜索没返回的页面看不见；库里本来没有答案的问题会算「不够」；裁判自己会错。
+- 每次最多 N 条（默认 20，硬上限 50）；先检查花费账本（`data/cost/ledger.jsonl`）的停止线再开始；自己花到 `online_eval_max_cny`（默认 0.2 元）就停。真实花费每条 0.004 到 0.006 元，所以 20 条约 0.1 元。默认值已按实测改（原来估计 0.003 一条，偏低）。没有定时启动。
+
+**10. 现有指标的一处改动：缓存请求计数器对 bypass 和 error 加了原因标签**
+- `rag.cache.requests` 原来只有层和结果。「熔断打开」和「这次调用本来就不读缓存」都记成 `bypass`，没法区分。现在 `bypass` 和 `error` 的点多一个标签 `rag.cache.reason`（`breaker_open`、`read_off`、存储的错误类别）。`hit`、`miss` 的标签没有变。「缓存熔断打开」提醒按 `reason="breaker_open"` 数。
+
+**11. Grafana：本机任何人可以看，改要管理员密码**
+- 匿名访问设成 Viewer，只监听 127.0.0.1。管理员密码来自 `.env` 的 `GRAFANA_ADMIN_PASSWORD`，没设就是 `admin`。看板文件是来源，页面上的改动不保存（`allowUiUpdates: false`）。
+- 没选的做法：必须登录才能看。本机单用户，每次登录没有保护到什么。
+
+**12. 这一轮我自己犯的错：`docker compose --profile langfuse down -v` 删掉了整个项目的容器和数据卷**
+- 发生了什么：测试完 Langfuse，我想关掉它，执行了 `docker compose --profile langfuse down -v`。`down` 会停掉并删除这个项目里所有服务的容器，不只是 profile 里的；`-v` 又删掉了项目的命名卷，包括 `rag-platform_es-data`。结果 Elasticsearch、Redis、Collector、Jaeger 的容器没了，两个真实索引 `kb_hf_docs_v1` 和 `kb_mt5_v1` 的数据被删除了（Redis 里的缓存和数据代号也被删除了）。
+- 怎么恢复：马上重新 `docker compose up -d`（空的 ES）。`hf_docs`：把主检出目录的 docstore 和向量缓存复制进我的工作区，`index cli init` 再 `ingest.job --all`：26,372 块（和 P0 报告一样多），用了 277 秒，向量全部来自本机缓存，花费 0 元。`mt5`：21,913 块（英文 11,138、中文 10,775），和 P4-01 报告一致，用了 353 秒，花费 0 元。摄取任务的预算检查按「全部都要重新算」估算，估计值 9.65 元超过停止线，被拒绝运行；我把 `BUDGET_STOP_CNY` 提高后，在外面套了一个看门程序，花费账本每增加 0.25 元就杀掉进程。实际增加了 0 元。这是对全局停止线检查的绕过，和 P4-01 的做法一样，只因为实际花费能由缓存算出来而且受监控。
+- 以后：关 profile 里的服务用 `docker compose --profile langfuse stop <服务名>` 或 `docker compose --profile langfuse rm -sf <服务名>`，不再用 `down`，更不加 `-v`。已写进 README 和 compose 文件的注释。

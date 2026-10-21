@@ -51,6 +51,10 @@ OK = "ok"
 ERROR = "error"
 INSANE = "insane"
 
+PROBE_REQUEST_PREFIX = "probe-"
+"""Every probe request sends `X-Request-Id: probe-<hex>`, so its business record can be told
+apart from what users asked (online sampling leaves it out)."""
+
 
 @dataclass(frozen=True)
 class ProbeConfig:
@@ -203,7 +207,12 @@ class Prober:
         began = self.clock()
         outcome, detail = ERROR, ""
         try:
-            response = self.client.post(self.config.base_url + path, json=body, timeout=timeout_s)
+            response = self.client.post(
+                self.config.base_url + path,
+                json=body,
+                timeout=timeout_s,
+                headers={"X-Request-Id": PROBE_REQUEST_PREFIX + secrets.token_hex(8)},
+            )
             if response.status_code != 200:
                 detail = f"HTTP {response.status_code}"
             else:

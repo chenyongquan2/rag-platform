@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from rag.monitor.probe import ProbeConfig, Prober
+from rag.monitor.probe import PROBE_REQUEST_PREFIX, ProbeConfig, Prober
 from rag.observe import shutdown_observability
 from rag.testing import memory_observability, metric_points
 
@@ -227,6 +227,23 @@ def test_a_unique_query_keeps_the_probe_out_of_the_result_cache(tmp_path: Path) 
         prober.probe_search()
     assert len(set(queries)) == 2 and all(q.startswith("how to push a model ") for q in queries)
     assert all(len(q.split()[-1]) <= 12 for q in queries)  # one short made-up word at the end
+
+
+def test_probe_requests_carry_a_request_id_that_marks_them(tmp_path: Path) -> None:
+    """Online sampling skips them: they are not what users asked."""
+    ids: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        ids.append(request.headers["X-Request-Id"])
+        return _ok(request)
+
+    with memory_observability():
+        prober = _prober(tmp_path, handler, ask_enabled=True)
+        prober.probe_search()
+        prober.probe_ask()
+    assert len(set(ids)) == 2
+    assert all(i.startswith(PROBE_REQUEST_PREFIX) and len(i) <= 64 for i in ids)
+    assert all(re.fullmatch(r"[A-Za-z0-9._:-]+", i) for i in ids)  # what the service accepts
 
 
 def test_the_query_is_left_alone_when_unique_queries_are_off(tmp_path: Path) -> None:

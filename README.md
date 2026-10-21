@@ -173,13 +173,17 @@ Metrics flow app -> Collector -> Prometheus -> Grafana and the alert rules. The 
 `docker compose up -d` is unchanged; the monitoring services are a profile:
 
 ```bash
-docker compose --profile monitoring up -d       # Prometheus 29090, Grafana 23000 (about 100 MB at rest, limits 512 + 384 MB)
-docker compose --profile monitoring stop        # stop them, data stays in the prometheus-data and grafana-data volumes
+docker compose --profile monitoring up -d       # Prometheus 29090, Grafana 23000 (about 100 to 150 MB at rest, limits 512 + 384 MB)
+docker compose --profile monitoring stop prometheus grafana   # stop them, data stays in their volumes
 uv run python -m rag.monitor receiver           # alerts -> data/observe/alerts.jsonl (and ALERT_WEBHOOK_URL when set)
 uv run python -m rag.monitor probe              # one fixed search_docs request every 60 s, as metrics
 uv run python -m rag.monitor prune [--dry-run]  # delete trace files past 3 days / 100 MB (safety net)
-uv run python -m rag.eval.online_sample --n 20  # judge 20 random recent requests (about 0.06 CNY); not scheduled
+uv run python -m rag.eval.online_sample --n 20  # judge 20 random recent requests (about 0.1 CNY); not scheduled
 ```
+
+**Never stop a profile with `docker compose --profile X down`**: `down` removes the containers of every
+service of the project (Elasticsearch and Redis too), and `-v` also deletes the Elasticsearch data volume.
+Use `stop <service>` or `rm -sf <service>`.
 
 - **Dashboard** `deploy/grafana/dashboards/rag-overview.json` (12 panels: request rate, error rate and
   categories, P50/P95 of `search_docs` and `ask_docs`, cache hit rate, rerank timeouts and degraded
@@ -201,11 +205,13 @@ uv run python -m rag.eval.online_sample --n 20  # judge 20 random recent request
   traces in memory (`deploy/jaeger.yaml`); Prometheus: 7 days or 1 GB. `rag.monitor prune` removes
   `data/otel/traces*` files past `TRACE_RETENTION_DAYS` / `TRACE_RETENTION_MAX_MB`.
 - **Langfuse** (LLM-call view of the traces): Langfuse v3 needs Postgres, ClickHouse, Redis and MinIO next to
-  its two app containers (about 3 GB, `docker compose --profile langfuse up -d`). Not started by default. v2
-  (Postgres only) has no OTLP endpoint, so it cannot take what the Collector sends. To use it:
+  its two app containers (about 2 GB measured at rest, limits 4.7 GB; `docker compose --profile langfuse up -d`,
+  the first start pulls about 3.5 GB of images). Not started by default. v2 (Postgres only) has no OTLP
+  endpoint, so it cannot take what the Collector sends. To use it:
   `uv run python -m rag.monitor langfuse-env` (writes the secrets to `.env`), start the profile, then
   `COLLECTOR_EXTRA=langfuse docker compose up -d otel-collector`; undo with `docker compose up -d
-  otel-collector` and `docker compose --profile langfuse down`. Details and what was tested:
+  otel-collector` and `docker compose --profile langfuse rm -sf langfuse-web langfuse-worker
+  langfuse-clickhouse langfuse-minio langfuse-redis langfuse-postgres`. Details and what was tested:
   `docs/reports/P5-report.md` section 2.
 
 After this change the Collector and Jaeger containers must be recreated once to read their new config

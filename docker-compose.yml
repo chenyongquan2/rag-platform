@@ -13,7 +13,11 @@
 # Profile `monitoring` (spec P5-02; `docker compose --profile monitoring up -d`), not started by default:
 #   Prometheus       http://127.0.0.1:29090/   (alert rules: deploy/prometheus/rules.yml)
 #   Grafana          http://127.0.0.1:23000/   (dashboard "RAG platform overview", provisioned)
-# Profile `langfuse` (several GB of memory, see README): Langfuse web http://127.0.0.1:23001/
+# Profile `langfuse` (about 2 GB of memory, see README): Langfuse web http://127.0.0.1:23001/
+# WARNING: never stop a profile with `docker compose --profile X down`. `down` removes the containers of
+# EVERY service of this project (Elasticsearch and Redis too) and `down -v` also deletes the volumes,
+# the Elasticsearch data included. Use `docker compose --profile X stop <service>...` or
+# `docker compose --profile X rm -sf <service>...`; to delete a profile's data remove its volumes by name.
 # The services P5-02 added or changed (Collector, Jaeger, Prometheus, Grafana, Langfuse) have a memory
 # limit: a container that grows past it is killed, not the machine. Elasticsearch is bounded by its heap.
 name: rag-platform
@@ -126,9 +130,9 @@ services:
       retries: 20
 
   # ---- profile `monitoring` (spec P5-02): metrics, alert rules, dashboards ----------------------
-  # Start: docker compose --profile monitoring up -d       Stop: docker compose --profile monitoring stop
-  # (`down` without the profile does not touch them). Memory: see the limits; measured use is in
-  # docs/reports/P5-report.md section 2.
+  # Start: docker compose --profile monitoring up -d
+  # Stop:  docker compose --profile monitoring stop prometheus grafana   (never `down`: see the top)
+  # Memory: see the limits; measured use is in docs/reports/P5-report.md section 2.
 
   prometheus:
     image: prom/prometheus:v2.54.1
@@ -192,7 +196,8 @@ services:
   # could not receive what the Collector sends. Secrets: `uv run python -m rag.monitor langfuse-env`
   # writes them to .env. Start: docker compose --profile langfuse up -d, then switch the
   # Collector on (deploy/otel/langfuse.yaml). Stop and free the memory: docker compose --profile
-  # langfuse down (add -v to also delete its data).
+  # langfuse rm -sf langfuse-web langfuse-worker langfuse-clickhouse langfuse-minio
+  # langfuse-redis langfuse-postgres (never `down`); its data volumes are named langfuse-*.
 
   langfuse-postgres:
     image: postgres:17-alpine
@@ -250,13 +255,17 @@ services:
     mem_limit: 1536m
     logging: *small-logs
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider -q http://localhost:8123/ping || exit 1"]
+      # 127.0.0.1, not localhost: ClickHouse cannot listen on IPv6 inside this Docker setup, and
+      # "localhost" resolves to ::1 first.
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8123/ping || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 20
 
   langfuse-minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    # The Chainguard build, as in Langfuse's own compose file (Docker Hub's minio image could not
+    # be pulled on this machine); the free tier only has the latest tag.
+    image: cgr.dev/chainguard/minio:latest
     profiles: [langfuse]
     entrypoint: sh
     command: ["-c", "mkdir -p /data/langfuse && minio server --address ':9000' /data"]
@@ -274,7 +283,7 @@ services:
       retries: 20
 
   langfuse-worker:
-    image: langfuse/langfuse-worker:3
+    image: langfuse/langfuse-worker:3.225.11  # tested version; the web image must match
     profiles: [langfuse]
     environment: &langfuse-env
       DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-}@langfuse-postgres:5432/langfuse
@@ -315,7 +324,7 @@ services:
       langfuse-minio: {condition: service_healthy}
 
   langfuse-web:
-    image: langfuse/langfuse:3
+    image: langfuse/langfuse:3.225.11  # tested: started, took OTLP traces from the Collector
     profiles: [langfuse]
     environment:
       <<: *langfuse-env
@@ -330,10 +339,11 @@ services:
       LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@localhost.test}
       LANGFUSE_INIT_USER_NAME: admin
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
-      NODE_OPTIONS: --max-old-space-size=768
+      # 768 MB of heap was not enough: the first start ran out of memory (measured, see P5 report).
+      NODE_OPTIONS: --max-old-space-size=1536
     ports:
       - "127.0.0.1:23001:3000"
-    mem_limit: 1024m
+    mem_limit: 2048m
     logging: *small-logs
     depends_on: *langfuse-deps
     healthcheck:
