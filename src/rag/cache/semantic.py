@@ -286,6 +286,29 @@ def _unit(vector: Sequence[float]) -> np.ndarray:
     return v / norm if norm > 0 else v
 
 
+class _Block:
+    """The unit vectors of one partition in one growing matrix (capacity doubles), so a lookup
+    is one matrix-vector product without copying the rows."""
+
+    def __init__(self, dim: int) -> None:
+        self.matrix = np.zeros((64, dim), dtype=np.float32)
+        self.entries: list[tuple[StoredQuery, float]] = []
+
+    def append(self, vector: np.ndarray, entry: StoredQuery, expires: float) -> None:
+        n = len(self.entries)
+        if n == self.matrix.shape[0]:
+            grown = np.zeros((n * 2, self.matrix.shape[1]), dtype=np.float32)
+            grown[:n] = self.matrix
+            self.matrix = grown
+        self.matrix[n] = vector
+        self.entries.append((entry, expires))
+
+    def drop_oldest(self, count: int) -> None:
+        n = len(self.entries)
+        self.matrix[: n - count] = self.matrix[count:n].copy()
+        del self.entries[:count]
+
+
 class MemorySemanticStore:
     """Stored questions in process memory: one matrix of unit vectors per partition and a dot
     product per lookup (exact). `max_entries` bounds one partition: the oldest are dropped."""
@@ -293,23 +316,21 @@ class MemorySemanticStore:
     def __init__(self, *, max_entries: int = 20_000) -> None:
         self.max_entries = max_entries
         self._lock = threading.Lock()
-        self._rows: dict[tuple[Any, ...], list[np.ndarray]] = {}
-        self._entries: dict[tuple[Any, ...], list[tuple[StoredQuery, float]]] = {}
+        self._blocks: dict[tuple[Any, ...], _Block] = {}
 
     def search(
         self, partition: Partition, vector: Sequence[float], *, k: int, now: float
     ) -> list[Candidate]:
-        key = partition.key()
+        query = _unit(vector)
         with self._lock:
-            rows = self._rows.get(key)
-            if not rows:
+            block = self._blocks.get(partition.key())
+            if block is None or not block.entries:
                 return []
-            matrix = np.vstack(rows)
-            entries = list(self._entries[key])
-        similarity = matrix @ _unit(vector)
-        order = np.argsort(-similarity)
+            n = len(block.entries)
+            similarity = block.matrix[:n] @ query
+            entries = list(block.entries)
         out: list[Candidate] = []
-        for i in order:
+        for i in np.argsort(-similarity):
             entry, expires = entries[int(i)]
             if expires <= now:
                 continue
@@ -321,17 +342,16 @@ class MemorySemanticStore:
     def add(
         self, partition: Partition, vector: Sequence[float], entry: StoredQuery, *, ttl_s: int
     ) -> None:
-        key = partition.key()
+        unit = _unit(vector)
         with self._lock:
-            self._rows.setdefault(key, []).append(_unit(vector))
-            self._entries.setdefault(key, []).append((entry, entry.created_at + ttl_s))
-            while len(self._rows[key]) > self.max_entries:
-                self._rows[key].pop(0)
-                self._entries[key].pop(0)
+            block = self._blocks.setdefault(partition.key(), _Block(len(unit)))
+            block.append(unit, entry, entry.created_at + ttl_s)
+            if len(block.entries) > self.max_entries:
+                block.drop_oldest(len(block.entries) - self.max_entries)
 
     def size(self) -> int:
         with self._lock:
-            return sum(len(v) for v in self._rows.values())
+            return sum(len(b.entries) for b in self._blocks.values())
 
     def close(self) -> None:
         pass

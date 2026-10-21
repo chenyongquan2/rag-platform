@@ -360,7 +360,7 @@ class ServiceSettings(BaseSettings):
     cache_semantic_threshold: float = Field(default=0.15, ge=0.0, le=1.0)
     cache_semantic_ttl_s: int = Field(default=86_400, gt=0)
     cache_semantic_lexical_guard: bool = True
-    cache_semantic_store: Literal["memory", "es"] = "memory"
+    cache_semantic_store: Literal["memory", "es"] = "es"
     cache_shadow_dir: str = "data/observe/cache"
 
     # Search service process (spec P0-09, design s16-1, s16-4). Until P8 (OAuth) every request

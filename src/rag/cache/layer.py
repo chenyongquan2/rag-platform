@@ -278,6 +278,7 @@ class ResultCache:
             "stored": run.stored,
             "not_stored_reason": run.not_stored_reason or None,
             "lookup_ms": round(run.lookup_ms, 3),
+            "store_ms": round(run.store_ms, 3),
             "age_s": round(run.age_s, 3) if run.age_s is not None else None,
             "error": run.outcome == "error",
         }

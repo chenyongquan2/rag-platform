@@ -527,6 +527,34 @@ records go to `data/observe/dev-fake/`, not to the real file); questions with `x
 (to press Cancel) and a not-found result. The JavaScript is tested with node
 (`tests/web/ui_test.js`, run by `tests/unit/test_serve_web.py`; skipped when node is missing).
 
+## Result cache (P5-01)
+
+`search_docs` and `ask_docs` (also the stream) answer an identical request from Redis. The key is
+a hash of the knowledge base, the data generation (ingestion adds 1 to it, so changed pages miss),
+the retrieval config version, for `ask_docs` the answer config version (KB `agent` and `answer`
+config, chat models, `agent_*` settings, prompt texts), the question (case, spaces and the closing
+mark removed; no stemming; a question with an identifier keeps its case), the filters, the
+caller's ACL groups, `top_k` and the language. Never written: a degraded result, a rerank
+timeout, `answer_parse_failed`, `coverage_unconfirmed`, any error category, a clarification, a
+call that used history. An `ask_docs` call with a `session_id` never reads the cache.
+
+```text
+CACHE_MODE=l1_shadow                  # off | l1 | l1_shadow (SearchService.from_settings, the serve CLI)
+uv run python -m rag.cache drop --kb hf_docs        # remove one knowledge base's entries (SCAN, UNLINK)
+uv run python -m rag.cache shadow-report [--gold evals/datasets/hf_docs/synthetic_dev.jsonl] [--max-distance 0.1]
+uv run python -m rag.cache pairs build              # evals/datasets/hf_docs/cache_pairs.jsonl
+uv run python -m rag.cache pairs evaluate [--final] # L1 false hits; guard and threshold (dev; holdout with --final)
+uv run python -m rag.cache bench --step overhead|semantic|replay|ask|down
+```
+
+Responses carry `cache: {layer, hit, outcome, age_s}` (null without a cache layer); the stream's
+`done` event carries `cache: {layer, hit, outcome}` and a hit is `progress {node: cache, phase:
+hit}`, `answer`, `done` (no `token` events). A Redis that is down or slower than
+`CACHE_TIMEOUT_MS` never fails a request: it is counted (`rag.cache.requests`, outcome `error` or
+`bypass`) and a circuit breaker stops sending for a few seconds. The semantic cache (L2) only
+records to `data/observe/cache/shadow.jsonl`; it never changes a result. Numbers and the rule for
+turning it on: `docs/reports/P5-report.md`.
+
 ## Retrieval evaluation
 
 Any retriever with `retrieve(question, kb, top_k) -> RetrievalResult` can be evaluated

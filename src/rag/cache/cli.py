@@ -72,6 +72,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="read the records as if the threshold had been this (at most the recording one)",
     )
+    bench = sub.add_parser("bench", help="measurements against the local services (P5-01)")
+    bench.add_argument(
+        "--step", required=True, choices=["overhead", "semantic", "replay", "ask", "down"]
+    )
+    bench.add_argument("--out", default="data/reports/p5-01")
+    bench.add_argument("--requests", type=int, default=400, help="replay: number of requests")
+    bench.add_argument("--questions", type=int, default=5, help="ask: number of questions")
     pairs = sub.add_parser("pairs", help="the counter-example test set")
     pairs_sub = pairs.add_subparsers(dest="pairs_command", required=True)
     build = pairs_sub.add_parser("build", help="write the pairs file from the question sets")
@@ -103,6 +110,12 @@ def main(
         return _drop(args.kb, settings, backend)
     if args.command == "shadow-report":
         return _shadow_report(args, settings)
+    if args.command == "bench":
+        from rag.cache.measure import run
+
+        result = run(args.step, repo_path(args.out), n=args.requests, questions=args.questions)
+        print(json.dumps(result, indent=2)[:6000])
+        return 0
     if args.command == "pairs" and args.pairs_command == "build":
         from rag.cache.pairs import build_pairs, write_pairs
 
