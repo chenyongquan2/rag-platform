@@ -475,6 +475,14 @@ def test_plant_errors() -> None:
         assert p.sentences[1] == original.item.sentences[1]
     assert plant(lines, n=4, seed=0) == planted  # seeded
 
+    # Only a number the cited fragment also has is changed (2019 is not in it), to a value the
+    # fragment does not have (24 is, so 12 becomes 13).
+    one = _judged_line(
+        "y", "Model y has 12 layers since 2019.", _chunk("p:y#0", "Model y: 12 layers, 24 heads.")
+    )
+    (changed,) = plant([one], n=1, seed=0)
+    assert changed.sentences[0].text == "Model y has 13 layers since 2019."
+
 
 # ---- human sheet --------------------------------------------------------------------------------
 
