@@ -47,6 +47,16 @@ TABLE_ANSWER_TOKENS = 150
 CHARS_PER_TOKEN = 3.0
 
 
+IMAGE_MARKER_PREFIX = "[Image description (written by a model"
+IMAGE_MARKER_TEMPLATE = IMAGE_MARKER_PREFIX + ", not part of the original document): {text}]"
+"""How a figure description stands in the page text: the sentence says who wrote it, so the
+answer model and the reader can tell it from the document's own words (design s5-3)."""
+
+
+def image_marker(text: str) -> str:
+    return IMAGE_MARKER_TEMPLATE.format(text=" ".join(text.split()))
+
+
 class DescribeBudgetError(RuntimeError):
     """The next model call would pass the budget of this run; nothing was sent."""
 
@@ -406,3 +416,77 @@ class GatewayTableSummarizer:
         return ModelReply(
             _text(answer), used_in, used_out, self.ledger.estimate(self.model, used_in, used_out)
         )
+
+
+# ---- the service of a process ----------------------------------------------------------------
+
+_SHARED: dict[tuple[Any, ...], ModelTextService] = {}
+_SHARED_LOCK = threading.Lock()
+
+
+def reset_shared_services() -> None:
+    """Forget the services of this process (tests, and a new run with a new budget)."""
+    with _SHARED_LOCK:
+        for service in _SHARED.values():
+            service.cache.close()
+        _SHARED.clear()
+
+
+def shared_service(
+    settings: Any = None,
+    *,
+    vision_model: str = "",
+    text_model: str = "",
+    cache_path: str | Path = "data/cache/model_text.sqlite3",
+    budget_cny: float | None = None,
+    max_px: int = 1024,
+) -> ModelTextService:
+    """The one `ModelTextService` of this process for these settings: the PDF reader (figures)
+    and the `table_summary` step (tables) share its cache, budget guard and counters, so the
+    quality report adds up everything one run spent. Chat models come from `make_chat_model`
+    (retries, the cost ledger and its stop line, `CHAT_BACKEND=fake`)."""
+    from rag.config import ServiceSettings, repo_path
+    from rag.llm.factory import make_chat_model, resolve_chat_profile
+
+    settings = settings or ServiceSettings()
+    path = repo_path(cache_path)
+    key = (str(path), vision_model, text_model, budget_cny, max_px)
+    with _SHARED_LOCK:
+        if key in _SHARED:
+            return _SHARED[key]
+        ledger = CostLedger.from_settings(settings)
+
+        def chat(model: str, max_tokens: int) -> BaseChatModel:
+            profile = resolve_chat_profile("offline", settings).model_copy(
+                update={"model": model, "max_tokens": max_tokens}
+            )
+            return make_chat_model(
+                "offline", settings.model_copy(update={"chat_offline": profile}), ledger=ledger
+            )
+
+        describer = (
+            GatewayVisionDescriber(
+                chat(vision_model, 600), model=vision_model, ledger=ledger, max_px=max_px
+            )
+            if vision_model
+            else None
+        )
+        summarizer = (
+            GatewayTableSummarizer(chat(text_model, 400), model=text_model, ledger=ledger)
+            if text_model
+            else None
+        )
+        service = ModelTextService(
+            cache=ModelTextCache(path),
+            describer=describer,
+            summarizer=summarizer,
+            guard=SpendGuard(budget_cny),
+            image_estimate_cny=estimate_image_cost(ledger, vision_model, 1)
+            if vision_model
+            else 0.0,
+            table_estimate_cny=(
+                estimate_table_cost(ledger, text_model, [1000]) if text_model else 0.0
+            ),
+        )
+        _SHARED[key] = service
+        return service

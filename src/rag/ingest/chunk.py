@@ -40,6 +40,7 @@ from rag.ingest.markdown import (
     is_table_row,
     is_title_only,
     split_fenced,
+    split_table,
 )
 from rag.ingest.meta import (
     DEFAULT_EMBED_KEYS,
@@ -222,7 +223,8 @@ class TokenSplit(SentenceSplitter):
     (`tokenizer_model`, loaded from the local HF cache when no tokenizer is passed).
     Fenced code blocks and Markdown tables are atomic when they fit; a code block larger than the
     cap is cut at line breaks into parts that each reopen and close the fence; a table larger than
-    the cap is cut between rows.
+    the cap is cut between rows, and with `repeat_table_header` (off by default, spec P6-01) every
+    part starts with the table's header row.
     """
 
     context_params: ClassVar[dict[str, str]] = {
@@ -230,6 +232,7 @@ class TokenSplit(SentenceSplitter):
         "tokenizer_model": "tokenizer_model",
     }
     tokenizer_model: str | None = Field(default=None)
+    repeat_table_header: bool = Field(default=False)
 
     def __init__(
         self,
@@ -239,6 +242,7 @@ class TokenSplit(SentenceSplitter):
         tokenizer: TokenizerFn | None = None,
         tokenizer_model: str | None = None,
         paragraph_separator: str = "\n\n",
+        repeat_table_header: bool = False,
     ) -> None:
         if tokenizer is None:
             if not tokenizer_model:
@@ -261,6 +265,7 @@ class TokenSplit(SentenceSplitter):
             id_func=_child_id,
         )
         self.tokenizer_model = tokenizer_model
+        self.repeat_table_header = repeat_table_header
 
     @classmethod
     def class_name(cls) -> str:
@@ -316,6 +321,8 @@ class TokenSplit(SentenceSplitter):
         return splits
 
     def _split_lines(self, block: str, chunk_size: int) -> list[_Split]:
+        if self.repeat_table_header:
+            return self._split_table(block, chunk_size)
         splits: list[_Split] = []
         for i, line in enumerate(block.split("\n")):
             piece = line if i == 0 else "\n" + line
@@ -324,6 +331,21 @@ class TokenSplit(SentenceSplitter):
                 splits.append(_Split(piece, is_sentence=True, token_size=size))
             else:
                 splits.extend(super()._split(piece, chunk_size))
+        return splits
+
+    def _split_table(self, block: str, chunk_size: int) -> list[_Split]:
+        lead = block[: len(block) - len(block.lstrip("\n"))]
+        body = block[len(lead) :].rstrip("\n")
+        trail = block[len(lead) + len(body) :]
+        parts = split_table(body, chunk_size, self._token_size)
+        splits: list[_Split] = []
+        for i, part in enumerate(parts):
+            text = (lead if i == 0 else "\n\n") + part + (trail if i == len(parts) - 1 else "")
+            size = self._token_size(text)
+            if size <= chunk_size:
+                splits.append(_Split(text, is_sentence=True, token_size=size))
+            else:  # one row longer than the cap: cut inside it
+                splits.extend(super()._split(text, chunk_size))
         return splits
 
     def _split_code(self, block: str, chunk_size: int) -> list[_Split]:
@@ -454,6 +476,12 @@ class MergeTiny(TransformComponent):
         out: list[BaseNode] = []
         carry: BaseNode | None = None
         for node in nodes:
+            if node.metadata.get("table_id"):  # a table chunk is never merged (spec P6-01)
+                if carry is not None:
+                    out.append(carry)
+                    carry = None
+                out.append(node)
+                continue
             if carry is not None:
                 merged = self._merge(carry, node, into_next=True)
                 if self._fits(merged):
@@ -468,7 +496,8 @@ class MergeTiny(TransformComponent):
             else:
                 out.append(node)
         if carry is not None:
-            merged = self._merge(out[-1], carry, into_next=False) if out else None
+            previous = out[-1] if out and not out[-1].metadata.get("table_id") else None
+            merged = self._merge(previous, carry, into_next=False) if previous else None
             if merged is not None and self._fits(merged):
                 out[-1] = merged
             else:
