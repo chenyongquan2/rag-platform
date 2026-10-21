@@ -156,9 +156,11 @@ METRIC_PROBE_CONSECUTIVE_FAILURES = "rag.probe.consecutive_failures"
 PROBE_KIND = "rag.probe.kind"
 PROBE_OUTCOME = "rag.probe.outcome"
 
-# Online sampling (spec P5-02, `rag.eval.online_sample`): share of sampled real requests whose
-# returned passages the judge found sufficient, 0 to 1; set once per run.
-METRIC_ONLINE_EVAL_SCORE = "rag.online_eval.score_mean"
+# Online sampling (spec P5-02, `rag.eval.online_sample`): judged hit@k and judged MRR of the last
+# sample of real requests (a judge model says which returned passages are relevant), 0 to 1;
+# set once per run.
+METRIC_ONLINE_EVAL_HIT_RATE = "rag.online_eval.judged_hit_rate"
+METRIC_ONLINE_EVAL_MRR = "rag.online_eval.judged_mrr"
 
 # User verdicts (spec P5-02): `rag.feedback` counts them by verdict (useful | not_useful).
 METRIC_FEEDBACK = "rag.feedback"

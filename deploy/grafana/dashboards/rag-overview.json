@@ -606,8 +606,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rag_online_eval_score_mean",
-          "legendFormat": "online sample score mean (0 to 1)",
+          "expr": "rag_online_eval_judged_hit_rate",
+          "legendFormat": "online sample judged hit@k (0 to 1)",
           "refId": "C"
         }
       ],

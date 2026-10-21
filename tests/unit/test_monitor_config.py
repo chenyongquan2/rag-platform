@@ -57,7 +57,8 @@ def test_the_code_exports_what_the_alerts_and_the_dashboard_rely_on() -> None:
         "rag_probe_consecutive_failures",
         "rag_probe_runs_total",
         "rag_probe_duration_seconds_bucket",
-        "rag_online_eval_score_mean",
+        "rag_online_eval_judged_hit_rate",
+        "rag_online_eval_judged_mrr",
     ):
         assert name in series, name
 

@@ -26,6 +26,7 @@ import pytest
 import yaml
 
 from rag.config import ServiceSettings
+from rag.eval.online_sample import create_online_eval_gauges
 from rag.monitor.probe import ProbeInstruments
 from rag.observe import init_observability, shutdown_observability
 from rag.observe.health import DependencyChecker, register_dependency_gauge
@@ -116,7 +117,9 @@ def _record_every_instrument() -> None:
         probe.success.set(1, attrs)
         probe.last_duration.set(0.3, attrs)
         probe.last_success.set(time.time(), attrs)
-        obs.meter.create_gauge("rag.online_eval.score_mean", unit="").set(0.75)
+        hit, mrr = create_online_eval_gauges(obs.meter)
+        hit.set(0.75)
+        mrr.set(0.5)
         obs.flush(10.0)
     finally:
         shutdown_observability()
@@ -136,7 +139,7 @@ def test_every_instrument_arrives_under_the_predicted_name_and_prometheus_holds_
         }
         return names
 
-    names = _wait_for(lambda: seen() if "rag_online_eval_score_mean" in seen() else None, 40)
+    names = _wait_for(lambda: seen() if "rag_online_eval_judged_mrr" in seen() else None, 40)
     assert names, "the Collector never showed the test service's metrics"
     missing = exported_series() - names
     assert not missing, f"series the code should export but the Collector did not show: {missing}"

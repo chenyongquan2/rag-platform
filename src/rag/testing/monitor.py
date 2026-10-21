@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from rag.eval.online_sample import create_online_eval_gauge
+from rag.eval.online_sample import create_online_eval_gauges
 from rag.monitor.probe import ProbeInstruments
 from rag.observe.health import DependencyChecker, register_dependency_gauge
 from rag.observe.metrics import Metrics
@@ -67,7 +67,7 @@ def created_instruments() -> list[tuple[str, str, str]]:
     Metrics(meter)  # type: ignore[arg-type]
     register_dependency_gauge(meter, DependencyChecker({}))  # type: ignore[arg-type]
     ProbeInstruments(meter)  # type: ignore[arg-type]
-    create_online_eval_gauge(meter)  # type: ignore[arg-type]
+    create_online_eval_gauges(meter)  # type: ignore[arg-type]
     return meter.created
 
 

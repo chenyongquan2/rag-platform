@@ -308,10 +308,12 @@ class ServiceSettings(BaseSettings):
     probe_state_path: str = "data/observe/probe_state.json"
     # Online sampling (spec P5-02, `python -m rag.eval.online_sample`): `online_eval_n` random
     # requests of the last `online_eval_window_hours` hours (never more than 50), each judged once
-    # by the sufficiency judge's model profile; the job refuses to start when its estimated cost
-    # (`online_eval_est_cny_per_call` per request) would pass the ledger's stop, and stops after
-    # `online_eval_max_cny` of its own spend.
+    # by the judge's model profile (`agent_judge_profile`), which says for each of the first
+    # `online_eval_k` returned passages whether it is relevant; the job refuses to start when its
+    # estimated cost (`online_eval_est_cny_per_call` per request) would pass the ledger's stop,
+    # and stops after `online_eval_max_cny` of its own spend.
     online_eval_n: int = Field(default=20, ge=1)
+    online_eval_k: int = Field(default=5, ge=1, le=20)
     online_eval_window_hours: float = Field(default=168.0, gt=0)
     online_eval_max_cny: float = Field(default=0.20, gt=0)
     online_eval_est_cny_per_call: float = Field(default=0.007, gt=0)
