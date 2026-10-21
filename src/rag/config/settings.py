@@ -560,6 +560,9 @@ class ServiceSettings(BaseSettings):
     auth_jwks_path: str = ""
     auth_jwks_url: str = ""
     auth_jwks_cache_s: int = Field(default=300, gt=0)
+    # A token with an unknown key id fetches the JWKS again at most this often (a new key of a
+    # rotation may wait this long; 0 fetches at once, every time).
+    auth_jwks_refetch_cooldown_s: float = Field(default=30.0, ge=0)
     auth_algorithms: list[str] = Field(default_factory=lambda: ["RS256", "ES256"], min_length=1)
     auth_leeway_s: int = Field(default=30, ge=0, le=300)
     auth_resource_url: str = ""
@@ -673,6 +676,14 @@ class ServiceSettings(BaseSettings):
             raise ValueError(f"auth_mode=oauth needs {', '.join(missing)}")
         if bool(self.auth_jwks_path) == bool(self.auth_jwks_url):
             raise ValueError("auth_mode=oauth needs exactly one of auth_jwks_path, auth_jwks_url")
+        if self.auth_jwks_url:
+            parts = urlsplit(self.auth_jwks_url)
+            local = (parts.hostname or "") in ("127.0.0.1", "localhost", "::1")
+            if parts.scheme != "https" and not (parts.scheme == "http" and local):
+                raise ValueError(
+                    "auth_jwks_url must be https (plain http only on the local machine): the "
+                    "keys decide which tokens are accepted"
+                )
         if not self.auth_callers:
             raise ValueError("auth_mode=oauth needs auth_callers (scope -> caller, acl_groups)")
         scopes = [c.scope for c in self.auth_callers]

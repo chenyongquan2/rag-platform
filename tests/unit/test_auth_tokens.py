@@ -224,3 +224,80 @@ def test_oauth_needs_a_key_source() -> None:
 def test_local_mode_needs_no_auth_settings() -> None:
     settings = ServiceSettings(_env_file=None)  # type: ignore[call-arg]
     assert settings.auth_mode == "local"
+
+
+# ---- review round 1: key removal, broken JWKS bodies, https ------------------------------------
+
+
+class MutableJwks:
+    """A local JWKS endpoint whose body a test can change."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(outer.body)))
+                self.end_headers()
+                self.wfile.write(outer.body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/jwks.json"
+
+
+@pytest.fixture
+def mutable_jwks(issuer: FakeIssuer) -> Iterator[MutableJwks]:
+    endpoint = MutableJwks(json.dumps(issuer.jwks()).encode())
+    yield endpoint
+    endpoint.server.shutdown()
+
+
+def test_a_key_removed_from_the_jwks_is_refused_after_the_cache_time(
+    issuer: FakeIssuer, mutable_jwks: MutableJwks
+) -> None:
+    settings = _oauth_settings(
+        auth_jwks_url=mutable_jwks.url, auth_jwks_cache_s=1, auth_jwks_refetch_cooldown_s=0
+    )
+    verifier = make_token_verifier(settings)
+    token = issuer.token()
+    assert verify(verifier, token) is not None
+    rotated = {"keys": [{**issuer.jwks()["keys"][0], "kid": "k-new"}]}
+    mutable_jwks.body = json.dumps(rotated).encode()
+    time.sleep(1.3)
+    assert verify(verifier, token) is None
+
+
+@pytest.mark.parametrize("body", [b'{"keys": []}', b"not json", b'{"keys": [{"kty": "zzz"}]}'])
+def test_a_broken_jwks_body_refuses_the_token_without_raising(
+    issuer: FakeIssuer, mutable_jwks: MutableJwks, body: bytes, caplog: pytest.LogCaptureFixture
+) -> None:
+    mutable_jwks.body = body
+    verifier = make_token_verifier(_oauth_settings(auth_jwks_url=mutable_jwks.url))
+    token = issuer.token()
+    with caplog.at_level("DEBUG"):
+        assert verify(verifier, token) is None
+    assert token not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("url", "ok"),
+    [
+        ("https://login.example.com/jwks", True),
+        ("http://127.0.0.1:8080/jwks", True),
+        ("http://localhost/jwks", True),
+        ("http://login.example.com/jwks", False),
+    ],
+)
+def test_a_remote_jwks_url_must_be_https_unless_local(url: str, ok: bool) -> None:
+    if ok:
+        assert _oauth_settings(auth_jwks_url=url).auth_jwks_url == url
+    else:
+        with pytest.raises(ValidationError):
+            _oauth_settings(auth_jwks_url=url)

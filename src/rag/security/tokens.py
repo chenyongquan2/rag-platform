@@ -13,7 +13,9 @@ A token is accepted only when all of these hold (PyJWT does the checks):
 - `exp` is present and not past, `nbf` (if present) not in the future, within `auth_leeway_s`.
 
 Scopes come from `scope` (space separated, RFC 9068) or `scp` (a list, as some providers
-write it); the client from `client_id`, else `azp`, else `sub`. A refused token gives `None`
+write it); the client from `client_id`, else `azp`, else `sub`. The header's `typ` is not
+checked: RFC 9068 asks for `at+jwt`, but several providers send `JWT`; audience and issuer
+already tie the token to this service. A refused token gives `None`
 (the SDK and the HTTP layer answer 401) and one log line with the reason, never the token.
 """
 
@@ -62,21 +64,30 @@ class StaticKeys:
 
 
 class RemoteKeys:
-    """Keys fetched from the issuer's JWKS URL (`PyJWKClient`, cached `cache_s` seconds; an
-    unknown `kid` refetches once, as after a key rotation)."""
+    """Keys fetched from the issuer's JWKS URL with `PyJWKClient`. Only the whole key set is
+    cached, for `cache_s` seconds: a key the issuer removed is refused at the latest `cache_s`
+    after its removal. PyJWT's per-kid key cache (`cache_keys`) stays off, because it keeps a
+    key without any time limit (review P8-01 round 1). An unknown `kid` fetches the set again,
+    at most once per `cooldown_s` seconds (PyJWT's `cooldown_duration`), so tokens with made-up
+    kids cannot make the service hammer the issuer; a newly rotated key can wait that long."""
 
-    def __init__(self, url: str, *, cache_s: int = 300, timeout_s: float = 5.0) -> None:
-        self._client = PyJWKClient(url, cache_keys=True, lifespan=cache_s, timeout=timeout_s)
+    def __init__(
+        self, url: str, *, cache_s: int = 300, cooldown_s: float = 30.0, timeout_s: float = 5.0
+    ) -> None:
+        self._client = PyJWKClient(
+            url,
+            cache_keys=False,
+            cache_jwk_set=True,
+            lifespan=cache_s,
+            cooldown_duration=cooldown_s,
+            timeout=timeout_s,
+        )
 
     def key_for(self, kid: str | None) -> PyJWK | None:
-        try:
-            if kid is None:
-                keys = self._client.get_signing_keys()
-                return keys[0] if len(keys) == 1 else None
-            return self._client.get_signing_key(kid)
-        except jwt.PyJWKClientError as exc:
-            logger.warning("JWKS: no key for kid %r: %s", kid, exc)
-            return None
+        if kid is None:
+            keys = self._client.get_signing_keys()
+            return keys[0] if len(keys) == 1 else None
+        return self._client.get_signing_key(kid)
 
 
 def _scopes(claims: Mapping[str, Any]) -> list[str]:
@@ -130,7 +141,13 @@ class JwtTokenVerifier:
             logger.info("bearer token refused: algorithm %r not allowed", alg)
             return None
         kid = header.get("kid")
-        key = self._keys.key_for(kid if isinstance(kid, str) else None)
+        try:
+            key = self._keys.key_for(kid if isinstance(kid, str) else None)
+        except Exception as exc:
+            # The JWKS could not be fetched or read (network, not JSON, no usable key): the
+            # token cannot be checked, so it is refused (401), never a 500.
+            logger.warning("bearer token refused: key lookup failed (%s)", type(exc).__name__)
+            return None
         if key is None:
             logger.info("bearer token refused: no key for kid %r", kid)
             return None
@@ -188,7 +205,11 @@ def protected_resource_metadata_url(settings: ServiceSettings) -> str | None:
 def make_token_verifier(settings: ServiceSettings) -> JwtTokenVerifier:
     """The verifier the settings describe (`auth_mode=oauth`)."""
     if settings.auth_jwks_url:
-        keys: KeySource = RemoteKeys(settings.auth_jwks_url, cache_s=settings.auth_jwks_cache_s)
+        keys: KeySource = RemoteKeys(
+            settings.auth_jwks_url,
+            cache_s=settings.auth_jwks_cache_s,
+            cooldown_s=settings.auth_jwks_refetch_cooldown_s,
+        )
     else:
         keys = StaticKeys.from_file(settings.auth_jwks_path)
     return JwtTokenVerifier(
