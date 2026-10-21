@@ -30,6 +30,7 @@ slow route is reported as timed out before the HTTP request itself is cut off.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import time
 from collections.abc import Mapping, Sequence
@@ -265,7 +266,10 @@ class EsHybridRetriever(BaseRetriever):
         )
         if wait_s <= 0:
             return None, EMBED_TIMEOUT
-        future = self._executor.submit(self._embed_model.get_query_embedding, query.query_str)
+        # copy_context: the request context (probe flag, ledger collector) must reach the thread.
+        future = self._executor.submit(
+            contextvars.copy_context().run, self._embed_model.get_query_embedding, query.query_str
+        )
         try:
             return list(future.result(timeout=wait_s)), None
         except Exception as exc:  # any failure only costs the vector route (s16-8)
@@ -288,7 +292,7 @@ class EsHybridRetriever(BaseRetriever):
         wait_s = deadline.remaining_s() / 2.0
         if wait_s <= 0:
             return None
-        future = self._cache_executor.submit(lookup, text)
+        future = self._cache_executor.submit(contextvars.copy_context().run, lookup, text)
         try:
             vector = future.result(timeout=wait_s)
         except Exception as exc:  # a cache problem only means "not cached"

@@ -1,0 +1,199 @@
+# Alert rules (spec P5-02, design s15-1). Checked by `promtool check rules` and unit-tested by
+# `promtool test rules` (deploy/prometheus/rules_test.yml); tests/unit/test_monitor_config.py checks
+# that every metric named here is one the code exports.
+#
+# How the thresholds were chosen. The numbers behind "measured" are in docs/reports/P3-report.md
+# and P5-report.md: search_docs P95 4 to 6 s (busy machine, 8 cores, no GPU), ask_docs P95 about
+# 21 s with a 30 s default deadline. "Chosen" means nobody has measured a baseline yet: the number
+# is a starting point to be moved after a week of real traffic (design s15-3: look at 7 days).
+#
+# Detection time (from the fault to the alert in the alert file): the app exports metrics every
+# 30 s (the probe every 10 s), Prometheus scrapes every 15 s and evaluates rules every 15 s, then the
+# rule's own `for:` runs. Rules built on the probe also wait for the next probe run (60 s).
+#
+# "Traffic" guards: a ratio of two small numbers is noise. Rules that divide by the request rate
+# add `and <request rate> > 0.02` (about 6 requests in 5 minutes); with less traffic than that the
+# probe is the only signal.
+
+groups:
+  - name: rag-availability
+    rules:
+      # Two probe runs in a row got no sane answer (design s15-1: "two consecutive failures"; one
+      # lost request is not worth waking anybody). The probe runs every 60 s and exports the count
+      # itself. Worst case from the fault to the alert: the fault just after a good run, failed runs
+      # at +60 s and +120 s, then up to 10 s export, 15 s scrape and 15 s evaluation: about 160 s.
+      - alert: SearchProbeFailing
+        expr: rag_probe_consecutive_failures{rag_probe_kind="search"} >= 2
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "The search probe is failing"
+          description: "The fixed search_docs request has not returned a sane answer in two or more runs in a row (error, expected page missing, or degraded). Check the service, Elasticsearch, the gateway."
+
+      # The probe process itself stopped (or the service has been down so long that no run is ok):
+      # the age of the last good run. 180 s is three probe intervals.
+      - alert: SearchProbeNoRecentSuccess
+        expr: time() - max by (rag_probe_kind) (rag_probe_last_success_timestamp_seconds{rag_probe_kind="search"}) > 180
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "No good search probe run for more than 3 minutes"
+          description: "The last good run of the search probe was more than 180 s ago. Either the service is down or the probe process stopped."
+
+      # Search works but is slow. Measured P95 is 4 to 6 s; 8 s is 1.5 times the top of that.
+      # The ask probe uses the deadline: the default is 30 s and measured P95 about 21 s.
+      - alert: ProbeSlow
+        expr: |
+          rag_probe_last_duration_seconds{rag_probe_kind="search"} > 8
+          or rag_probe_last_duration_seconds{rag_probe_kind="ask"} > 28
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A probe request took far longer than usual"
+          description: "The latest probe request took {{ $value | printf \"%.1f\" }} s (search: over 8 s, ask: over 28 s)."
+
+      # The app cannot reach Elasticsearch or Redis (checked from the app's own side every 10 s).
+      - alert: DependencyDown
+        expr: rag_dependency_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The service cannot reach {{ $labels.rag_dependency }}"
+          description: "rag_dependency_up for {{ $labels.rag_dependency }} has been 0 for a minute."
+
+      # Nothing is exporting probe metrics at all: the probe is not running. Only a warning, since
+      # a setup without the probe is allowed.
+      - alert: ProbeNotRunning
+        expr: absent(rag_probe_success{rag_probe_kind="search"})
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No probe metrics for 10 minutes"
+          description: "Start it with: uv run python -m rag.monitor probe"
+
+  - name: rag-quality
+    rules:
+      # Every rule of this group reads user requests only: `rag_request_probe!="1"` leaves the
+      # probe's requests out (the probe has its own alerts above).
+      # More than one request in ten fails. Chosen, not measured: P3 and P5 runs had no failures
+      # outside the faults that were put in on purpose. Needs some traffic.
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_outcome="error", rag_request_probe!="1"}[5m]))
+            / sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[5m])) > 0.10
+          and sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[5m])) > 0.02
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 10% of requests fail"
+          description: "Error share over 5 minutes: {{ $value | humanizePercentage }}. See the errors panel for the categories."
+
+      - alert: SearchLatencyP95High
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step="search_docs", rag_request_probe!="1"}[5m]))) > 8
+          and sum(rate(rag_requests_total{rag_tool="search_docs", rag_request_probe!="1"}[5m])) > 0.02
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "search_docs P95 is above 8 s"
+          description: "P95 over 5 minutes: {{ $value | printf \"%.1f\" }} s (measured 4 to 6 s)."
+
+      - alert: AskLatencyP95High
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step="ask_docs", rag_request_probe!="1"}[5m]))) > 30
+          and sum(rate(rag_requests_total{rag_tool="ask_docs", rag_request_probe!="1"}[5m])) > 0.02
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ask_docs P95 is above 30 s"
+          description: "P95 over 5 minutes: {{ $value | printf \"%.1f\" }} s (measured about 21 s; the default deadline is 30 s)."
+
+      # Rerank timeouts: with the model loaded and the machine idle there are none; under load 2 of 5
+      # requests timed out in the P5-01 run. One in five over 10 minutes means the machine is
+      # starved or the rerank limit is too low.
+      - alert: RerankTimeoutRateHigh
+        expr: |
+          sum(rate(rag_requests_rerank_timeout_total{rag_request_probe!="1"}[10m]))
+            / sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[10m])) > 0.20
+          and sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[10m])) > 0.02
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "One request in five hit a rerank timeout"
+          description: "Rerank timeout share over 10 minutes: {{ $value | humanizePercentage }}."
+
+      # Degraded = only one retrieval route answered (the embedding gateway or Elasticsearch's
+      # vector search failed). Same threshold as above, chosen.
+      - alert: DegradedRateHigh
+        expr: |
+          sum(rate(rag_requests_degraded_total{rag_request_probe!="1"}[10m]))
+            / sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[10m])) > 0.20
+          and sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[10m])) > 0.02
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "One request in five was answered by only one retrieval route"
+          description: "Degraded share over 10 minutes: {{ $value | humanizePercentage }}. Usually the model gateway or Elasticsearch."
+
+      # Searches where no passage reached the rerank threshold (design s15-1: "not found" going
+      # up means new documents were not ingested, or users ask what the knowledge base does not
+      # have). Chosen, not measured: no week of real traffic exists yet, so "half the requests
+      # over 30 minutes" is a starting point. Design s15-1 asks to compare with the 7 days
+      # before; change the rule to that once a week of data exists.
+      - alert: NotFoundRateHigh
+        expr: |
+          sum(rate(rag_requests_not_found_total{rag_request_probe!="1"}[30m]))
+            / sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[30m])) > 0.5
+          and sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[30m])) > 0.02
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Half the searches find nothing above the rerank threshold"
+          description: "Not-found share over 30 minutes: {{ $value | humanizePercentage }}. Check the last ingest and the questions users ask."
+
+      # The cache layer skips Redis because its breaker is open (5 failures in a row opens it).
+      # Requests still work, but every one pays the full cost.
+      - alert: CacheBreakerOpen
+        expr: sum(rate(rag_cache_requests_total{rag_cache_outcome="bypass", rag_cache_reason="breaker_open", rag_request_probe!="1"}[2m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The result cache is bypassed: its circuit breaker is open"
+          description: "Redis is failing for the cache. Check redis-cache and the cache metrics."
+
+  - name: rag-budget
+    rules:
+      # Daily budget for model calls made by the service. Chosen, not measured: the whole overnight
+      # run has 30 CNY (CLAUDE.md) and one ask_docs call costs a few hundredths of a CNY (P3 report),
+      # so 2 CNY a day is about a hundred answers: an alarm, not a plan.
+      - alert: DailyCostOverBudget
+        expr: sum(increase(rag_model_cost_total[24h])) > 2
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model cost in the last 24 hours is above 2 CNY"
+          description: "Spent {{ $value | printf \"%.2f\" }} CNY in 24 hours (from the app's counters; the cost ledger has the full list)."
+
+      # A burst of calls (a loop, a stuck retry). Chosen, not measured: a million tokens in one
+      # hour is far above what interactive use produces.
+      - alert: TokenBurnHigh
+        expr: sum(increase(rag_model_tokens_total[1h])) > 1000000
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than a million model tokens in the last hour"
+          description: "{{ $value | humanize }} tokens in the last hour."

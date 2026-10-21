@@ -137,3 +137,34 @@ METRIC_CACHE_SHADOW = "rag.cache.shadow"
 METRIC_MODEL_CALLS = "rag.model.calls"
 METRIC_MODEL_TOKENS = "rag.model.tokens"
 METRIC_MODEL_COST = "rag.model.cost"
+
+# Reachability of the stores the service needs (spec P5-02): gauge, 1 up and 0 down, per
+# dependency (elasticsearch | redis); checked from the app's side, with the app's own settings.
+METRIC_DEPENDENCY_UP = "rag.dependency.up"
+DEPENDENCY = "rag.dependency"
+
+# Scheduled probe (spec P5-02, `rag.monitor.probe`): runs by kind (search | ask) and outcome
+# (ok | error | insane), the duration of each, whether the last run was good, and when the last
+# good run was (seconds since the epoch).
+METRIC_PROBE_RUNS = "rag.probe.runs"
+METRIC_PROBE_DURATION = "rag.probe.duration"
+METRIC_PROBE_SUCCESS = "rag.probe.success"
+METRIC_PROBE_LAST_SUCCESS = "rag.probe.last_success_timestamp"
+METRIC_PROBE_LAST_DURATION = "rag.probe.last_duration"  # seconds of the latest run, any outcome
+# Runs in a row that were not ok (0 after an ok run): the alert waits for two (design s15-1).
+METRIC_PROBE_CONSECUTIVE_FAILURES = "rag.probe.consecutive_failures"
+PROBE_KIND = "rag.probe.kind"
+PROBE_OUTCOME = "rag.probe.outcome"
+# Set to "1" on every metric point recorded inside a request the probe sent (request id
+# `probe-<hex>`); user requests have no such attribute (spec P5-02).
+REQUEST_PROBE = "rag.request.probe"
+
+# Online sampling (spec P5-02, `rag.eval.online_sample`): judged hit@k and judged MRR of the last
+# sample of real requests (a judge model says which returned passages are relevant), 0 to 1;
+# set once per run.
+METRIC_ONLINE_EVAL_HIT_RATE = "rag.online_eval.judged_hit_rate"
+METRIC_ONLINE_EVAL_MRR = "rag.online_eval.judged_mrr"
+
+# User verdicts (spec P5-02): `rag.feedback` counts them by verdict (useful | not_useful).
+METRIC_FEEDBACK = "rag.feedback"
+FEEDBACK_VERDICT = "rag.feedback.verdict"

@@ -1,0 +1,272 @@
+# promtool unit tests of the alert rules: `promtool test rules deploy/prometheus/rules_test.yml`
+# (the integration test tests/integration/test_monitor_stack.py runs it in the Prometheus image).
+# Each test feeds a fault as a time series and says which alert must fire (and that none fires
+# in a healthy run).
+rule_files:
+  - rules.yml
+
+evaluation_interval: 15s
+
+tests:
+  - interval: 15s
+    name: healthy run fires nothing
+    input_series:
+      - series: 'rag_probe_success{rag_probe_kind="search"}'
+        values: '1x40'
+      - series: 'rag_probe_consecutive_failures{rag_probe_kind="search"}'
+        values: '0x40'
+      - series: 'rag_probe_last_success_timestamp_seconds{rag_probe_kind="search"}'
+        values: '0+15x40'   # moves forward with the clock, as a probe that keeps succeeding
+      - series: 'rag_probe_last_duration_seconds{rag_probe_kind="search"}'
+        values: '3x40'
+      - series: 'rag_dependency_up{rag_dependency="elasticsearch"}'
+        values: '1x40'
+      - series: 'rag_requests_total{rag_tool="search_docs", rag_outcome="ok"}'
+        values: '0+5x40'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: SearchProbeFailing
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: SearchProbeNoRecentSuccess
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: HighErrorRate
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: DependencyDown
+        exp_alerts: []
+
+  # One failed probe run (its count of 1 is seen by four scrapes, 60 s), then ok again: no alert
+  # (design s15-1 asks for two failures in a row).
+  - interval: 15s
+    name: one failed probe run does not fire
+    input_series:
+      - series: 'rag_probe_consecutive_failures{rag_probe_kind="search"}'
+        values: '0x8 1x4 0x20'
+      - series: 'rag_probe_success{rag_probe_kind="search"}'
+        values: '1x8 0x4 1x20'
+    alert_rule_test:
+      - eval_time: 2m30s
+        alertname: SearchProbeFailing
+        exp_alerts: []
+      - eval_time: 195s
+        alertname: SearchProbeFailing
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: SearchProbeFailing
+        exp_alerts: []
+
+  # The first failed run is seen at 120 s, the second at 180 s: the alert fires at the second,
+  # within 3 minutes of the first failed run.
+  - interval: 15s
+    name: two failed probe runs fire and the last success goes stale
+    input_series:
+      - series: 'rag_probe_consecutive_failures{rag_probe_kind="search"}'
+        values: '0x8 1x4 2x4 3x4 4x4 5x4 6x20'
+      - series: 'rag_probe_success{rag_probe_kind="search"}'
+        values: '1x8 0x40'
+      - series: 'rag_probe_last_success_timestamp_seconds{rag_probe_kind="search"}'
+        values: '0+15x8 105x40'   # stops moving at 105 s
+    alert_rule_test:
+      - eval_time: 165s   # one failed run so far
+        alertname: SearchProbeFailing
+        exp_alerts: []
+      - eval_time: 210s   # the second failed run (the series reaches 2 at 210 s)
+        alertname: SearchProbeFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              rag_probe_kind: search
+            exp_annotations:
+              summary: "The search probe is failing"
+              description: "The fixed search_docs request has not returned a sane answer in two or more runs in a row (error, expected page missing, or degraded). Check the service, Elasticsearch, the gateway."
+      - eval_time: 6m   # 105 s + 180 s = 285 s, plus 30 s
+        alertname: SearchProbeNoRecentSuccess
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              rag_probe_kind: search
+            exp_annotations:
+              summary: "No good search probe run for more than 3 minutes"
+              description: "The last good run of the search probe was more than 180 s ago. Either the service is down or the probe process stopped."
+
+  - interval: 15s
+    name: a dependency is down
+    input_series:
+      - series: 'rag_dependency_up{rag_dependency="elasticsearch"}'
+        values: '1x4 0x20'
+      - series: 'rag_dependency_up{rag_dependency="redis"}'
+        values: '1x24'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: DependencyDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              rag_dependency: elasticsearch
+            exp_annotations:
+              summary: "The service cannot reach elasticsearch"
+              description: "rag_dependency_up for elasticsearch has been 0 for a minute."
+
+  - interval: 15s
+    name: slow probe
+    input_series:
+      - series: 'rag_probe_last_duration_seconds{rag_probe_kind="search"}'
+        values: '2x4 12x20'
+    alert_rule_test:
+      - eval_time: 90s
+        alertname: ProbeSlow
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ProbeSlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              rag_probe_kind: search
+            exp_annotations:
+              summary: "A probe request took far longer than usual"
+              description: "The latest probe request took 12.0 s (search: over 8 s, ask: over 28 s)."
+
+  - interval: 15s
+    name: error rate over ten percent with traffic
+    input_series:
+      - series: 'rag_requests_total{rag_tool="search_docs", rag_outcome="ok"}'
+        values: '0+6x60'      # 0.4 requests per second
+      - series: 'rag_requests_total{rag_tool="search_docs", rag_outcome="error"}'
+        values: '0+3x60'      # a third of the traffic fails
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "More than 10% of requests fail"
+              description: "Error share over 5 minutes: 33.33%. See the errors panel for the categories."
+
+  - interval: 15s
+    name: errors without traffic are not an alert
+    input_series:
+      - series: 'rag_requests_total{rag_tool="search_docs", rag_outcome="error"}'
+        values: '0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+      - series: 'rag_requests_total{rag_tool="search_docs", rag_outcome="ok"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: HighErrorRate
+        exp_alerts: []
+
+  - interval: 15s
+    name: search P95 above 8 seconds
+    input_series:
+      # All requests land in the 10 s bucket: the P95 is about 9.8 s. 0.5 requests per second.
+      - series: 'rag_step_duration_seconds_bucket{rag_step="search_docs", le="5"}'
+        values: '0x80'
+      - series: 'rag_step_duration_seconds_bucket{rag_step="search_docs", le="10"}'
+        values: '0+8x80'
+      - series: 'rag_step_duration_seconds_bucket{rag_step="search_docs", le="+Inf"}'
+        values: '0+8x80'
+      - series: 'rag_requests_total{rag_tool="search_docs", rag_outcome="ok"}'
+        values: '0+8x80'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: SearchLatencyP95High
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "search_docs P95 is above 8 s"
+              description: "P95 over 5 minutes: 9.8 s (measured 4 to 6 s)."
+
+  - interval: 15s
+    name: rerank timeouts and degraded results
+    input_series:
+      - series: 'rag_requests_total{rag_tool="search_docs", rag_outcome="ok"}'
+        values: '0+10x80'
+      - series: 'rag_requests_rerank_timeout_total{rag_tool="search_docs"}'
+        values: '0+4x80'
+      - series: 'rag_requests_degraded_total{rag_tool="search_docs"}'
+        values: '0+5x80'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: RerankTimeoutRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "One request in five hit a rerank timeout"
+              description: "Rerank timeout share over 10 minutes: 40%."
+      - eval_time: 15m
+        alertname: DegradedRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "One request in five was answered by only one retrieval route"
+              description: "Degraded share over 10 minutes: 50%. Usually the model gateway or Elasticsearch."
+
+  - interval: 15s
+    name: cache breaker open
+    input_series:
+      - series: 'rag_cache_requests_total{rag_cache_layer="l1", rag_cache_outcome="bypass", rag_cache_reason="breaker_open", rag_tool="search_docs"}'
+        values: '0+1x40'
+      - series: 'rag_cache_requests_total{rag_cache_layer="l1", rag_cache_outcome="bypass", rag_cache_reason="read_off", rag_tool="ask_docs"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CacheBreakerOpen
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "The result cache is bypassed: its circuit breaker is open"
+              description: "Redis is failing for the cache. Check redis-cache and the cache metrics."
+
+  - interval: 15s
+    name: cost over the daily budget
+    input_series:
+      - series: 'rag_model_cost_total{rag_model_kind="chat"}'
+        values: '0+0.05x200'   # 0.05 CNY every 15 s
+      - series: 'rag_model_tokens_total{rag_model_kind="chat"}'
+        values: '0+2000x200'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: DailyCostOverBudget
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Model cost in the last 24 hours is above 2 CNY"
+              description: "Spent 9.00 CNY in 24 hours (from the app's counters; the cost ledger has the full list)."
+
+  - interval: 1m
+    name: not-found rate over half with traffic
+    input_series:
+      - series: 'rag_requests_total{rag_tool="search_docs", rag_outcome="ok"}'
+        values: '0+60x60'      # one request a second
+      - series: 'rag_requests_not_found_total{rag_tool="search_docs"}'
+        values: '0+42x60'      # 70 % find nothing
+      - series: 'rag_requests_not_found_total{rag_tool="search_docs", rag_request_probe="1"}'
+        values: '0+1000x60'    # the probe's requests do not count
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: NotFoundRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Half the searches find nothing above the rerank threshold"
+              description: "Not-found share over 30 minutes: 70%. Check the last ingest and the questions users ask."
+
+  - interval: 1m
+    name: a normal not-found rate is not an alert
+    input_series:
+      - series: 'rag_requests_total{rag_tool="search_docs", rag_outcome="ok"}'
+        values: '0+60x60'
+      - series: 'rag_requests_not_found_total{rag_tool="search_docs"}'
+        values: '0+6x60'       # 10 %
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: NotFoundRateHigh
+        exp_alerts: []

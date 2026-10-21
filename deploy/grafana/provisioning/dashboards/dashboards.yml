@@ -1,0 +1,14 @@
+# Loads every JSON file in /etc/grafana/dashboards (mounted from deploy/grafana/dashboards).
+# The files are the source: a change made in the Grafana page is not saved back (allowUiUpdates
+# is off); export the JSON and replace the file instead.
+apiVersion: 1
+providers:
+  - name: rag
+    orgId: 1
+    folder: RAG platform
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards

@@ -249,6 +249,15 @@ def judge_reply(*grounded: bool, usage: tuple[int, int] | None = None) -> AIMess
     )
 
 
+def relevance_reply(*relevant: bool, usage: tuple[int, int] | None = None) -> AIMessage:
+    """The online-sampling judge's structured answer: one verdict per numbered passage."""
+    return structured_reply(
+        "PassageRelevanceJudgement",
+        usage=usage,
+        passages=[{"n": i, "relevant": r} for i, r in enumerate(relevant, 1)],
+    )
+
+
 def multi_query_reply(*queries: tuple[int, list[str]], usage: tuple[int, int] | None = None) -> Any:
     """The correction step's multi-query answer: `(sub-question number, [phrasings])` pairs."""
     return structured_reply(

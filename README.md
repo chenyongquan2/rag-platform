@@ -33,7 +33,7 @@ uv run python -m rag.index.cli init --kb hf_docs    # create kb_hf_docs_v1 and t
 uv run python -m rag.index.cli status --kb hf_docs  # alias, versions, document counts, data generation
 uv run python -m rag.index.cli rebuild --kb hf_docs   # new index version, gate, alias switch (new model or chunking)
 uv run python -m rag.index.cli rollback --kb hf_docs  # alias back to the previous version, nothing deleted
-docker compose down                                 # stop (Elasticsearch data stays in the es-data volume)
+docker compose stop otel-collector jaeger           # stop named services only
 ```
 
 | Service | Image | Host address |
@@ -41,7 +41,16 @@ docker compose down                                 # stop (Elasticsearch data s
 | Elasticsearch (single node, Basic, 2 GB heap) | `docker.elastic.co/elasticsearch/elasticsearch:9.5.5` | `http://127.0.0.1:29200` |
 | Redis cache (allkeys-lru, 256 MB, no persistence) | `redis:8.10.2-alpine` | `redis://127.0.0.1:26379/0` |
 | OTel Collector (OTLP in; traces to Jaeger and `data/otel/traces.jsonl`, at most 4 x 20 MB; metrics in Prometheus format) | `otel/opentelemetry-collector-contrib:0.162.0` | gRPC `127.0.0.1:24317`, HTTP `127.0.0.1:24318`, metrics `http://127.0.0.1:28889/metrics` |
-| Jaeger (all-in-one, in-memory) | `jaegertracing/jaeger:2.22.0` | UI `http://127.0.0.1:36686` |
+| Jaeger (all-in-one, in-memory, at most 3000 traces: `deploy/jaeger.yaml`) | `jaegertracing/jaeger:2.22.0` | UI `http://127.0.0.1:36686` |
+| Prometheus (profile `monitoring`, 7 days or 1 GB) | `prom/prometheus:v2.54.1` | `http://127.0.0.1:29090` |
+| Grafana (profile `monitoring`; dashboard "RAG platform overview") | `grafana/grafana:11.3.0` | `http://127.0.0.1:23000` |
+| Langfuse v3 (profile `langfuse`, about 2 GB at rest; see Monitoring) | `langfuse/langfuse:3.225.11` and five more | `http://127.0.0.1:23001` |
+
+**Stopping:** always name the services (`docker compose stop <service>...`).
+Never run `docker compose down`: it removes the containers of every service, Elasticsearch and Redis
+included, and `down -v` deletes the Elasticsearch data. Never run `docker compose --profile X stop`
+without service names either: it stops Elasticsearch and Redis too. Do not stop `elasticsearch` or `redis-cache`
+while other checkouts or worktrees use them: they are shared.
 
 Host ports are the standard port + 20000 and bound to 127.0.0.1 only. **Elasticsearch security is
 disabled** (no TLS, no password) for local development; never expose this setup beyond the machine.
@@ -184,6 +193,78 @@ flags, timings, trace id) go to `data/observe/records/business.jsonl`. Records a
 size; `data/observe/` is git-ignored. Attribute and metric names live in
 `rag/observe/attributes.py`. Tests use `rag.testing.memory_observability()` (`OTEL_MODE=memory`);
 `OTEL_MODE=off` records nothing.
+
+## Monitoring (P5-02)
+
+Metrics flow app -> Collector -> Prometheus -> Grafana and the alert rules. The default
+`docker compose up -d` is unchanged; the monitoring services are a profile:
+
+```bash
+docker compose --profile monitoring up -d       # Prometheus 29090, Grafana 23000 (about 100 to 150 MB at rest, limits 512 + 384 MB)
+docker compose --profile monitoring stop prometheus grafana   # stop them, data stays in their volumes
+uv run python -m rag.monitor receiver           # alerts -> data/observe/alerts.jsonl (and ALERT_WEBHOOK_URL when set)
+uv run python -m rag.monitor probe              # one fixed search_docs request every 60 s, as metrics
+uv run python -m rag.monitor prune [--dry-run]  # delete trace files past 3 days / 100 MB (safety net)
+uv run python -m rag.eval.online_sample --n 20  # judge 20 random recent requests (about 0.1 CNY); not scheduled
+```
+
+**Never run `docker compose down`**, with or without `--profile` or `-v`: it removes the containers of
+every service of the project (Elasticsearch and Redis too), and `-v` also deletes the Elasticsearch data
+volume. Never run a `--profile X stop` without service names either. Name the services: `docker compose
+--profile monitoring stop prometheus grafana`.
+
+- **Dashboard** `deploy/grafana/dashboards/rag-overview.json` (16 panels: request rate, error rate and
+  categories, P50/P95 of `search_docs` and `ask_docs`, cache hit rate, rerank timeouts and degraded
+  results, tokens, CNY, model calls, probe and dependency state, probe latency, feedback, online
+  sample, not-found rate, best rerank score). Request panels leave the probe's requests out
+  (`rag_request_probe!="1"`). It is
+  provisioned from the file: edit the file, not the page. Anyone on the machine may view it; the admin
+  password is `GRAFANA_ADMIN_PASSWORD` in `.env` (default `admin`).
+- **Alerts** `deploy/prometheus/rules.yml` (14 rules; the comments say where each threshold comes from and
+  `rules_test.yml` unit-tests them with `promtool`). Prometheus sends them to the receiver on the host
+  (`host.docker.internal:29093`), which writes one line when an alert starts and one when it ends.
+  Set `ALERT_WEBHOOK_URL` to also post each line (JSON with a `text` field) to a chat webhook; the URL is
+  never logged.
+- **Probe** `SEARCH` every `PROBE_INTERVAL_S` (60) against `PROBE_URL` (default: this machine's service),
+  expecting `PROBE_EXPECTED` in one returned passage's source. The `ask_docs` check costs model calls: off by
+  default (`PROBE_ASK_ENABLED=true` turns it on), once per `PROBE_ASK_INTERVAL_S` (1800) and at most
+  `PROBE_ASK_DAILY_CAP` (3) a day, counted in `data/observe/probe_state.json`. Probe requests carry
+  `X-Request-Id: probe-<hex>`: the service neither reads nor writes the caches for them, labels their
+  metrics `rag_request_probe="1"`, and online sampling leaves them out. `SearchProbeFailing` fires
+  after two failed runs in a row (at most about 160 s after the fault). When the probe process
+  itself stops: `SearchProbeNoRecentSuccess` after about 3.5 to 4.5 minutes; the Collector drops the
+  stale probe series after 10 minutes (`metric_expiration`), which resolves that alert, and
+  `ProbeNotRunning` fires 10 minutes later (about 20 minutes after the stop).
+- **Feedback** the MCP tool `feedback(request_id, useful, comment?)` and `POST /v1/feedback` write one
+  business record keyed by the rated request and count `rag_feedback_total{verdict}`.
+- **Retention** Collector trace file: 20 MB x 4 files, 3 days (`deploy/otel-collector.yaml`); Jaeger: 3000
+  traces in memory (`deploy/jaeger.yaml`, measured 142 KB per search trace, up to 589 KB per ask trace); Prometheus: 7 days or 1 GB. `rag.monitor prune` removes
+  `data/otel/traces*` files past `TRACE_RETENTION_DAYS` / `TRACE_RETENTION_MAX_MB`.
+- **Langfuse** (LLM-call view of the traces): Langfuse v3 needs Postgres, ClickHouse, Redis and MinIO next to
+  its two app containers (about 2 GB measured at rest, limits 4,928 MiB in all; `docker compose --profile langfuse up -d`,
+  the first start pulls about 3.5 GB of images). Not started by default. v2 (Postgres only) has no OTLP
+  endpoint, so it cannot take what the Collector sends. To use it:
+  `uv run python -m rag.monitor langfuse-env` (writes the secrets to `.env`), start the profile, then
+  `COLLECTOR_EXTRA=langfuse docker compose up -d otel-collector`; undo with `docker compose up -d
+  otel-collector` and `docker compose --profile langfuse rm -sf langfuse-web langfuse-worker
+  langfuse-clickhouse langfuse-minio langfuse-redis langfuse-postgres`. Details and what was tested:
+  `docs/reports/P5-report.md` section 2.
+
+**After merging P5-02** the Collector, Jaeger, Prometheus and Grafana containers were started from the
+P5-02 worktree, so they mount that worktree's `deploy/` and the Collector writes traces into its
+`data/otel/`. Recreate them from the main checkout once (this touches neither Elasticsearch nor Redis):
+
+```bash
+cd C:/workspace/rag-platform                          # the main checkout
+docker compose up -d otel-collector jaeger            # new config, restart policy, data/otel here
+docker compose --profile monitoring up -d prometheus grafana   # or leave them stopped
+```
+
+Online sampling (`python -m rag.eval.online_sample`): one cheap judge call per sampled request gets the
+question and the first `ONLINE_EVAL_K` (5) returned passages, numbered, and says for each whether it is
+relevant (no reference answer needed). The report has judged hit@k (Wilson interval) and judged MRR
+(bootstrap interval); citation precision of `ask_docs` waits on P1-06. The seed is always written into
+the report.
 
 ## Retrieval
 
