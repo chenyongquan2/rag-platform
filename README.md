@@ -688,9 +688,12 @@ AUTH_AUDIENCE=https://docs.example.com/mcp      # `aud` this service accepts (it
 AUTH_JWKS_URL=https://login.example.com/jwks    # or AUTH_JWKS_PATH=<file>
 AUTH_CALLERS='[{"scope": "rag.support", "caller": "support", "acl_groups": ["public", "support"]},
                {"scope": "rag.read", "caller": "guest", "acl_groups": ["public"]}]'
+SERVICE_ALLOWED_HOSTS=["docs.example.com"]     # the Host name callers use (else 421)
 uv run python -m rag.serve http --host 0.0.0.0 --port 28080
+# The server speaks plain HTTP: put it behind a TLS proxy (nginx, a load balancer) and give
+# callers the https URL; a bearer token sent over plain HTTP can be read on the way.
 curl -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-     -d '{"kb": "hf_docs", "query": "push_to_hub"}' http://docs.example.com:28080/v1/search_docs
+     -d '{"kb": "hf_docs", "query": "push_to_hub"}' https://docs.example.com/v1/search_docs
 ```
 
 **Rate limit.** search_docs, ask_docs (and the stream) and get_context count per caller in a
@@ -717,8 +720,9 @@ uv run python -m rag.ops.backup export  --index kb_hf_docs_v1 --out <dir>
 uv run python -m rag.ops.backup restore --from <dir>/kb_hf_docs_v1 --index kb_hf_docs_v2
 uv run python -m rag.ops.backup verify  --source kb_hf_docs_v1 --target kb_hf_docs_v2
 uv run python -m rag.ops.backup copy-files --out <dir>/files      # docstores, embedding caches
-uv run python -m rag.ops.backup rebind-docstore --docstore data/docstore/kb_hf_docs_v1.json \
-    --index kb_hf_docs_v2 --out data/docstore/kb_hf_docs_v2.json
+uv run python -m rag.ops.backup rebind-docstore --from <dir>/kb_hf_docs_v1 \
+    --docstore data/docstore/kb_hf_docs_v1.json --index kb_hf_docs_v2 \
+    --out data/docstore/kb_hf_docs_v2.json   # refused unless the docstore belongs to the backup
 uv run python -m rag.ops.loadtest --url http://127.0.0.1:28181 --kb demo_docs --levels 1,4,8,16
 ```
 
@@ -727,8 +731,9 @@ index's uuid, then the embedding cache, then the alias switch, which also adds 1
 generation so no cache entry of before is served (`python -m rag.index.cli switch --kb hf_docs
 --version 2`). Elasticsearch snapshots (the design's way) need `path.repo`, which needs
 an Elasticsearch restart: the change is in `deploy/elasticsearch/snapshot.override.yml`, not
-applied; after applying it (when no other worktree uses Elasticsearch), register the repository
-and a daily policy:
+applied. After applying it (when no other worktree uses Elasticsearch), every later `docker
+compose` command that touches elasticsearch needs the same two `-f` files, or compose recreates
+it without the repository. Then register the repository and a daily policy:
 
 ```bash
 curl -X PUT http://127.0.0.1:29200/_snapshot/local_fs -H "Content-Type: application/json" \

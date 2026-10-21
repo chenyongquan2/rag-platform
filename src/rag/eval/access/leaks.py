@@ -15,7 +15,10 @@ retrieval layer, the result cache and the stream. For every caller and question 
 
 A leaked chunk is a chunk id in any response (passages, sources, nearest misses, below-threshold
 passages, stream events) whose knowledge base the caller may not use, or that belongs to another
-KB than the one asked. A request to a hidden KB must be refused like an unknown one
+KB than the one asked. Only chunk ids are compared: source URLs and passage text are not
+inspected, so a leak that carried another KB's text under a valid id of the asked KB would be
+missed (every layer copies the id with the text, so the id is the field to check). A request
+to a hidden KB must be refused like an unknown one
 (`kb_not_found`); a hidden KB answered with 200 counts as one exposure even without chunks. The
 target is 0 leaks and 0 exposures.
 """

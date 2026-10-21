@@ -222,6 +222,8 @@ class _Call:
     """The graph node a streamed request is in (the record of a cancelled one names it)."""
     cancel_note: dict[str, str] = field(default_factory=dict)
     """Why a streamed request is cancelled, when the stream knows (`by`: slow_client)."""
+    cleanups: list[Callable[[], None]] = field(default_factory=list)
+    """Run when the request ends, however it ends (the budget hold of an ask, P8-01)."""
 
     def elapsed_ms(self) -> float:
         return (time.perf_counter() - self.began) * 1000.0
@@ -655,14 +657,15 @@ class SearchService:
         ) as call:
             if cancel_note is not None:
                 call.cancel_note = cancel_note
-            self._admit(caller, request_id)
+            # Redis and the ledger file block: not on the event loop.
+            await asyncio.to_thread(self._admit, caller, request_id)
             if cfg is None:
                 raise ServiceError(ErrorCategory.KB_NOT_FOUND, request_id, detail=f"kb {kb!r}")
             deadline_ms = self.settings.agent_deadline_ms if deadline_ms is None else deadline_ms
             self._check_ask_args(
                 question, session_id, deadline_ms, request_id, resume_token, answer
             )
-            self._check_budget(caller, request_id)
+            await asyncio.to_thread(self._check_budget, caller, request_id, call)
             deadline = Deadline.after_ms(deadline_ms)
             pipeline = await asyncio.to_thread(self._ready_pipeline, cfg.kb, deadline, request_id)
             listener = None
@@ -988,6 +991,7 @@ class SearchService:
             config_version="",
             extra={},
         ) as call:
+            self._admit(caller, request_id)  # one record per call: limited too (P8-01)
             problem = None
             if not isinstance(rated_request_id, str) or not _REQUEST_ID.fullmatch(rated_request_id):
                 problem = "request_id must be the id of a request"
@@ -1156,13 +1160,17 @@ class SearchService:
                 retry_after_s=admission.retry_after_s,
             )
 
-    def _check_budget(self, caller: Caller, request_id: str) -> None:
+    def _check_budget(self, caller: Caller, request_id: str, call: _Call) -> None:
         """Refuse an ask_docs request before any model call when today's spending of the caller
-        or of the service, plus the request's estimate, would pass its daily budget."""
+        or of the service, plus what the asks in flight hold, plus this request's estimate,
+        would pass its daily budget; an admitted request holds its estimate until it ends."""
         if self._budget is None:
             return
-        refusal = self._budget.refusal(caller.caller_id)
-        if refusal is not None:
+        held = self._budget.hold(caller.caller_id)
+        refusal = held.refusal
+        if refusal is None:
+            call.cleanups.append(held.release)
+        else:
             raise ServiceError(
                 ErrorCategory.BUDGET_EXCEEDED,
                 request_id,
@@ -1374,6 +1382,12 @@ class SearchService:
             raise
         except Exception as exc:
             raise ServiceError(error_category(exc), request_id) from exc
+        finally:
+            for cleanup in call.cleanups:
+                try:
+                    cleanup()
+                except Exception:
+                    logger.warning("request %s: cleanup failed", request_id, exc_info=True)
 
     @staticmethod
     def _log_failure(call: _Call, category: str, exc: Exception) -> None:

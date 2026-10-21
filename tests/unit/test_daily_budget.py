@@ -189,3 +189,38 @@ def test_http_budget_refusal_is_429_with_retry_after(ledger: Path) -> None:
         assert r.headers["retry-after"] == str(6 * 3600)
         r = client.post("/v1/ask_docs/stream", json={"kb": "hf_docs", "question": "push?"})
         assert r.status_code == 429
+
+
+def test_concurrent_asks_reserve_their_estimate(ledger: Path) -> None:
+    """Review P8-01 round 1: ten asks at once with 0.03 CNY left must not all pass."""
+    b = budget(ledger, per_caller_cny=0.53, estimate_cny=0.02)  # local spent 0.5: room for 1
+    first = b.hold("local")
+    assert first.refusal is None
+    second = b.hold("local")
+    assert second.refusal is not None and second.refusal.scope == "caller"
+    first.release()
+    second.release()  # a refused hold releases nothing
+    third = b.hold("local")
+    assert third.refusal is None
+    third.release()
+    third.release()  # twice is harmless
+
+
+def test_the_service_releases_the_reservation_after_the_ask(ledger: Path) -> None:
+    service, _ = _service(ledger)
+    service._budget = budget(ledger, per_caller_cny=0.53, estimate_cny=0.02)
+    service.load()
+    creds = Credentials(transport="http")
+
+    async def two_at_once() -> list[Any]:
+        return await asyncio.gather(
+            service.ask_docs(creds, kb="hf_docs", question="push a model?"),
+            service.ask_docs(creds, kb="hf_docs", question="push a dataset?"),
+            return_exceptions=True,
+        )
+
+    results = asyncio.run(two_at_once())
+    refused = [r for r in results if isinstance(r, ServiceError)]
+    assert len(refused) == 1 and refused[0].category == ErrorCategory.BUDGET_EXCEEDED
+    # Both finished: nothing is held any more, so one more ask fits again.
+    assert asyncio.run(service.ask_docs(creds, kb="hf_docs", question="again?")).kb == "hf_docs"

@@ -231,3 +231,15 @@ def test_ask_docs_is_limited_before_the_graph_runs(tmp_path: Path) -> None:
     assert info.value.category == ErrorCategory.RATE_LIMITED
     assert info.value.retry_after_s == pytest.approx(30.0)
     assert backend.calls == []
+
+
+def test_feedback_counts_against_the_callers_minute(tmp_path: Path) -> None:
+    """Review P8-01 round 1, issue 5: feedback writes a record per call, so it is limited too."""
+    service, _ = _service(tmp_path, per_minute=2)
+    service.load()
+    creds = Credentials(transport="http")
+    for _ in range(2):
+        service.feedback(creds, rated_request_id="req-1", useful=True)
+    with pytest.raises(ServiceError) as info:
+        service.feedback(creds, rated_request_id="req-1", useful=False)
+    assert info.value.category == ErrorCategory.RATE_LIMITED

@@ -11,7 +11,10 @@ for another `open_s`. Calls that arrive while the trial is running fail at once.
 What counts: a failed call is one that ended, after the transport's own retries, in a connect
 or read error, a timeout, or a 408, 429 or 5xx answer. A 4xx answer means the gateway is up
 (the request was wrong) and counts as a success; a call stopped before sending (budget stop,
-unknown price) or cancelled counts as nothing.
+unknown price) or cancelled counts as nothing. Not counted either: a streamed answer that
+breaks while its body is read, after the 200 came back (the transport has already returned
+the response; the stream's read error reaches the caller as `llm_error` but the breaker does not
+see it). An outage shows up on the next calls, which then fail to connect or time out.
 
 One breaker per gateway URL in a process (`shared_breaker`): the three chat profiles talk to the
 same gateway. `CircuitOpenError` is an `httpx.TransportError`, so the openai SDK turns it into

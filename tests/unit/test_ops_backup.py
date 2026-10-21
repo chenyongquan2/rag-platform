@@ -110,23 +110,68 @@ def test_copy_files_copies_sqlite_consistently_and_writes_a_manifest(tmp_path: P
         db.execute("insert into t values ('v')")
     (src / "kb_x_v1.json").write_text('{"a": 1}', encoding="utf-8")
     (src / "kb_x_v1.json.tmp").write_text("partial", encoding="utf-8")
+    (src / "sub").mkdir()
+    (src / "sub" / "kb_x_v1.json").write_text('{"b": 2}', encoding="utf-8")  # same name, deeper
     manifest = copy_files([src], tmp_path / "out")
-    assert sorted(Path(m["copy"]).name for m in manifest) == ["cache.sqlite3", "kb_x_v1.json"]
-    with sqlite3.connect(tmp_path / "out" / "cache.sqlite3") as db:
+    copies = sorted(Path(m["copy"]).relative_to(tmp_path / "out").as_posix() for m in manifest)
+    assert copies == ["src/cache.sqlite3", "src/kb_x_v1.json", "src/sub/kb_x_v1.json"]
+    assert (tmp_path / "out" / "src" / "sub" / "kb_x_v1.json").read_text("utf-8") == '{"b": 2}'
+    with sqlite3.connect(tmp_path / "out" / "src" / "cache.sqlite3") as db:
         assert db.execute("select k from t").fetchall() == [("v",)]
     assert all(len(m["sha256"]) == 64 for m in manifest)
 
 
+def _backup_dir(tmp_path: Path, uuid: str) -> Path:
+    folder = tmp_path / "backup" / "kb_x_v1"
+    folder.mkdir(parents=True)
+    (folder / "meta.json").write_text(json.dumps({"uuid": uuid}), encoding="utf-8")
+    return folder
+
+
 def test_rebind_writes_a_copy_bound_to_the_new_index(tmp_path: Path) -> None:
+    # Review P8-01 round 1, issue 3: the backup folder is given and its uuid is checked.
     old = tmp_path / "kb_x_v1.json"
     store = JsonFileDocumentStore(old)
     store.set_meta(INDEX_UUID_KEY, "old-uuid")
     store.persist()
     es = FakeEs(0)
     es.indices.uuid = "new-uuid"
-    out = rebind_docstore(es, old, "kb_x_v2", tmp_path / "kb_x_v2.json")
+    backup = _backup_dir(tmp_path, "old-uuid")
+    out = rebind_docstore(es, old, "kb_x_v2", tmp_path / "kb_x_v2.json", backup=backup)
     assert (out["was"], out["now"]) == ("old-uuid", "new-uuid")
     assert JsonFileDocumentStore(tmp_path / "kb_x_v2.json").get_meta(INDEX_UUID_KEY) == "new-uuid"
     assert JsonFileDocumentStore(old).get_meta(INDEX_UUID_KEY) == "old-uuid"  # untouched
     with pytest.raises(ValueError):
-        rebind_docstore(es, old, "kb_x_v2", old)
+        rebind_docstore(es, old, "kb_x_v2", old, backup=backup)
+
+
+def test_rebind_refuses_a_docstore_of_another_index_than_the_backup(tmp_path: Path) -> None:
+    old = tmp_path / "kb_x_v1.json"
+    store = JsonFileDocumentStore(old)
+    store.set_meta(INDEX_UUID_KEY, "uuid-of-some-other-index")
+    store.persist()
+    with pytest.raises(ValueError, match="belongs to index"):
+        rebind_docstore(
+            FakeEs(0), old, "kb_x_v2", tmp_path / "out.json", backup=_backup_dir(tmp_path, "u1")
+        )
+    assert not (tmp_path / "out.json").exists()
+
+
+def test_verify_is_not_ok_when_a_knn_ranking_differs() -> None:
+    from rag.ops.backup import VerifyResult
+
+    base = {
+        "source": "a",
+        "target": "b",
+        "source_count": 1,
+        "target_count": 1,
+        "ids_equal": True,
+        "missing": 0,
+        "extra": 0,
+        "sampled": 1,
+        "sources_equal": 1,
+    }
+    good = [{"kind": "bm25", "same_top10": True}, {"kind": "knn", "same_top10": True}]
+    bad = [{"kind": "bm25", "same_top10": True}, {"kind": "knn", "same_top10": False}]
+    assert VerifyResult(**base, searches=good).ok
+    assert not VerifyResult(**base, searches=bad).ok

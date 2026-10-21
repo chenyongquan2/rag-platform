@@ -8,7 +8,8 @@ machine's shared Elasticsearch cannot have now. Until then a backup is these fil
     uv run python -m rag.ops.backup restore --from <dir>/kb_hf_docs_v1 --index <new index>
     uv run python -m rag.ops.backup verify  --source kb_hf_docs_v1 --target <new index>
     uv run python -m rag.ops.backup copy-files --out <dir>/files [--path data/docstore ...]
-    uv run python -m rag.ops.backup rebind-docstore --docstore <file> --index <new> --out <file>
+    uv run python -m rag.ops.backup rebind-docstore --from <dir>/kb_hf_docs_v1 --docstore <file> \
+        --index <new index> --out <file>
 
 `export` reads the index through a point in time (a consistent view while ingestion may write)
 sorted by `_shard_doc`, 1000 documents a page, with the vectors (`source_exclude_vectors=false`:
@@ -101,7 +102,7 @@ class VerifyResult:
             self.source_count == self.target_count
             and self.ids_equal
             and self.sources_equal == self.sampled
-            and all(s["same_top10"] for s in self.searches if s["kind"] == "bm25")
+            and all(s["same_top10"] for s in self.searches)
         )
 
 
@@ -302,16 +303,28 @@ def _sha256(path: Path) -> str:
 
 def copy_files(paths: Sequence[Path], out_dir: Path) -> list[dict[str, Any]]:
     """Copy docstores and caches: SQLite files through SQLite's backup API (a consistent copy
-    while a process may be writing), other files as they are; returns a manifest."""
+    while a process may be writing), other files as they are; returns a manifest. A folder
+    `x/` is copied to `<out>/x/` with its sub-folders, a file to `<out>/<name>`; two sources
+    that would land on the same path are refused, never merged."""
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest: list[dict[str, Any]] = []
-    files: list[Path] = []
+    pairs: list[tuple[Path, Path]] = []
     for path in paths:
-        files += sorted(p for p in path.rglob("*") if p.is_file()) if path.is_dir() else [path]
-    for src in files:
+        if path.is_dir():
+            pairs += [
+                (f, out_dir / path.name / f.relative_to(path))
+                for f in sorted(path.rglob("*"))
+                if f.is_file()
+            ]
+        else:
+            pairs.append((path, out_dir / path.name))
+    targets = [dest for _, dest in pairs]
+    if len(set(targets)) != len(targets):
+        raise ValueError("two sources would be copied to the same path; give distinct folders")
+    for src, dest in pairs:
         if src.suffix in (".tmp", ".lock"):
             continue
-        dest = out_dir / src.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
         began = time.perf_counter()
         if src.suffix in (".sqlite3", ".db"):
             source = sqlite3.connect(f"file:{src.as_posix()}?mode=ro", uri=True)
@@ -338,16 +351,26 @@ def copy_files(paths: Sequence[Path], out_dir: Path) -> list[dict[str, Any]]:
     return manifest
 
 
-def rebind_docstore(es: Any, docstore: Path, index: str, out: Path) -> dict[str, Any]:
+def rebind_docstore(
+    es: Any, docstore: Path, index: str, out: Path, *, backup: Path
+) -> dict[str, Any]:
     """Write a copy of `docstore` bound to `index`'s uuid (`rag/meta` `index_uuid`), so the next
-    ingest into the restored index trusts it. `out` must not be `docstore` itself."""
+    ingest into the restored index trusts it. `backup` is the export folder `index` was restored
+    from: the docstore must belong to the index of that backup (same uuid), else it describes
+    other chunks and is refused. `out` must not be `docstore` itself."""
     from rag.factories import JsonFileDocumentStore
     from rag.ingest.job import INDEX_UUID_KEY
 
     if out.resolve() == docstore.resolve():
         raise ValueError("write the rebound docstore to a new file (the restored index's name)")
+    meta = json.loads((backup / "meta.json").read_text(encoding="utf-8"))
     store = JsonFileDocumentStore(docstore)
     before = store.get_meta(INDEX_UUID_KEY)
+    if before != meta["uuid"]:
+        raise ValueError(
+            f"{docstore} belongs to index uuid {before!r}, the backup in {backup} to "
+            f"{meta['uuid']!r}: it does not describe the restored chunks"
+        )
     uuid = es.indices.get_settings(index=index)[index]["settings"]["index"]["uuid"]
     store.set_meta(INDEX_UUID_KEY, uuid)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -377,6 +400,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="file or folder (default: data/docstore, data/cache)",
     )
     p = sub.add_parser("rebind-docstore")
+    p.add_argument("--from", dest="src", required=True, help="the backup folder of the index")
     p.add_argument("--docstore", required=True)
     p.add_argument("--index", required=True)
     p.add_argument("--out", required=True)
@@ -401,7 +425,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = {**asdict(verified), "ok": verified.ok}
             else:
                 result = rebind_docstore(
-                    es, repo_path(args.docstore), args.index, repo_path(args.out)
+                    es,
+                    repo_path(args.docstore),
+                    args.index,
+                    repo_path(args.out),
+                    backup=repo_path(args.src),
                 )
         finally:
             es.close()

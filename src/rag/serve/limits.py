@@ -17,9 +17,10 @@ i.e. that were written inside a service request (`rag.cost.ledger` adds the curr
 caller). Summed per caller and in total; ask_docs is refused with `budget_exceeded` before any
 model call when spent + `budget_ask_estimate_cny` would pass the caller's or the service's
 limit; search_docs is still served (design: over the budget only search_docs). The ledger is
-read incrementally: only the bytes appended since the last check. Spending of the request in
-flight is not reserved: several concurrent asks of one caller can pass together and overshoot
-by their own cost.
+read incrementally: only the bytes appended since the last check. An admitted ask holds its
+estimate until it ends (`DailyBudget.hold`), so concurrent asks in one process cannot all pass
+on the same remaining money (review P8-01 round 1 measured 10 of 10 passing with 0.03 CNY left
+before this). Other processes do not see these holds.
 """
 
 from __future__ import annotations
@@ -158,6 +159,20 @@ def make_rate_limiter(settings: ServiceSettings) -> RateLimiter | None:
     )
 
 
+@dataclass
+class BudgetHold:
+    """The result of `DailyBudget.hold`: a refusal, or an admitted request's held estimate,
+    given back by `release` (once; calling it again does nothing)."""
+
+    refusal: BudgetRefusal | None
+    _release: Callable[[], None] | None = None
+
+    def release(self) -> None:
+        release, self._release = self._release, None
+        if release is not None:
+            release()
+
+
 @dataclass(frozen=True)
 class BudgetRefusal:
     scope: str  # `caller` or `service`
@@ -204,8 +219,10 @@ class DailyBudget:
         self.estimate_cny = estimate_cny
         self._clock = clock
         self._lock = threading.Lock()
+        self._hold_lock = threading.Lock()
         self._offset = 0
         self._spent: dict[tuple[date, str], float] = {}
+        self._held: dict[str, float] = {}  # estimates of the asks in flight, per caller
 
     def _read(self) -> None:
         try:
@@ -240,20 +257,39 @@ class DailyBudget:
             )
 
     def refusal(self, caller: str) -> BudgetRefusal | None:
-        """Why one more ask_docs of `caller` would pass a limit, or None."""
+        """Why one more ask_docs of `caller` would pass a limit (counting what is held), or
+        None."""
         now = self._clock().astimezone(UTC)
         tomorrow = datetime.combine(now.date() + timedelta(days=1), datetime.min.time(), UTC)
         retry_after = (tomorrow - now).total_seconds()
         limit = self.callers.get(caller, self.per_caller_cny)
         if limit > 0:
-            spent = self.spent_today(caller)
+            spent = self.spent_today(caller) + self._held.get(caller, 0.0)
             if spent + self.estimate_cny > limit:
                 return BudgetRefusal("caller", spent, limit, retry_after)
         if self.total_cny > 0:
-            spent = self.spent_today()
+            spent = self.spent_today() + sum(self._held.values())
             if spent + self.estimate_cny > self.total_cny:
                 return BudgetRefusal("service", spent, self.total_cny, retry_after)
         return None
+
+    def hold(self, caller: str) -> BudgetHold:
+        """Check and, when admitted, hold the estimate of one ask until `release`."""
+        with self._hold_lock:
+            refusal = self.refusal(caller)
+            if refusal is not None:
+                return BudgetHold(refusal)
+            self._held[caller] = self._held.get(caller, 0.0) + self.estimate_cny
+
+        def release() -> None:
+            with self._hold_lock:
+                left = self._held.get(caller, 0.0) - self.estimate_cny
+                if left > 1e-12:
+                    self._held[caller] = left
+                else:
+                    self._held.pop(caller, None)
+
+        return BudgetHold(None, release)
 
 
 def make_daily_budget(settings: ServiceSettings) -> DailyBudget | None:

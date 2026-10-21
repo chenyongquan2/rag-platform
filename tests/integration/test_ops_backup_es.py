@@ -63,7 +63,11 @@ def test_rebind_docstore_to_the_restored_index(
     store = JsonFileDocumentStore(old)
     store.set_meta(INDEX_UUID_KEY, "uuid-of-the-lost-index")
     store.persist()
-    out = rebind_docstore(es, old, target, tmp_path / f"{target}.json")
+    store.set_meta(
+        INDEX_UUID_KEY, es.indices.get_settings(index=SOURCE)[SOURCE]["settings"]["index"]["uuid"]
+    )
+    store.persist()
+    out = rebind_docstore(es, old, target, tmp_path / f"{target}.json", backup=tmp_path / SOURCE)
     uuid = es.indices.get_settings(index=target)[target]["settings"]["index"]["uuid"]
     assert out["now"] == uuid
     assert JsonFileDocumentStore(tmp_path / f"{target}.json").get_meta(INDEX_UUID_KEY) == uuid
