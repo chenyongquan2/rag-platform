@@ -30,36 +30,16 @@ single-hop one-round runs have exactly these two calls; gold page in round one 6
 for the original question (no gain).
 (e) 15 s P95 cannot be met by round one (10 s) plus the answer (3 s) without cutting (d).
 
-## Changes
-1. `agent_search_min_ms` (service setting, default 4000): a search of round >= 2 is made only when
-   `remaining - reserve >= agent_search_min_ms`; the searches that do not fit are dropped (the
-   queries are taken round-robin over the sub-questions, so a shortage keeps one phrasing of each).
-   No search possible: the node returns `stop_reason: deadline`, and the graph goes straight to the
-   answer (conditional edge), no judge call.
-2. A retrieval with `rerank_timeout` becomes a round of its scored chunks only
-   (`RetrievalRound.from_result`): scored chunks at or above the threshold are the evidence;
-   unscored ones are dropped from the round (documented: the graph has the judge and further
-   rounds, `search_docs` keeps its s16-8 behaviour); none left: the round is `not_found`.
-   `judge.above_threshold` no longer counts a chunk without a score.
-3. `EsHybridRetriever` takes `rerank_reserve_ms` (default 0 = unchanged): the query-vector wait
-   stops that much earlier (at most half of the total time limit), so rerank still has time.
-   Service setting `search_rerank_reserve_ms` (default 2000) feeds it. `search_config_version` is
-   unchanged (it does not include service settings).
-4. `retrieve_node`: `RetrievalError` in round >= 2 (rounds exist) is caught: `fallbacks` gets
-   `retrieve:<category>`, `retrieval_error` (new state and `AskResult` field) carries the category
-   (`retrieval_timeout` or `retrieval_failed`) into `error_categories`, `stop_reason` is
-   `deadline`, the run answers from what exists. Round one stays fatal.
-5. `agent_answer_reserve_ms` default 6000 (was 12000). `plan_next` needs
-   `remaining > reserve + max(agent_round_min_ms, 0.9 x previous round ms)`; the judge node
-   measures the round (set by the rewrite node) and passes it in.
-6. Cost of rewrite and judge, chosen by the P3-05 records (see the report, section 4):
-   `agent.declarative: false` for `hf_docs` (no rewrite call for a plain question; the rewrite still
-   runs for a follow-up or a two-hop question); new `agent.judge_skip_score` (None = off, `hf_docs`:
-   0.98): a sub-question that has a chunk with rerank score >= it is grounded without asking the
-   model; no sub-question left to ask: no model call. The old behaviour stays available by config.
+## Changes (as of review round 1)
+1. `agent_search_min_ms` (service setting, default 6000; measured: a whole search 4.5 s on a busy machine): a search of round >= 2 is made only when `remaining - reserve >= agent_search_min_ms`; the searches that do not fit are dropped (queries taken round-robin over the sub-questions). No search possible: `stop_reason: deadline`, straight to the answer (conditional edge), no judge call.
+2. After a rerank timeout the graph keeps scored chunks only in round >= 2 (`RetrievalRound.from_result(scored_only=)`); scored chunks at or above the threshold are the evidence, none left: `not_found`. Round one keeps the unscored fused chunks for the answer (as `search_docs`); the judge never counts unscored chunks as grounds; `rerank_timeout` stays set.
+3. The vector wait leaves `rerank_reserve_ms` for the rerank: a field of `HybridQuery`, an argument of `HybridSearch.retrieve` (default 0), passed by `retrieve_node` for round >= 2 only (`agent_rerank_reserve_ms`, 3000; at most half of the search's limit). `search_docs` and the retrieval evals do not pass it. `search_config_version` is unchanged.
+4. `retrieve_node`: `RetrievalError` in round >= 2 is caught: `fallbacks` gets `retrieve:<category>`, `AskResult.retrieval_error` (also in `AskResponse` and `error_categories`), `degraded`, `stop_reason: retrieval_error`, the run answers from earlier rounds. Round one stays fatal.
+5. `agent_answer_reserve_ms` 7000 (answer step P99 6.0 s, 6.8-7.0 s busy); `agent_answer_max_tokens` 1536 for the graph's answer model only; `plan_next` needs `remaining > reserve + max(agent_round_min_ms, 0.9 x previous round ms)`.
+6. `hf_docs`: `agent.declarative: false`; `agent.judge_skip_score: 0.98` (not for questions the route flagged two_hop or multi_hop maybe/yes; not for a sub-question whose only sure chunk is also another's; must not be below `retrieval.threshold`). Old behaviour by config.
+7. `agent.round2_on_not_enough` (default true = design 13.4): false sends a plain `not_enough` to "not found"; only `partly_enough` gets another round. Not tested with real models.
 
-Not done: "merge candidates and rerank once" under time pressure (touches the retrieval chain; the
-dropping of searches by time in 1 gives the same bound on round two).
+Not done: "merge candidates and rerank once" under time pressure (touches the retrieval chain).
 
 ## Acceptance criteria
 Unit tests in `tests/unit/test_agent_time_fixes.py` unless named.
@@ -76,6 +56,8 @@ Unit tests in `tests/unit/test_agent_time_fixes.py` unless named.
 - [x] AC11 New settings have explicit defaults and checked ranges — `test_time_fix_settings_are_named_keys_with_checked_ranges`, `test_agent_settings_defaults_and_validation` (test_agent_config.py)
 - [x] AC12 The `compare` command reports a new run beside the P3-05 records by group — `tests/unit/test_eval_agentic_subset.py`
 
+- [x] AC13 Review round 1: round one answers after a total rerank timeout; the plain search is unchanged by the reserve (1.5 s embedding, 3 s limit); only round >= 2 passes the reserve; skip guards (flagged question, shared sure chunk, threshold check); `retrieval_error` stop reason and response field; answer token cap; `round2_on_not_enough` — `test_a_completely_unscored_round_one_is_still_answered_and_flagged`, `test_a_plain_query_waits_as_before_for_a_slow_gateway`, `test_search_docs_with_a_slow_gateway_is_the_same_as_before_p3_06`, `test_only_searches_of_round_two_and_later_ask_for_the_rerank_reserve`, `test_judge_skip_is_off_for_a_question_that_may_need_two_pages`, `test_judge_skip_needs_a_sure_chunk_that_is_not_another_sub_questions_too`, `test_judge_skip_score_must_not_be_below_the_rerank_threshold`, `test_the_response_exposes_the_retrieval_error`, `test_the_graph_caps_the_answer_call_and_other_calls_keep_their_profile`, `test_round2_on_not_enough_is_on_by_default_and_plan_next_follows_it`, plus the boundary tests for the surviving mutations
+
 Existing tests changed because the spec changed: `test_agent_settings_defaults_and_validation` (answer reserve 6 s) and `test_hf_docs_sets_agent_keys` (the new hf_docs keys). No other existing test needed a change; the helper `_pipeline` / `_retriever` in two retrieval test files got an optional argument.
 
 ## Re-measure (real models, subset of the P3-05 questions)
@@ -89,9 +71,9 @@ The colloquial:05 retrieval difference (cause unknown), per-question embedding l
 hold-out set, changing the judge prompt, streaming.
 
 ## Handoff
-- Files: `src/rag/agent/{nodes,context,judge,state,graph,result,decisions}.py`, `src/rag/retrieve/{hybrid,search}.py`, `src/rag/config/{settings,kb}.py`, `src/rag/types.py` (`AskResult.retrieval_error`), `src/rag/observe/attributes.py`, `src/rag/eval/agentic/{subset,cli,runner}.py` (new `compare` command), `kb/public/hf_docs.yaml`, `README.md`, `.env.example`, tests `test_agent_time_fixes.py`, `test_eval_agentic_subset.py` and additions to `test_agent_judge.py`, `test_agent_config.py`, `test_retrieve_{hybrid,pipeline,search}.py`; `docs/decisions.md`, `docs/reports/P3-report.md` section 4. Raw records: `data/reports/p3-06{,b}/` (copy in `C:/workspace/rag-platform-data/p3-06/`).
-- Decisions (all in `docs/decisions.md`): search minimum 4 s; after a rerank timeout only scored chunks count (every round, `search_docs` unchanged); the query-vector wait leaves `search_rerank_reserve_ms` (2 s, at most half the limit; 0 = old behaviour) for rerank; a later round's `RetrievalError` is noted and answered from earlier rounds (round one still raises); answer reserve 6 s and the round minimum max(8 s, 0.9 x last round); `hf_docs`: `declarative: false`, `judge_skip_score: 0.98` (chosen on the P3-05 records, not on held-out questions). Not done: merging candidates and reranking once; run-in-parallel searches.
-- Re-measure (40 questions picked from the P3-05 records, graph run twice, 0.98 CNY of the 1.5 CNY budget): crashes 5 -> 0 in both runs; no-answer questions reaching the answer model 12/12 -> 7/12 (standard 5/12); round-two searches without any rerank score 21 -> 5 and 1; single-hop cost 0.0121 -> 0.0057 CNY, median 12.1 -> 6.4/7.5 s; the 11 "needs another round" questions cut by the deadline 8 -> 2 and 0; judge-3 answers on the 23 answerable ones 16 -> 19 and 18 (standard 18). P95 of the whole subset got longer (20.7 -> 27 s) and the 15 s target is still missed.
-- Open issues: the machine was busy (CPU 42-64% before, median 98%/85% during the runs; rerank batch of 8 took 6.5-9.8 s), so timings are directions only; the second run had gateway trouble (3 answer-model and 14 small-model timeouts, which broke three two-hop questions); the judge fallback to rules still says "enough" for any chunk above the threshold when the model has no time (no-answer:03, :18, :19 reach the answer model that way); the `retrieval_error` path was only exercised by unit tests; the full 150-question rerun on a quiet machine is a follow-up (about 1.5 CNY plus judge).
-- Not verified: headline accuracy (the subset was picked from the questions that went wrong, the skip threshold was chosen on the same records); run-to-run variation beyond two runs; quiet-machine latency.
-- Review rounds: 0 (author only).
+- Files: `src/rag/agent/{nodes,context,judge,state,graph,result,decisions,runtime}.py`, `src/rag/retrieve/{hybrid,search,query}.py`, `src/rag/llm/factory.py` (`max_tokens`), `src/rag/config/{settings,kb}.py`, `src/rag/types.py`, `src/rag/serve/{schema,mcp_server,service,devfake}.py`, `src/rag/testing/{agent,serve}.py`, `src/rag/observe/attributes.py`, `src/rag/eval/agentic/{subset,cli,runner}.py` (`compare`), `kb/public/hf_docs.yaml`, `README.md`, `.env.example`, tests `test_agent_time_fixes.py`, `test_eval_agentic_subset.py` and additions to `test_agent_judge.py`, `test_agent_config.py`, `test_llm.py`, `test_retrieve_{hybrid,pipeline,search}.py`; `docs/decisions.md`, `docs/reports/P3-report.md` section 4. Raw records: `data/reports/p3-06{,b}/` (copy in `C:/workspace/rag-platform-data/p3-06/`).
+- Decisions: see `docs/decisions.md` (P3-06). Review round 1 corrected two over-reaches: the rerank reserve changed `search_docs` (now per call, round >= 2 only) and a rerank timeout in round one gave a false "not found" (now only round >= 2 is scored-only).
+- Re-measure (40 questions picked from the P3-05 records, graph run twice, 0.98 CNY of 1.5): run with the code of commit `cf936c7`, i.e. BEFORE the review-round-1 changes; those changes were not re-measured. Crashes 5 -> 0 of 10 attempts (not seen again); no-answer questions reaching the answer model 12/12 -> 7/12 (standard 5/12); round-two searches without a rerank score 21/40 -> 5/21 and 1/38; single-hop cost 0.0121 -> 0.0057 CNY, median 12.1 -> 6.4/7.5 s; the six changes were made together, so no gain is attributable to one; before ran on a quieter machine than after. P95 of the subset got longer (20.7 -> 27 s); 15 s target missed.
+- Open issues: the review-round changes need a re-measure on a quiet machine; `round2_on_not_enough` untested with models; the skip rule still falsely skips 5 of 100 answerable questions at 0.98 and unflagged two-hop questions are exposed; judge fallback to rules says "enough" for any chunk above the threshold when the model has no time; the second run had gateway trouble.
+- Not verified: headline accuracy; quiet-machine latency; run-to-run variation beyond two runs.
+- Review rounds: 1 (CHANGES: the two over-reaches above, S1-S5, the `round2_on_not_enough` switch, nits; all addressed).

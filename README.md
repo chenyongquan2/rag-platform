@@ -348,9 +348,14 @@ accumulate and are deduplicated by chunk id. No round starts that cannot finish
 must be left, else `stop_reason: deadline`). A search of round two or later is made only with
 `AGENT_SEARCH_MIN_MS` before the answer's time (the ones that do not fit are dropped, one phrasing
 of every sub-question first; none fits: `stop_reason: deadline` and straight to the answer); after
-a rerank timeout only the chunks the reranker scored are kept; a search of a later round that
-fails (`retrieval_timeout` / `retrieval_failed` in the categories, `degraded`) does not fail the
-request: it is answered from the earlier rounds. Round one still fails the request. When no
+a rerank timeout in round two or later only the chunks the reranker scored are kept (in round
+one the unscored fused chunks stay for the answer, as in `search_docs`; the judge never counts
+them as grounds; `rerank_timeout` stays set either way: it says the search was cut short); a
+search of a later round that fails does not fail the request: `stop_reason: retrieval_error`,
+`retrieval_error` (`retrieval_timeout` / `retrieval_failed`, also in `error_categories`),
+`degraded`, and it is answered from the earlier rounds. Round one still fails the request. A
+question the route flagged as possibly needing two pages, and a sub-question whose only sure
+chunk is also another's, are never settled by `agent.judge_skip_score` alone. When no
 new phrasing can be made (model failure, every phrasing refused, or `agent.rewrite` off) the run
 stops with `stop_reason: no_new_query`. Three rounds with nothing above the threshold are a plain
 `not_found` (no stop reason) with `nearest`, the closest chunks of all rounds; part of the
@@ -375,7 +380,8 @@ no accuracy, which would only be the share of "not enough" labels). `--rescue` a
 | Setting (env var) | Default | Meaning |
 |---|---|---|
 | `AGENT_DEADLINE_MS` | 30000 | Total time of one request; at most `SEARCH_MAX_DEADLINE_MS` |
-| `AGENT_ANSWER_RESERVE_MS` | 6000 | Time kept for writing the answer (below the deadline); the answer step took a median 2.6 s, at most 6.0 s in P3-05 |
+| `AGENT_ANSWER_RESERVE_MS` | 7000 | Time kept for writing the answer (below the deadline); answer step P99 6.0 s over 208 graph answers, 6.8-7.0 s on a busy machine (P3-05, P3-06) |
+| `AGENT_ANSWER_MAX_TOKENS` | 1536 | Output tokens (reasoning included) of the graph's answer call; P99 of 208 answers was 731 (P3-06) |
 | `AGENT_RECURSION_LIMIT` | 25 | LangGraph steps of one run (6 for one round, 3 more per further round) |
 | `AGENT_TOKEN_CAP` | 20000 | Model tokens of one request |
 | `AGENT_ANSWER_RESERVE_TOKENS` | 6000 | Tokens calls before the answer must leave (below the cap) |
@@ -390,8 +396,8 @@ no accuracy, which would only be the share of "not enough" labels). `--rescue` a
 | `AGENT_JUDGE_CONTEXT_TOKENS` | 1500 | Estimated tokens of fragments shown to the judge |
 | `AGENT_ROUND_MIN_MS` | 8000 | Time one more round needs, on top of the answer's time (floor; see `AGENT_ROUND_RATIO`) |
 | `AGENT_ROUND_RATIO` | 0.9 | A further round also needs this share of the last round's time (P3-06) |
-| `AGENT_SEARCH_MIN_MS` | 4000 | Least time a search of round two or later gets (after the answer's time); with less it is not made (P3-06) |
-| `SEARCH_RERANK_RESERVE_MS` | 2000 | The query-vector wait ends this long (at most half the limit) before the deadline, so the rerank has time (P3-06) |
+| `AGENT_SEARCH_MIN_MS` | 6000 | Least time a search of round two or later gets (after the answer's time); with less it is not made; a whole search took 4.5 s on a busy machine (P3-06) |
+| `AGENT_RERANK_RESERVE_MS` | 3000 | The query-vector wait of a round-two search ends this long (at most half its limit) before its deadline, so the rerank has time; `search_docs` is not affected (P3-06) |
 | `SSE_HEARTBEAT_S` | 10 | Seconds of silence before the stream sends a heartbeat comment line |
 | `SSE_QUEUE_MAX_EVENTS` | 5000 | Events of one stream waiting for the client; past it the run is cancelled |
 | `SERVICE_SHUTDOWN_TIMEOUT_S` | 5 | Seconds the server waits for connections to close at shutdown |
