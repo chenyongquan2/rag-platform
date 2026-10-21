@@ -90,7 +90,10 @@ retrieval:
   expand: none                      # summary chunks sit after the page's other chunks; no neighbours
   expand_window: 1
   expand_max_tokens: 4000
-  replace_table_summaries: true     # a summary hit becomes its table chunk before the rerank (s7-2)
+  replace_table_summaries: true     # a summary hit becomes its table chunk (design s7-2) ...
+  replace_table_summaries_after_rerank: true   # ... after the rerank: the cross-encoder scores the
+                                    # summary sentence, the table takes its place (P6-01 ablation:
+                                    # rank-1 hits 17 of 22 against 15 of 22 with the table scored)
 eval:
   dir: evals/datasets/pdf_demo
   questions: questions.jsonl

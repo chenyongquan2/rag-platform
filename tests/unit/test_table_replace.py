@@ -279,6 +279,7 @@ def test_search_config_version_ignores_replace_table_summaries_when_off() -> Non
     dump = cfg.model_dump(mode="json", exclude={"description", "agent"})
     dump["retrieval"].pop("dedupe_by_page_key")
     dump["retrieval"].pop("replace_table_summaries")
+    dump["retrieval"].pop("replace_table_summaries_after_rerank")  # spec P6-01
     payload = {
         "kb_config": dump,
         "embed_model": "e@1",

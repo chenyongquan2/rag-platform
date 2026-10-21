@@ -180,9 +180,9 @@ def test_pdf_demo_uses_the_same_search_chain(cfg: KnowledgeBaseConfig) -> None:
     assert type(pipeline) is SearchPipeline
     assert [type(p) for p in pipeline.postprocessors] == [
         TextDedupe,
-        TableSummaryReplace,
         BatchedTimeoutRerank,
         RerankThreshold,
+        TableSummaryReplace,  # the table takes its summary's place after the rerank
     ]
     assert pipeline.retriever.config == cfg.retrieval
 

@@ -139,6 +139,9 @@ class RetrievalConfig(_Strict):
     - `replace_table_summaries` (spec P6-01): a hit on the summary chunk of a table is replaced by
       the table's own chunk(s) before the rerank, so the answer sees the table, not the summary
       (design s7-2). Off for knowledge bases without table summaries.
+    - `replace_table_summaries_after_rerank`: do that replacement after the reranker and the
+      threshold instead of before the reranker: the cross-encoder then scores the summary, and the
+      table takes its place and its rerank score. Only used with `replace_table_summaries`.
     - `dedupe_by_page_key`: a page that exists in several languages (CHM manuals share a
       `page_key`, design s8-4) keeps one version in the result, the one in the question's
       language (spec P4-01). Off for knowledge bases without such pages.
@@ -160,6 +163,7 @@ class RetrievalConfig(_Strict):
     expand_max_tokens: int = Field(default=4000, gt=0)
     dedupe_by_page_key: bool = False
     replace_table_summaries: bool = False
+    replace_table_summaries_after_rerank: bool = False
 
     @model_validator(mode="after")
     def _rrf_weights_per_route(self) -> Self:

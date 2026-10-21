@@ -31,6 +31,7 @@ from pydantic import PrivateAttr
 from rag.retrieve.filters import build_es_filter
 from rag.retrieve.hybrid import SOURCE_FIELDS
 from rag.retrieve.query import HybridQuery
+from rag.retrieve.rerank import RERANK_SCORE
 
 TABLE_SUMMARY = "table_summary"
 TABLE = "table"
@@ -146,7 +147,11 @@ class TableSummaryReplace(BaseNodePostprocessor):
                     metadata={
                         **part.metadata,
                         MATCHED_SUMMARY: item.node.node_id,
-                        **{k: meta[k] for k in ("route_ranks", "route_scores") if k in meta},
+                        **{
+                            k: meta[k]
+                            for k in ("route_ranks", "route_scores", RERANK_SCORE)
+                            if k in meta
+                        },
                     },
                 )
                 add(NodeWithScore(node=replaced, score=item.score))
