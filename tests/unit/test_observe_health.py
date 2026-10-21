@@ -115,3 +115,60 @@ def test_the_server_command_registers_the_gauge(monkeypatch: pytest.MonkeyPatch)
     )
     assert cli.main(["stdio"], settings=settings, service_factory=factory, run_stdio=run_stdio) == 0
     assert seen == {"elasticsearch": 0, "redis": 0}
+
+
+def test_from_settings_uses_the_factories_so_credentials_in_the_url_work(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review P5-02 round 1, issue 5: `urllib` on an ES URL with `user:password@` never
+    authenticates, so the gauge said "down" forever. The checks go through the factories (which
+    turn the user info into basic auth), and no URL is ever logged."""
+    import logging
+
+    from rag import factories
+    from rag.testing import observe_settings
+
+    secret_es = "http://elastic:s3cret-pw@127.0.0.1:9200"
+    secret_redis = "redis://:r3dis-pw@127.0.0.1:6379/0"
+    seen: dict[str, str] = {}
+
+    class FakeEs:
+        def __init__(self, up: bool) -> None:
+            self.up = up
+
+        def ping(self) -> bool:
+            return self.up
+
+        def close(self) -> None:
+            pass
+
+    class FakeRedis:
+        def ping(self) -> bool:
+            raise ConnectionError(f"Error connecting to {secret_redis}")
+
+        def close(self) -> None:
+            pass
+
+    state = {"es_up": True}
+
+    def fake_es(url: str, **kwargs: object) -> FakeEs:
+        seen["es"] = url
+        return FakeEs(state["es_up"])
+
+    def fake_redis(url: str, **kwargs: object) -> FakeRedis:
+        seen["redis"] = url
+        return FakeRedis()
+
+    monkeypatch.setattr(factories, "make_es_client", fake_es)
+    monkeypatch.setattr(factories, "make_redis_client", fake_redis)
+    clock = Clock()
+    checker = DependencyChecker.from_settings(
+        observe_settings(es_url=secret_es, redis_url=secret_redis), clock=clock
+    )
+    with caplog.at_level(logging.DEBUG, logger="rag.observe.health"):
+        assert checker.status() == {"elasticsearch": True, "redis": False}
+        state["es_up"] = False  # ping() answers False instead of raising
+        clock.now += 60
+        assert checker.status() == {"elasticsearch": False, "redis": False}
+    assert seen == {"es": secret_es, "redis": secret_redis}
+    assert "s3cret-pw" not in caplog.text and "r3dis-pw" not in caplog.text

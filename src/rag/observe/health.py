@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-import urllib.request
 from collections.abc import Callable, Iterable, Mapping
 
 from opentelemetry.metrics import CallbackOptions, Meter, Observation
@@ -51,28 +50,37 @@ class DependencyChecker:
         return tuple(self._checks)
 
     @classmethod
-    def from_settings(cls, settings: ServiceSettings) -> DependencyChecker:
+    def from_settings(
+        cls, settings: ServiceSettings, *, clock: Callable[[], float] = time.monotonic
+    ) -> DependencyChecker:
+        """Checks built with the factories (design s16-7), so `user:password@` in a connection
+        string becomes authentication exactly as for the app's own clients. Nothing here logs a
+        URL: a connection string may hold a password."""
+        from rag import factories
+
         timeout = settings.dependency_check_timeout_s
 
         def elasticsearch() -> None:
-            url = settings.es_url.rstrip("/") + "/"
-            with urllib.request.urlopen(url, timeout=timeout) as response:
-                if response.status != 200:
-                    raise OSError(f"Elasticsearch answered {response.status}")
+            client = factories.make_es_client(
+                settings.es_url, request_timeout=timeout, max_retries=0
+            )
+            try:
+                if not client.ping():  # False, not an exception, when it cannot connect
+                    raise OSError("Elasticsearch did not answer the ping")
+            finally:
+                client.close()
 
         def redis() -> None:
-            import redis as redis_lib
-
-            client = redis_lib.Redis.from_url(
-                settings.redis_url, socket_connect_timeout=timeout, socket_timeout=timeout
-            )
+            client = factories.make_redis_client(settings.redis_url, socket_timeout=timeout)
             try:
                 client.ping()
             finally:
                 client.close()
 
         return cls(
-            {"elasticsearch": elasticsearch, "redis": redis}, ttl_s=settings.dependency_check_ttl_s
+            {"elasticsearch": elasticsearch, "redis": redis},
+            ttl_s=settings.dependency_check_ttl_s,
+            clock=clock,
         )
 
     def status(self) -> dict[str, bool]:
@@ -85,7 +93,8 @@ class DependencyChecker:
                         check()
                         self._verdicts[name] = True
                     except Exception as exc:  # any failure of a check means "not reachable"
-                        logger.debug("dependency %s check failed: %s", name, exc)
+                        # Only the type: a client's message can quote its URL (and password).
+                        logger.debug("dependency %s check failed: %s", name, type(exc).__name__)
                         self._verdicts[name] = False
                 self._at = now
             return dict(self._verdicts)
