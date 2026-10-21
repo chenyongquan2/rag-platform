@@ -54,6 +54,7 @@ def test_the_code_exports_what_the_alerts_and_the_dashboard_rely_on() -> None:
         "rag_probe_success",
         "rag_probe_last_success_timestamp_seconds",
         "rag_probe_last_duration_seconds",
+        "rag_probe_consecutive_failures",
         "rag_probe_runs_total",
         "rag_probe_duration_seconds_bucket",
         "rag_online_eval_score_mean",
@@ -127,6 +128,9 @@ def test_alert_thresholds_follow_the_measured_numbers() -> None:
     assert "> 2" in rules["DailyCostOverBudget"]
     assert "> 180" in rules["SearchProbeNoRecentSuccess"]
     assert "breaker_open" in rules["CacheBreakerOpen"]
+    # two probe failures in a row, not one (design s15-1; review P5-02 round 1, issue 2)
+    assert "rag_probe_consecutive_failures" in rules["SearchProbeFailing"]
+    assert ">= 2" in rules["SearchProbeFailing"]
 
 
 def test_every_tested_alert_exists_and_the_fault_alerts_are_tested() -> None:

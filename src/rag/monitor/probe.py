@@ -17,7 +17,9 @@ request that never arrives; so a client outside the service asks one fixed quest
 The metrics (`rag.observe.attributes`): `rag.probe.runs{kind,outcome}`, `rag.probe.duration{kind}`,
 gauge `rag.probe.success{kind}` (1 after an ok run, 0 after any other) and gauge
 `rag.probe.last_success_timestamp{kind}` (seconds since the epoch of the last ok run: it stays
-where it was while runs fail, so an alert can say "no good run for 3 minutes").
+where it was while runs fail, so an alert can say "no good run for 3 minutes") and gauge
+`rag.probe.consecutive_failures{kind}` (runs in a row that were not ok; the critical alert waits
+for two, design s15-1, so one lost request does not wake anybody).
 
 The `ask` run costs model calls. It is off by default, runs at most once per `ask_interval_s`, and
 at most `ask_daily_cap` times per UTC day; the count is kept in `state_path`, so restarting the
@@ -136,6 +138,11 @@ class ProbeInstruments:
             unit="s",
             description="Unix time of the last ok probe run",
         )
+        self.consecutive_failures = meter.create_gauge(
+            attr.METRIC_PROBE_CONSECUTIVE_FAILURES,
+            unit="{run}",
+            description="Probe runs in a row that were not ok (0 after an ok run)",
+        )
 
 
 @dataclass
@@ -145,6 +152,7 @@ class Prober:
     clock: Callable[[], float] = time.time
     _next_search: float = field(default=0.0, init=False)
     _state: _State | None = field(default=None, init=False)
+    _failures: dict[str, int] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         self._metrics = ProbeInstruments(get_observability().meter)
@@ -230,6 +238,8 @@ class Prober:
         return ProbeResult(kind, outcome, duration, detail)
 
     def _record(self, kind: str, outcome: str, duration_s: float) -> None:
+        failures = 0 if outcome == OK else self._failures.get(kind, 0) + 1
+        self._failures[kind] = failures
         try:
             attrs = {attr.PROBE_KIND: kind}
             m = self._metrics
@@ -237,6 +247,7 @@ class Prober:
             m.duration.record(duration_s, attrs)
             m.success.set(1 if outcome == OK else 0, attrs)
             m.last_duration.set(duration_s, attrs)
+            m.consecutive_failures.set(failures, attrs)
             if outcome == OK:
                 m.last_success.set(self.clock(), attrs)
         except Exception:

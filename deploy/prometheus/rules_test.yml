@@ -1,5 +1,5 @@
 # promtool unit tests of the alert rules: `promtool test rules deploy/prometheus/rules_test.yml`
-# (the integration test tests/integration/test_monitor_rules.py runs it in the Prometheus image).
+# (the integration test tests/integration/test_monitor_stack.py runs it in the Prometheus image).
 # Each test feeds a fault as a time series and says which alert must fire (and that none fires
 # in a healthy run).
 rule_files:
@@ -13,6 +13,8 @@ tests:
     input_series:
       - series: 'rag_probe_success{rag_probe_kind="search"}'
         values: '1x40'
+      - series: 'rag_probe_consecutive_failures{rag_probe_kind="search"}'
+        values: '0x40'
       - series: 'rag_probe_last_success_timestamp_seconds{rag_probe_kind="search"}'
         values: '0+15x40'   # moves forward with the clock, as a probe that keeps succeeding
       - series: 'rag_probe_last_duration_seconds{rag_probe_kind="search"}'
@@ -35,18 +37,42 @@ tests:
         alertname: DependencyDown
         exp_alerts: []
 
+  # One failed probe run (its count of 1 is seen by four scrapes, 60 s), then ok again: no alert
+  # (design s15-1 asks for two failures in a row).
   - interval: 15s
-    name: probe failing and stale
+    name: one failed probe run does not fire
     input_series:
+      - series: 'rag_probe_consecutive_failures{rag_probe_kind="search"}'
+        values: '0x8 1x4 0x20'
+      - series: 'rag_probe_success{rag_probe_kind="search"}'
+        values: '1x8 0x4 1x20'
+    alert_rule_test:
+      - eval_time: 2m30s
+        alertname: SearchProbeFailing
+        exp_alerts: []
+      - eval_time: 195s
+        alertname: SearchProbeFailing
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: SearchProbeFailing
+        exp_alerts: []
+
+  # The first failed run is seen at 120 s, the second at 180 s: the alert fires at the second,
+  # within 3 minutes of the first failed run.
+  - interval: 15s
+    name: two failed probe runs fire and the last success goes stale
+    input_series:
+      - series: 'rag_probe_consecutive_failures{rag_probe_kind="search"}'
+        values: '0x8 1x4 2x4 3x4 4x4 5x4 6x20'
       - series: 'rag_probe_success{rag_probe_kind="search"}'
         values: '1x8 0x40'
       - series: 'rag_probe_last_success_timestamp_seconds{rag_probe_kind="search"}'
         values: '0+15x8 105x40'   # stops moving at 105 s
     alert_rule_test:
-      - eval_time: 3m   # failed at 2 min: not yet a full minute
+      - eval_time: 165s   # one failed run so far
         alertname: SearchProbeFailing
         exp_alerts: []
-      - eval_time: 4m
+      - eval_time: 3m     # the second failed run
         alertname: SearchProbeFailing
         exp_alerts:
           - exp_labels:
@@ -54,7 +80,7 @@ tests:
               rag_probe_kind: search
             exp_annotations:
               summary: "The search probe is failing"
-              description: "The fixed search_docs request has not returned a sane answer (error, expected page missing, or degraded). Check the service, Elasticsearch, the gateway."
+              description: "The fixed search_docs request has not returned a sane answer in two or more runs in a row (error, expected page missing, or degraded). Check the service, Elasticsearch, the gateway."
       - eval_time: 6m   # 105 s + 180 s = 285 s, plus 30 s
         alertname: SearchProbeNoRecentSuccess
         exp_alerts:

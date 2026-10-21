@@ -382,3 +382,24 @@ def test_config_comes_from_settings(tmp_path: Path) -> None:
     assert config.base_url == "http://127.0.0.1:29001"
     assert config.interval_s == 30 and config.ask_enabled is False
     assert config.ask_daily_cap == settings.probe_ask_daily_cap
+
+
+def test_consecutive_failures_count_failed_runs_and_reset_on_success(tmp_path: Path) -> None:
+    """Review P5-02 round 1, issue 2: the alert waits for two failed runs in a row (design
+    s15-1), so the probe exports how many runs in a row have failed."""
+    clock = Clock()
+    answers = iter(
+        [
+            httpx.Response(500),
+            httpx.Response(200, json=_search_body(chunks=[])),
+            httpx.Response(200, json=_search_body()),
+            httpx.Response(503),
+        ]
+    )
+    seen: list[float | None] = []
+    with memory_observability() as obs:
+        prober = _prober(tmp_path, lambda request: next(answers), clock)
+        for _ in range(4):
+            prober.probe_search()
+            seen.append(_gauge(obs, "rag.probe.consecutive_failures", "search"))
+    assert seen == [1, 2, 0, 1]

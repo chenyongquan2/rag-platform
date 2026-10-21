@@ -18,16 +18,18 @@
 groups:
   - name: rag-availability
     rules:
-      # The probe could not get a sane answer from the service on its last run. The probe runs every
-      # 60 s, so a value of 0 that lasts a minute means the last run failed and nothing has fixed it.
+      # Two probe runs in a row got no sane answer (design s15-1: "two consecutive failures"; one
+      # lost request is not worth waking anybody). The probe runs every 60 s and exports the count
+      # itself. Worst case from the fault to the alert: the fault just after a good run, failed runs
+      # at +60 s and +120 s, then up to 10 s export, 15 s scrape and 15 s evaluation: about 160 s.
       - alert: SearchProbeFailing
-        expr: rag_probe_success{rag_probe_kind="search"} == 0
-        for: 1m
+        expr: rag_probe_consecutive_failures{rag_probe_kind="search"} >= 2
+        for: 0s
         labels:
           severity: critical
         annotations:
           summary: "The search probe is failing"
-          description: "The fixed search_docs request has not returned a sane answer (error, expected page missing, or degraded). Check the service, Elasticsearch, the gateway."
+          description: "The fixed search_docs request has not returned a sane answer in two or more runs in a row (error, expected page missing, or degraded). Check the service, Elasticsearch, the gateway."
 
       # The probe process itself stopped (or the service has been down so long that no run is ok):
       # the age of the last good run. 180 s is three probe intervals.
