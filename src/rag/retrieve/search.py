@@ -37,6 +37,7 @@ from rag.retrieve.hybrid import ROUTES, EsHybridRetriever
 from rag.retrieve.page_groups import PageKeyDedupe
 from rag.retrieve.query import HybridQuery
 from rag.retrieve.rerank import RERANK_SCORE
+from rag.retrieve.table_groups import EsTableFetch, TableSummaryReplace
 from rag.types import Chunk, ContextPiece, RetrievalResult
 
 logger = logging.getLogger(__name__)
@@ -254,7 +255,7 @@ def make_hybrid_search(
     embedding model (`_meta.embed_model`), else `IndexEmbedModelError`. With `redis`, results
     carry the data generation (key prefix as the ingest job's for this index prefix).
     """
-    retriever, generation, _, _ = hybrid_parts(
+    retriever, generation, es, _ = hybrid_parts(
         cfg,
         settings,
         index_prefix=index_prefix,
@@ -270,6 +271,11 @@ def make_hybrid_search(
         postprocessors=[
             TextDedupe(),
             *([PageKeyDedupe()] if cfg.retrieval.dedupe_by_page_key else []),
+            *(
+                [TableSummaryReplace(EsTableFetch(es, kb=cfg.kb, index=retriever.index))]
+                if cfg.retrieval.replace_table_summaries
+                else []
+            ),
         ],
         generation=generation,
     )

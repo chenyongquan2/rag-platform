@@ -212,6 +212,9 @@ def test_config_version_of_a_knowledge_base_without_the_flag_is_unchanged() -> N
     # The version as it was computed before the setting existed: the setting is not in the dump.
     dump = cfg.model_dump(mode="json", exclude={"description", "agent"})
     dump["retrieval"].pop("dedupe_by_page_key")
+    dump["retrieval"].pop(
+        "replace_table_summaries"
+    )  # added by spec P6-01, off = not in the version
     payload = {
         "kb_config": dump,
         "embed_model": "e@1",

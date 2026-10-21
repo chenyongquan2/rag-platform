@@ -33,6 +33,8 @@ DESIGN_KEYWORD_FIELDS = {
     "images",  # s5-4: image paths of the unit, returned with the chunk (spec P0-06)
     "page_key",  # spec P4-01: links the zh and en version of a CHM page (s8-4)
     "links_to",  # spec P4-01: page keys a page links to
+    "chunk_kind",  # spec P6-01: text | table | table_summary
+    "table_id",  # spec P6-01: links a table summary chunk to its table chunks
 }
 
 
@@ -67,8 +69,9 @@ def test_mapping_matches_design() -> None:
     assert set(KEYWORD_FIELDS) == DESIGN_KEYWORD_FIELDS
     for field in DESIGN_KEYWORD_FIELDS:
         assert props[field] == {"type": "keyword"}
-    assert set(INTEGER_FIELDS) == {"chunk_index"}
+    assert set(INTEGER_FIELDS) == {"chunk_index", "page"}  # `page`: spec P6-01
     assert props["chunk_index"] == {"type": "integer"}
+    assert props["page"] == {"type": "integer"}
     assert set(BOOLEAN_FIELDS) == {"has_generated_text", "suspicious_instruction"}
     for field in BOOLEAN_FIELDS:
         assert props[field] == {"type": "boolean"}

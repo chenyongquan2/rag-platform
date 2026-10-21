@@ -39,6 +39,7 @@ from rag.retrieve.hybrid import ROUTES, EsHybridRetriever
 from rag.retrieve.page_groups import PageKeyDedupe
 from rag.retrieve.rerank import BatchedTimeoutRerank, RerankRunner, get_rerank_runner
 from rag.retrieve.search import HybridSearch, acl_group_tuple, hybrid_parts
+from rag.retrieve.table_groups import EsTableFetch, TableSummaryReplace
 from rag.retrieve.threshold import RerankThreshold
 from rag.types import ContextResult
 
@@ -55,6 +56,8 @@ def search_config_version(
         # A setting that is off changes no result: the version of a knowledge base that never
         # heard of it (the Hugging Face one) stays what it was before the setting existed.
         kb_config["retrieval"].pop("dedupe_by_page_key")
+    if not cfg.retrieval.replace_table_summaries:
+        kb_config["retrieval"].pop("replace_table_summaries")
     payload = {
         # The description only tells callers what the KB holds (spec P0-09); `agent` (rounds of
         # the ask_docs graph, spec P3-01) is not part of a search. Neither changes a result.
@@ -98,6 +101,7 @@ class SearchPipeline(HybridSearch):
         reader: ContextReader | None = None,
         dedupe: TextDedupe | None = None,
         page_groups: PageKeyDedupe | None = None,
+        table_groups: TableSummaryReplace | None = None,
         generation: Callable[[], int] | None = None,
         config_version: str = "",
         context_window: int = 1,
@@ -111,6 +115,7 @@ class SearchPipeline(HybridSearch):
             postprocessors=[
                 dedupe or TextDedupe(),
                 *([page_groups] if page_groups is not None else []),
+                *([table_groups] if table_groups is not None else []),
                 reranker,
                 threshold,
             ],
@@ -205,6 +210,11 @@ def make_search_pipeline(
         ),
         threshold=RerankThreshold(threshold=retrieval.threshold),
         page_groups=PageKeyDedupe() if retrieval.dedupe_by_page_key else None,
+        table_groups=(
+            TableSummaryReplace(EsTableFetch(es, kb=cfg.kb, index=retriever.index))
+            if retrieval.replace_table_summaries
+            else None
+        ),
         expander=expander,
         reader=reader,
         acl_groups=acl_groups,

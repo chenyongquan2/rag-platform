@@ -39,7 +39,7 @@ def pipeline_version(
     so the IngestionPipeline processes the pages again although their text did not change (s5-4).
     """
     pipe = _pipeline(cfg, ext)
-    payload = {
+    payload: dict[str, Any] = {
         "code": INGEST_CODE_VERSION,
         "reader": reader_name_for(ext, pipe),
         "clean": [_hashed(s) for s in pipe.clean],
@@ -48,9 +48,15 @@ def pipeline_version(
         "language": cfg.language,
         "tokenizer": tokenizer_model or ServiceSettings().reranker_model,
     }
+    params = {k: v for k, v in pipe.reader_params.items() if k not in READER_RUN_PARAMS}
+    if params:  # absent for readers without parameters: their versions stay what they were
+        payload["reader_params"] = params
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
     return f"v{INGEST_CODE_VERSION}-{digest[:10]}"
 
+
+READER_RUN_PARAMS = ("budget_cny", "cache_path")
+"""Reader parameters that say how a run is paid for or where it caches, not what it writes."""
 
 GUARD_PARAMS = ("max_page_share", "max_corpus_share", "guard_min_chars")
 """Cleaning-rule parameters that decide whether a run stops (design s6-3), not what it writes."""
@@ -125,6 +131,7 @@ class KbProcessor:
                 language=self.kb_language,
                 embed_keys=cfg.metadata.embed,
                 llm_keys=cfg.metadata.llm,
+                **pipe.reader_params,
             )
             context = {"kb_language": self.kb_language}
             rules = [r for s in pipe.clean for r in _create(s, context)]

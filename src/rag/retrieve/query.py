@@ -37,6 +37,10 @@ class RetrievalTrace:
     """Removed chunk id -> the kept chunk id with the same body (TextDedupe)."""
     page_key_duplicates: dict[str, str] = field(default_factory=dict)
     """Removed chunk id -> its page key: the other language version of a page (PageKeyDedupe)."""
+    table_replacements: dict[str, list[str]] = field(default_factory=dict)
+    """Summary chunk id -> the table chunk ids put in its place (TableSummaryReplace)."""
+    table_fetch_error: str | None = None
+    """Class name of the error that kept the summary hits as they were (TableSummaryReplace)."""
     rerank_candidates: int | None = None
     """Candidates sent to the reranker (the first `rerank_n` after dedupe)."""
     rerank: list[RouteHit] = field(default_factory=list)
