@@ -292,7 +292,13 @@ def test_the_collector_and_jaeger_read_their_config_files_and_have_limits() -> N
     assert "./deploy/jaeger.yaml:/etc/jaeger/config.yaml:ro" in services["jaeger"]["volumes"]
     jaeger = yaml.safe_load((DEPLOY / "jaeger.yaml").read_text("utf-8"))
     store = jaeger["extensions"]["jaeger_storage"]["backends"]["some_store"]["memory"]
-    assert store["max_traces"] == 20000  # written out, not the built-in default
+    # Measured: a search_docs trace takes about 142 KB in Jaeger's memory, an ask_docs trace 347 to
+    # 589 KB; 3,000 traces of a mix fit the 768 MB limit (review P5-02 round 1, issue 10; it was
+    # 20,000, which could never fit).
+    assert store["max_traces"] == 3000
+    assert _memory_mb(services["jaeger"]["mem_limit"]) == 768
+    for name in ("jaeger", "otel-collector"):
+        assert services[name]["restart"] == "unless-stopped", name
 
 
 def test_the_collector_keeps_trace_files_for_a_stated_time_and_size() -> None:
@@ -319,3 +325,37 @@ def test_collector_overlays_are_yaml(overlay: str) -> None:
         assert loaded["exporters"]["otlphttp/langfuse"]["traces_endpoint"].endswith(
             "/api/public/otel/v1/traces"
         )
+
+
+def test_env_example_names_every_monitoring_setting() -> None:
+    """Review P5-02 round 1, issue 12: every setting this spec added, and the names compose
+    reads, are listed (commented, without values) in .env.example."""
+    text = (REPO / ".env.example").read_text("utf-8")
+    prefixes = ("probe_", "online_eval_", "trace_retention_", "alert_", "dependency_check_")
+    names = [name.upper() for name in ServiceSettings.model_fields if name.startswith(prefixes)]
+    assert len(names) >= 30
+    compose_names = ["GRAFANA_ADMIN_PASSWORD", "COLLECTOR_EXTRA", "LANGFUSE_BASIC_AUTH"]
+    from rag.monitor.langfuse_env import KEYS
+
+    for name in [*names, *compose_names, *KEYS]:
+        assert re.search(rf"^# {name}=", text, re.MULTILINE), name
+    # no secret values: the secret names are listed empty
+    for name in ("ALERT_WEBHOOK_URL", "GRAFANA_ADMIN_PASSWORD", *KEYS):
+        line = re.search(rf"^# {name}=(\S*)", text, re.MULTILINE)
+        assert line is not None and line.group(1) == "", name
+
+
+def test_readme_never_suggests_down_or_an_unnamed_profile_stop() -> None:
+    """Review P5-02 round 1, issue 1: `docker compose down` removes Elasticsearch and Redis of a
+    shared setup (and `-v` their data); a `--profile X stop` without service names stops them
+    too."""
+    for path in (REPO / "README.md", COMPOSE, DEPLOY / "otel" / "langfuse.yaml"):
+        for line in path.read_text("utf-8").splitlines():
+            if "docker compose" not in line:
+                continue
+            if "never" in line.lower() or "not `down`" in line or "(never `down`" in line:
+                continue  # a warning that names the command
+            assert not re.search(r"docker compose(\s+--profile\s+\S+)?\s+down\b", line), line
+            stop = re.search(r"docker compose\s+--profile\s+\S+\s+(stop|rm -sf)\s*(\S*)", line)
+            if stop:
+                assert stop.group(2) and not stop.group(2).startswith(("`", "#")), line

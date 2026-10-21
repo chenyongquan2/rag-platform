@@ -1,7 +1,7 @@
 # Overlay: also send traces to a self-hosted Langfuse v3 (spec P5-02, design s15-1).
 #
 #   uv run python -m rag.monitor langfuse-env             # once: writes the Langfuse secrets to .env
-#   docker compose --profile langfuse up -d              # the Langfuse stack (about 3 GB, see README)
+#   docker compose --profile langfuse up -d              # the Langfuse stack (about 2 GB at rest, see README)
 #   COLLECTOR_EXTRA=langfuse docker compose up -d otel-collector    # the Collector adds this exporter
 #
 # Back to the default: `docker compose up -d otel-collector` (COLLECTOR_EXTRA unset) and

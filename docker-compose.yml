@@ -13,11 +13,14 @@
 # Profile `monitoring` (spec P5-02; `docker compose --profile monitoring up -d`), not started by default:
 #   Prometheus       http://127.0.0.1:29090/   (alert rules: deploy/prometheus/rules.yml)
 #   Grafana          http://127.0.0.1:23000/   (dashboard "RAG platform overview", provisioned)
-# Profile `langfuse` (about 2 GB of memory, see README): Langfuse web http://127.0.0.1:23001/
-# WARNING: never stop a profile with `docker compose --profile X down`. `down` removes the containers of
-# EVERY service of this project (Elasticsearch and Redis too) and `down -v` also deletes the volumes,
-# the Elasticsearch data included. Use `docker compose --profile X stop <service>...` or
-# `docker compose --profile X rm -sf <service>...`; to delete a profile's data remove its volumes by name.
+# Profile `langfuse` (about 2 GB of memory at rest, limits 4,928 MiB, see README): Langfuse web
+# http://127.0.0.1:23001/
+# WARNING: never run `docker compose down` (with or without a profile or -v). `down` removes the
+# containers of EVERY service of this project (Elasticsearch and Redis too) and `down -v` also deletes
+# the volumes, the Elasticsearch data included. A `--profile X stop` without service names stops
+# Elasticsearch and Redis too. Always name the services, e.g. `docker compose --profile monitoring
+# stop prometheus grafana` or `docker compose --profile langfuse rm -sf langfuse-web ...`; never stop
+# elasticsearch or redis-cache while other checkouts and worktrees share them.
 # The services P5-02 added or changed (Collector, Jaeger, Prometheus, Grafana, Langfuse) have a memory
 # limit: a container that grows past it is killed, not the machine. Elasticsearch is bounded by its heap.
 name: rag-platform
@@ -108,6 +111,8 @@ services:
     logging: *small-logs
     # The image has no shell or HTTP client, so there is no container healthcheck;
     # scripts/dev_up.sh polls the health_check extension from the host instead.
+    # Comes back after a crash (out of memory at its limit) or a Docker restart.
+    restart: unless-stopped
     depends_on:
       jaeger:
         condition: service_healthy
@@ -119,7 +124,9 @@ services:
     command: ["--config=file:/etc/jaeger/config.yaml"]
     volumes:
       - ./deploy/jaeger.yaml:/etc/jaeger/config.yaml:ro
+    # 3,000 traces at up to about 0.6 MB each fit (deploy/jaeger.yaml).
     mem_limit: 768m
+    restart: unless-stopped
     logging: *small-logs
     ports:
       - "127.0.0.1:36686:16686"
