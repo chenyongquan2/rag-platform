@@ -198,3 +198,20 @@ def test_a_corrupt_file_is_one_counted_failure_and_the_others_are_reported(env) 
         cfg, make(FakeEngine(sample_pages(), fail_on=["b.pdf"]))[0], settings, tokenizer=words
     )
     assert estimate.pages == 6 and estimate.files_failed == 1
+
+
+def test_a_budget_stop_stops_the_read_and_is_not_a_read_failure(env) -> None:
+    """The reader raises the budget error; `KbProcessor.read` used to count it as one more failed
+    page, and a run with few enough of them went on and indexed the pages without their figures."""
+    from rag.ingest.describe import DescribeBudgetError
+
+    cfg, settings, cache, make = env
+    pipelines = {
+        ext: pipe.model_copy(update={"reader_params": {**pipe.reader_params, "budget_cny": 1e-9}})
+        for ext, pipe in cfg.pipelines.items()
+    }
+    tight = cfg.model_copy(update={"pipelines": pipelines})
+    connector, _ = make()
+    proc = KbProcessor(tight, settings=settings, tokenizer=words)
+    with pytest.raises(DescribeBudgetError, match="budget"):
+        proc.read(connector.documents())

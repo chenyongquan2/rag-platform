@@ -21,6 +21,7 @@ from llama_index.core.schema import BaseNode, Document, TransformComponent
 from rag.config import KnowledgeBaseConfig, PipelineConfig, ServiceSettings, StepConfig
 from rag.data import SourceDocument
 from rag.ingest.clean import CleanRule, RuleStats
+from rag.ingest.describe import DescribeBudgetError
 from rag.ingest.language import UNDETERMINED
 from rag.ingest.meta import apply_whitelist
 from rag.ingest.readers import reader_name_for
@@ -164,6 +165,8 @@ class KbProcessor:
                 continue
             try:
                 result.documents.extend(self._groups[version].reader.load_data(src))
+            except DescribeBudgetError:
+                raise  # the budget of the run is used up: stop, do not index half the figures
             except Exception as exc:  # one bad file must not stop the run (s7-4); it is reported
                 result.skipped[src.doc_id] = "read_error"
                 result.errors[src.doc_id] = f"{type(exc).__name__}: {exc}"
