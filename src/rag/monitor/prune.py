@@ -10,7 +10,8 @@ files are never touched):
 
 1. a file whose last change is older than `max_age_s` is removed, except the newest matching file
    (the Collector may have it open, and a quiet system writes nothing for days);
-2. if the rest are bigger than `max_total_bytes` together, the oldest go until they fit.
+2. if the rest are bigger than `max_total_bytes` together, the oldest go until they fit; the
+   newest file stays even when it alone is bigger than the cap.
 """
 
 from __future__ import annotations
@@ -47,7 +48,8 @@ def prune_files(
         else:
             kept.append((mtime, path))
     total = sum(path.stat().st_size for _, path in kept)
-    while kept and total > max_total_bytes:
+    # `kept` is oldest first and ends with the newest file, which is never removed.
+    while len(kept) > 1 and total > max_total_bytes:
         _, path = kept.pop(0)
         total -= path.stat().st_size
         doomed.append(path)

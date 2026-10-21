@@ -65,3 +65,13 @@ def test_dry_run_lists_without_deleting_and_a_missing_folder_is_empty(tmp_path: 
     )
     assert listed == [old] and old.exists()
     assert prune_files(tmp_path / "nope", "*", max_age_s=DAY, max_total_bytes=1, now=NOW) == []
+
+
+def test_the_newest_file_stays_even_when_it_alone_is_above_the_size_cap(tmp_path: Path) -> None:
+    """Review P5-02 round 1 nit: the size rule could remove the newest file, which the Collector
+    may have open."""
+    older = _file(tmp_path, "traces-1.jsonl", age_days=1, size=500)
+    live = _file(tmp_path, "traces.jsonl", age_days=0, size=5_000)
+    removed = prune_files(tmp_path, "traces*", max_age_s=3 * DAY, max_total_bytes=1_000, now=NOW)
+    assert removed == [older]
+    assert live.exists()
