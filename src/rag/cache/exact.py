@@ -77,6 +77,7 @@ class CacheRun[T]:
     outcome: str
     reason: str = ""
     key: str | None = None
+    generation: int | None = None
     stored: bool = False
     not_stored_reason: str = ""
     age_s: float | None = None
@@ -232,6 +233,7 @@ class ExactCache:
             result,
             outcome,
             key=shared.key,
+            generation=shared.generation,
             age_s=shared.age_s,
             lookup_ms=shared.lookup_ms,
         )
@@ -277,6 +279,7 @@ class ExactCache:
                 except _LeaderFailed:
                     continue
         run = self._direct(compute(), key, read)
+        run.generation = fields.data_generation
         self._store(run, fields, codec)
         run.elapsed_ms = _ms(began)
         return run
@@ -294,6 +297,7 @@ class ExactCache:
     ) -> CacheRun[T]:
         try:
             run = self._lead_inner(key, fields, compute, codec, decode, wait, began)
+            run.generation = fields.data_generation
         except BaseException:
             self._flights.finish(key, flight)
             raise
@@ -392,6 +396,7 @@ class ExactCache:
                     continue
                 return self._follow(shared, adapt, began)
         run = self._direct(await compute(), key, read)
+        run.generation = fields.data_generation
         await asyncio.to_thread(self._store, run, fields, codec)
         run.elapsed_ms = _ms(began)
         return run
@@ -409,6 +414,7 @@ class ExactCache:
     ) -> CacheRun[T]:
         try:
             run = await self._alead_inner(key, fields, compute, codec, decode, wait, began)
+            run.generation = fields.data_generation
         except BaseException:
             self._flights.finish(key, flight)
             raise

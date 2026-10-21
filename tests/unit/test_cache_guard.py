@@ -1,0 +1,86 @@
+"""Spec P5-01 AC8: the entity guard of the semantic cache (design s12-3): a stored question may
+stand in for a new one only when their identifiers, names, numbers and negations are equal."""
+
+from __future__ import annotations
+
+import pytest
+
+from rag.cache.semantic import entity_guard, entity_signature
+
+
+@pytest.mark.parametrize(
+    ("new", "cached"),
+    [
+        (
+            "How do I push a model with push_to_hub?",
+            "What is the way to push a model with push_to_hub",
+        ),
+        ("what does Trainer.train return", "What does Trainer.train return?"),
+        ("which models support fp16", "Which models support fp16 ?"),
+        ("How do I install transformers 4.36.0", "how to install transformers 4.36.0 ?"),
+        ("What is the top 5 result", "what's the top 5 result"),
+        ("怎么用 push_to_hub 上传模型", "如何通过 push_to_hub 上传模型"),
+        ("how do I upload a model", "how can I upload a model"),
+    ],
+)
+def test_questions_with_the_same_entities_pass(new: str, cached: str) -> None:
+    assert entity_guard(new, cached).ok
+
+
+@pytest.mark.parametrize(
+    ("new", "cached", "reason"),
+    [
+        ("What does push_to_hub do?", "What does push_to_hub_fastai do?", "identifiers"),
+        ("What does LoRA do?", "What does lora do?", "identifiers"),
+        ("transformers 4.36.0 install", "transformers 4.36.1 install", "identifiers"),
+        ("How do I use --lr", "How do I use --lr-scheduler", "identifiers"),
+        ("How do I use bert-base-uncased", "How do I use bert-large-uncased", "identifiers"),
+        ("What is the top 5 result", "What is the top 10 result", "numbers"),
+        ("Give me three examples", "Give me two examples", "numbers"),
+        ("三种方法", "两种方法", "numbers"),
+        ("Which models support fp16", "Which models do not support fp16", "negation"),
+        ("which options can I use", "which options can't I use", "negation"),
+        ("哪些模型支持半精度", "哪些模型不支持半精度", "negation"),
+        ("How do I use Gradio Spaces", "How do I use Streamlit Spaces", "names"),
+        ("Gradio install guide", "Streamlit install guide", "names"),
+        ("What is Inference Endpoints", "What is Inference Providers", "names"),
+    ],
+)
+def test_questions_that_differ_in_an_entity_are_rejected(
+    new: str, cached: str, reason: str
+) -> None:
+    verdict = entity_guard(new, cached)
+    assert not verdict.ok and verdict.reason == reason, verdict
+
+
+def test_the_guard_is_symmetric() -> None:
+    pairs = [
+        ("What does push_to_hub do?", "What does push_to_hub_fastai do?"),
+        ("top 5", "top 10"),
+        ("support fp16", "do not support fp16"),
+    ]
+    for a, b in pairs:
+        assert entity_guard(a, b).ok == entity_guard(b, a).ok
+
+
+def test_a_question_without_entities_passes_but_is_marked_so() -> None:
+    verdict = entity_guard("how do I upload a model", "how can I upload a model")
+    assert verdict.ok and verdict.entities is False
+    with_entities = entity_guard("how do I use push_to_hub", "how can I use push_to_hub")
+    assert with_entities.ok and with_entities.entities is True
+
+
+def test_the_signature_names_what_it_compares() -> None:
+    sig = entity_signature(
+        "Which models in Hugging Face do not support push_to_hub 4.36.0 on 5 GPUs?"
+    )
+    assert "push_to_hub" in sig.tokens and "4.36.0" in sig.tokens
+    assert sig.numbers == ("5",) or "5" in sig.numbers
+    assert "not" in sig.negations
+    assert {"Hugging", "Face"} <= set(sig.names)
+
+
+def test_a_sentence_initial_question_word_is_not_a_name() -> None:
+    assert entity_signature("How do I upload a model").names == frozenset()
+    assert entity_signature("What is Spaces").names == frozenset({"Spaces"})
+    assert entity_signature("Gradio how to install").names == frozenset({"Gradio"})

@@ -199,6 +199,16 @@ class HybridSearch:
             config_version=self.config_version,
         )
 
+    def query_vector(self, question: str) -> list[float] | None:
+        """The vector the L0 cache holds for `question` (the one a search of it just computed),
+        or None: never calls the embedding model. For the shadow semantic cache (spec P5-01),
+        which must not pay for the question's vector a second time."""
+        lookup = getattr(self.retriever.embed_model, "cached_query_embedding", None)
+        if not callable(lookup):
+            return None
+        vector = lookup(question)
+        return list(vector) if vector is not None else None
+
     @staticmethod
     def _run(
         steps: Sequence[BaseNodePostprocessor], nodes: list[NodeWithScore], query: HybridQuery

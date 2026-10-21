@@ -162,13 +162,13 @@ class ResultCache:
                 update={"timings_ms": {"cache": round(run.elapsed_ms, 3)}}
             )
         elif run.outcome == "miss" and run.stored and self.shadow is not None:
-            self._shadow(cfg, build, question, filters, acl_groups, top_k, run, vector_of)
+            self._shadow(cfg, config_version, question, filters, acl_groups, top_k, run, vector_of)
         return run
 
     def _shadow(
         self,
         cfg: KnowledgeBaseConfig,
-        build: Callable[[int], CacheKeyFields],
+        config_version: str,
         question: str,
         filters: Mapping[str, Any] | None,
         acl_groups: Sequence[str],
@@ -186,8 +186,8 @@ class ResultCache:
                 filters=filters,
                 acl_groups=acl_groups,
                 top_k=top_k,
-                config_version=run.result.config_version,
-                data_generation=run.result.data_generation,
+                config_version=config_version,
+                data_generation=run.generation if run.generation is not None else 0,
                 fresh=run.result,
                 vector=vector_of(question) if vector_of is not None else None,
             )
