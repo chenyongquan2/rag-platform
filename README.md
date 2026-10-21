@@ -660,8 +660,9 @@ uv run python -m rag.eval.agentic compare --before data/reports/p3-05 --after da
 Spec P1-06 (design s11-2, s14-3): `rag.answer.support.judge_support(sentences, chunks, model=...)`
 asks a cheap judge of another vendor (`qwen/qwen3.6-flash`, temperature 0, thinking off), in one
 forced tool call per answer, whether each cited fragment supports its sentence (`supported`,
-`partly`, `not_supported`; `unknown` when the judge fails). Online sampling (P5-02) calls the same
-function. The eval runs it over stored answers only, never generating new ones, and reports
+`partly`, `not_supported`; `unknown` when the judge fails); `build_judge_model(settings, config)`
+builds the judge. Online sampling (P5-02) can call the same function once request records keep
+the answer sentences and their cited chunks (today they keep chunk ids only). The eval runs it over stored answers only, never generating new ones, and reports
 citation precision (pairs) and recall (sentences) with Wilson intervals, judge stability, planted
 errors and a paired McNemar test when both systems have judged answers. P3 records written before
 P1-06 have no sentence citations and are skipped.

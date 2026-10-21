@@ -11,7 +11,10 @@ A standalone judge function that says, per answer sentence and per fragment it c
 fragment supports the sentence (`supported` / `partly` / `not_supported`, `unknown` on a judge
 failure), metrics over it (citation precision and recall, s11-2), and an eval CLI that runs it over
 stored answers only (P1-04's 65 answers; P3-05's records when they carry sentence citations),
-with a stability pass, planted errors and a blind human sheet. P5-02 reuses the function online.
+with a stability pass, planted errors and a blind human sheet. P5-02 can call the same function
+(and `build_judge_model`) for online sampling, but first needs the request record to keep the
+answer sentences, their citation chunk ids and the fragment text: `BusinessRecord` on main keeps
+chunk ids only (a P5-02 follow-up).
 
 ## Interface
 - `rag.answer.support`: `SupportLabel`, `SupportSentence`, `SupportFragment`, `PairVerdict`,
@@ -20,7 +23,8 @@ with a stability pass, planted errors and a blind human sheet. P5-02 reuses the 
   `support_inputs(sentences, chunks) -> (list[SupportSentence], list[SupportFragment])`;
   `sentences_from_text(text, context) -> list[AnswerSentence]` (parse.py, level 1);
   `build_support_messages(question, sentences, fragments) -> list[BaseMessage]`;
-  `async judge_support(sentences, chunks, *, model, config, question=None) -> SupportResult`.
+  `async judge_support(sentences, chunks, *, model, config, question=None) -> SupportResult`
+  (records the called model's name and temperature); `build_judge_model(settings, config)`.
 - `rag.eval.support`: `metrics.summarize(lines) -> SupportSummary` (pairs, precision, partly,
   recall, unsupported-sentence rate, unknowns, all Wilson), `metrics.by_group`,
   `metrics.paired_all_supported(a, b)` (exact McNemar), `metrics.stability(run1, run2)`;
@@ -75,6 +79,6 @@ owner fills the sheet); online sampling (P5-02); an NLI model instead of the jud
 - Files: `src/rag/answer/support.py`, `src/rag/eval/support/{__init__,__main__,records,items,metrics,runner,planted,human,report,cli}.py`, `src/rag/eval/agentic/{records,runner}.py` (`answer_sentences`, `cited_chunks`), `tests/unit/test_answer_support.py` (7), `tests/unit/test_eval_support.py` (10), `README.md`, `docs/decisions.md`, `docs/reports/P1-06-report.md`. Raw lines in git-ignored `data/reports/p1-06/` (copy in `C:/workspace/rag-platform-data/p1-06/`).
 - Results (P1-04, 64 answers, 148 sentences, 186 pairs; run 1 / run 2): precision 98.4% [95.4, 99.4] / 96.8%; recall 98.6% [95.2, 99.6] both; unsupported sentences 1/148 / 0/148; every sentence supported 62/64 both; 0 unknown. Stability: 4/186 pair labels (2.2%), 1/148 sentences, 0/64 answers changed, all one step (supported <-> partly <-> not_supported). Planted: 10/10 caught as not_supported (5 fragment swaps, 5 number changes). Spend 0.534 CNY (138 calls); ledger 26.016 -> 26.550.
 - Decisions (docs/decisions.md): judge model not NLI; one call per answer, cited fragments only; four labels, unknown out of every denominator; forced tool call via `bind_tools` so `extra_body` travels with it; fragments escaped as in the answer prompt, sentences as JSON; uncited sentences not supported by rule; P3 records keep sentence citations; planted errors only on judged-supported sentences; sheet over-samples non-supported pairs.
-- Open issues: the P3-05 paired comparison is impossible on the stored records (no sentence citations; all 300 skipped); a new P3 run is in 「待确认」 (about 2.5 CNY). Pairwise judging marks a sentence supported only by two fragments together as partly (046). Human labels not filled (sheet of 40). Swapped fragments are easy errors; harder near-miss fragments untested. Cap check with concurrency > 1 can overshoot by the calls in flight.
+- Open issues: P5-02 must first keep answer sentences, their citation chunk ids and fragment text in the request record before it can call `judge_support` online; the P3-05 paired comparison is impossible on the stored records (no sentence citations; all 300 skipped); a new P3 run is in 「待确认」 (about 2.5 CNY). Pairwise judging marks a sentence supported only by two fragments together as partly (046). Human labels not filled (sheet of 40). Swapped fragments are easy errors; harder near-miss fragments untested. Cap check with concurrency > 1 can overshoot by the calls in flight.
 - TDD: tests written first and seen red (import errors) for both modules; four core test expectations were wrong about `all_supported` with an uncited sentence and fixed before the first commit. Mutation check: 8 mutations, 7 killed at first; the planted number rule survived and got a test (now killed).
-- Review rounds: 0 (waiting for the reviewer).
+- Review rounds: 1 (APPROVE with small fixes, all applied without paid calls): P5-02 reuse stated with its missing step (request records keep chunk ids only); `build_judge_model` next to `judge_support`, the result records the called model's name and temperature (tested on the request body); report says the lenient precision is not a correctness measure; the sheet now holds every doubted pair (6), the 10 planted pairs and the reviewer's 8 near misses (10 pairs) plus 14 random, key with stratum and known answer; the blind test checks every cell outside the quoted text; a test for the verdict alias map. Reviewer's 8 near misses: none labelled supported, 6 not_supported, 2 partly (029 CPU to NVMe, 036 outside knowledge).
