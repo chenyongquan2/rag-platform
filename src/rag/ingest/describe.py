@@ -442,51 +442,42 @@ def shared_service(
     max_px: int = 1024,
 ) -> ModelTextService:
     """The one `ModelTextService` of this process for these settings: the PDF reader (figures)
-    and the `table_summary` step (tables) share its cache, budget guard and counters, so the
-    quality report adds up everything one run spent. Chat models come from `make_chat_model`
+    and the `table_summary` step (tables) share its cache, budget guard and counters (one per
+    cache file, budget and image size; each caller adds the model it needs), so the quality
+    report adds up everything one run spent. Chat models come from `make_chat_model`
     (retries, the cost ledger and its stop line, `CHAT_BACKEND=fake`)."""
     from rag.config import ServiceSettings, repo_path
     from rag.llm.factory import make_chat_model, resolve_chat_profile
 
     settings = settings or ServiceSettings()
     path = repo_path(cache_path)
-    key = (str(path), vision_model, text_model, budget_cny, max_px)
+    key = (str(path), budget_cny, max_px)
     with _SHARED_LOCK:
-        if key in _SHARED:
-            return _SHARED[key]
-        ledger = CostLedger.from_settings(settings)
+        service = _SHARED.get(key)
+        if service is None:
+            service = ModelTextService(cache=ModelTextCache(path), guard=SpendGuard(budget_cny))
+            _SHARED[key] = service
+        if (vision_model and service.describer is None) or (
+            text_model and service.summarizer is None
+        ):
+            ledger = CostLedger.from_settings(settings)
 
-        def chat(model: str, max_tokens: int) -> BaseChatModel:
-            profile = resolve_chat_profile("offline", settings).model_copy(
-                update={"model": model, "max_tokens": max_tokens}
-            )
-            return make_chat_model(
-                "offline", settings.model_copy(update={"chat_offline": profile}), ledger=ledger
-            )
+            def chat(model: str, max_tokens: int) -> BaseChatModel:
+                profile = resolve_chat_profile("offline", settings).model_copy(
+                    update={"model": model, "max_tokens": max_tokens}
+                )
+                return make_chat_model(
+                    "offline", settings.model_copy(update={"chat_offline": profile}), ledger=ledger
+                )
 
-        describer = (
-            GatewayVisionDescriber(
-                chat(vision_model, 600), model=vision_model, ledger=ledger, max_px=max_px
-            )
-            if vision_model
-            else None
-        )
-        summarizer = (
-            GatewayTableSummarizer(chat(text_model, 400), model=text_model, ledger=ledger)
-            if text_model
-            else None
-        )
-        service = ModelTextService(
-            cache=ModelTextCache(path),
-            describer=describer,
-            summarizer=summarizer,
-            guard=SpendGuard(budget_cny),
-            image_estimate_cny=estimate_image_cost(ledger, vision_model, 1)
-            if vision_model
-            else 0.0,
-            table_estimate_cny=(
-                estimate_table_cost(ledger, text_model, [1000]) if text_model else 0.0
-            ),
-        )
-        _SHARED[key] = service
+            if vision_model and service.describer is None:
+                service.describer = GatewayVisionDescriber(
+                    chat(vision_model, 600), model=vision_model, ledger=ledger, max_px=max_px
+                )
+                service.image_estimate_cny = estimate_image_cost(ledger, vision_model, 1)
+            if text_model and service.summarizer is None:
+                service.summarizer = GatewayTableSummarizer(
+                    chat(text_model, 400), model=text_model, ledger=ledger
+                )
+                service.table_estimate_cny = estimate_table_cost(ledger, text_model, [1000])
         return service

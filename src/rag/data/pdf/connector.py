@@ -117,6 +117,7 @@ class PdfDirConnector:
             "figures": sum(len(p.figures) for p in converted.pages),
             "tables": sum(p.tables for p in converted.pages),
             "engine_seconds": round(converted.seconds, 2),
+            "recorded_engine_seconds": round(converted.recorded_seconds, 2),
             "cached": converted.cached,
             "wall_seconds": round(time.perf_counter() - started, 2),
             "docling_version": converted.docling_version,

@@ -1,0 +1,102 @@
+# PDF and image demo knowledge base (four public arXiv papers and one chart image). Design s5-2,
+# s5-3, s7-2; spec P6-01.
+#
+# PRIVATE knowledge base: `access.callers` names the local development caller only (the files are
+# papers used for a demo; `load_kb_config` refuses a knowledge base outside kb/public/ without
+# it). This file is configuration only and is committed; the PDFs, converted pages, figure images
+# and caches stay in git-ignored folders (data/raw, data/cache, data/docstore).
+#
+# Get the files (URLs and sha256 are in data/manifests/pdf_demo.json), then:
+#   uv run python -m rag.ingest.pdf_report --kb pdf_demo --estimate   (no model call: what a run would cost)
+#   uv run python -m rag.ingest.pdf_report --kb pdf_demo              (convert, describe, chunk; quality report)
+#   uv run python -m rag.ingest.job --kb pdf_demo --all               (writes kb_pdf_demo_v1, alias kb_pdf_demo)
+kb: pdf_demo
+description: >-
+  Four public machine-learning papers (ResNet, Batch Normalization, VGG, Adam) read as PDF pages
+  with tables kept whole and figures described by a model, plus one chart image. Answers can cite
+  the page number.
+source:
+  connector: pdf_dir
+  path: data/raw/pdf_demo
+  files: null                       # null = every .pdf, .png, .jpg in the folder
+  limit: null                       # first N files by name
+  docling: {ocr: false, table_structure: true, images_scale: 2.0, num_threads: 4}
+  cache_dir: data/cache/pdf         # converted pages by file hash and Docling version
+language: en
+pipelines:
+  ".pdf": &pdf
+    reader: pdf
+    reader_params:
+      describe_images: model        # model | off: figures are described by a vision model, or dropped
+      vision_model: qwen/qwen3.6-flash
+      min_image_px: 64              # a figure with a shorter side is an icon or a rule line: skipped
+      max_image_px: 1024            # sent as a JPEG with at most this many pixels on the longer side
+      cache_path: data/cache/model_text.sqlite3
+      budget_cny: 0.5               # the run stops before a call that would pass this (design s16-4)
+    clean:                          # runs before the IngestionPipeline; remove a line to turn a rule off
+      - whitespace
+      - skip_empty: {min_chars: 20}
+      - dedupe
+      - suspicious_instruction
+    steps:
+      - markdown_split
+      - table_chunks                 # every table its own chunk, header repeated when cut
+      - token_split: {max_tokens: 400}   # reranker tokens for text + title_path + source_rel + page
+      - merge_tiny: {min_tokens: 50}     # never merges a table chunk
+      - mark_generated_text          # has_generated_text for figure descriptions
+      - table_summary:               # one summary chunk per table, found by questions that avoid its words
+          mode: model                # model | rule | off
+          model: qwen/qwen3.6-flash
+          cache_path: data/cache/model_text.sqlite3
+          budget_cny: 0.5
+      - suspicious_instruction       # per-chunk flag (also for model-written text)
+      - assign_chunk_ids
+  ".png": &image
+    reader: image
+    reader_params:
+      describe_images: model
+      vision_model: qwen/qwen3.6-flash
+      min_image_px: 64
+      max_image_px: 1024
+      cache_path: data/cache/model_text.sqlite3
+      budget_cny: 0.5
+    clean:
+      - whitespace
+      - skip_empty: {min_chars: 20}
+      - suspicious_instruction
+    steps:
+      - markdown_split
+      - token_split: {max_tokens: 400}
+      - merge_tiny: {min_tokens: 50}
+      - mark_generated_text
+      - suspicious_instruction
+      - assign_chunk_ids
+  ".jpg": *image
+  ".jpeg": *image
+metadata:
+  embed: [title_path]               # whitelist: only these keys go into the embedding text
+  llm: [title_path, source_rel, page]   # the prompt shows the file and the page number
+es:
+  analyzer: standard
+retrieval:
+  top_k_per_route: 20
+  num_candidates: 100
+  title_boost: 1.0
+  rrf_k: 60
+  rrf_weights: {bm25: 1.0, vector: 1.0}
+  rerank_n: 15
+  final_k: 8
+  threshold: 0.3
+  expand: none                      # summary chunks sit after the page's other chunks; no neighbours
+  expand_window: 1
+  expand_max_tokens: 4000
+  replace_table_summaries: true     # a summary hit becomes its table chunk before the rerank (s7-2)
+eval:
+  dir: evals/datasets/pdf_demo
+  questions: questions.jsonl
+access:
+  callers: ["local"]                # private: only the local development caller
+answer:
+  context_tokens: 4000
+  language: auto
+  parse_retries: 1

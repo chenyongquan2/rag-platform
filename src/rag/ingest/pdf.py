@@ -98,6 +98,7 @@ class _Base(BaseReader):
         min_image_px: int = 64,
         max_image_px: int = 1024,
         service: ModelTextService | None = None,
+        settings: Any = None,
     ) -> None:
         if describe_images not in DESCRIBE_MODES:
             raise ValueError(
@@ -118,6 +119,7 @@ class _Base(BaseReader):
         self.min_image_px = min_image_px
         self.max_image_px = max_image_px
         self._service = service
+        self._settings = settings
         self.stats = ReadStatsHolder(self)
 
     @property
@@ -126,6 +128,7 @@ class _Base(BaseReader):
         when nothing is described)."""
         if self._service is None and self.describe_images == "model":
             self._service = shared_service(
+                self._settings,
                 vision_model=self.vision_model,
                 cache_path=self.cache_path,
                 budget_cny=self.budget_cny,

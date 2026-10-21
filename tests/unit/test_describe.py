@@ -215,3 +215,36 @@ def test_gateway_table_summarizer_sends_the_table_text(tmp_path: Path) -> None:
     body = str(message.content)
     assert "| Pump | Flow |" in body and "T1" in body
     assert len(body) < 1500  # the table text is cut at max_table_chars
+
+
+# ---- the shared service ------------------------------------------------------------------------
+
+
+def test_shared_service_is_one_object_that_each_caller_completes(tmp_path: Path) -> None:
+    from rag.config import ServiceSettings
+    from rag.ingest.describe import reset_shared_services, shared_service
+
+    reset_shared_services()
+    settings = ServiceSettings(
+        _env_file=None,  # type: ignore[call-arg]
+        chat_backend="fake",
+        cost_ledger_path=str(tmp_path / "ledger.jsonl"),
+    )
+    cache = tmp_path / "text.sqlite3"
+    try:
+        first = shared_service(
+            settings, vision_model="qwen/qwen3.6-flash", cache_path=cache, budget_cny=0.5
+        )
+        assert first.describer is not None and first.summarizer is None
+        second = shared_service(
+            settings, text_model="deepseek-v4-flash", cache_path=cache, budget_cny=0.5
+        )
+        assert second is first and first.summarizer is not None
+        assert first.image_estimate_cny > 0 and first.table_estimate_cny > 0
+        assert first.guard.budget_cny == 0.5
+        other = shared_service(
+            settings, vision_model="qwen/qwen3.6-flash", cache_path=cache, budget_cny=0.1
+        )
+        assert other is not first  # another budget, another guard
+    finally:
+        reset_shared_services()

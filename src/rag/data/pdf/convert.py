@@ -114,8 +114,10 @@ class ConvertedPdf:
     pages: list[PdfPage]
     folder: Path
     seconds: float = 0.0
-    """Time the engine took; 0.0 when the result came from the cache."""
+    """Time the engine took in this call; 0.0 when the result came from the cache."""
     cached: bool = False
+    recorded_seconds: float = 0.0
+    """Time the engine took when the result was made (also when it is read from the cache)."""
 
     def figure_path(self, ref: FigureRef) -> Path:
         return self.folder / ref.path
@@ -307,6 +309,7 @@ def load_converted(folder: Path, *, cached: bool) -> ConvertedPdf:
         folder=folder,
         seconds=0.0 if cached else float(data.get("seconds", 0.0)),
         cached=cached,
+        recorded_seconds=float(data.get("seconds", 0.0)),
     )
 
 

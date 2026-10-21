@@ -10,6 +10,7 @@ sees all of them) and one `pipeline_version`.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -124,13 +125,18 @@ class KbProcessor:
             self._ext_version[ext.lower()] = version
             if version in self._groups:
                 continue
+            name = reader_name_for(ext, pipe)
+            options: dict[str, Any] = {}
+            if "settings" in inspect.signature(readers.get(name)).parameters:
+                options["settings"] = self.settings  # readers that call a model use these
             reader = readers.create(
-                reader_name_for(ext, pipe),
+                name,
                 kb=cfg.kb,
                 pipeline_version=version,
                 language=self.kb_language,
                 embed_keys=cfg.metadata.embed,
                 llm_keys=cfg.metadata.llm,
+                **options,
                 **pipe.reader_params,
             )
             context = {"kb_language": self.kb_language}
@@ -196,6 +202,7 @@ class KbProcessor:
                 "kb_language": self.kb_language,
                 "tokenizer": self.tokenizer,
                 "tokenizer_model": self.settings.reranker_model,
+                "settings": self.settings,
                 "embed_keys": list(self.cfg.metadata.embed),
                 "llm_keys": list(self.cfg.metadata.llm),
             }
@@ -223,6 +230,17 @@ class KbProcessor:
             stats = getattr(group.reader, "stats", None)
             if stats is not None and hasattr(stats, "to_dict"):
                 found[version] = stats.to_dict()
+        return found
+
+    def step_stats(self) -> dict[str, dict[str, Any]]:
+        """Counts of the built chunk steps that keep them (`stats`, a dict: the table summary
+        step), by step name; empty until `steps_for` or `chunk` built the steps."""
+        found: dict[str, dict[str, Any]] = {}
+        for group in self._groups.values():
+            for step in group.steps or []:
+                stats = getattr(step, "stats", None)
+                if isinstance(stats, dict):
+                    found[type(step).class_name()] = stats
         return found
 
     def rule_stats(self) -> list[tuple[str, RuleStats]]:

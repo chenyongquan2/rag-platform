@@ -224,12 +224,16 @@ class TableSummary(TransformComponent):
     max_rows: int = Field(default=12, gt=0)
     embed_keys: list[str] = Field(default_factory=lambda: list(DEFAULT_EMBED_KEYS))
     llm_keys: list[str] = Field(default_factory=lambda: list(DEFAULT_LLM_KEYS))
-    context_params: ClassVar[dict[str, str]] = _WHITELIST_CONTEXT
+    context_params: ClassVar[dict[str, str]] = {**_WHITELIST_CONTEXT, "settings": "settings"}
     _service: ModelTextService | None = PrivateAttr(default=None)
+    _settings: Any = PrivateAttr(default=None)
     _counts: dict[str, int] = PrivateAttr(default_factory=dict)
 
-    def __init__(self, *, service: ModelTextService | None = None, **data: Any) -> None:
+    def __init__(
+        self, *, service: ModelTextService | None = None, settings: Any = None, **data: Any
+    ) -> None:
         super().__init__(**data)
+        self._settings = settings
         if self.mode not in SUMMARY_MODES:
             raise ValueError(
                 f"table_summary mode must be one of {SUMMARY_MODES}, got {self.mode!r}"
@@ -252,6 +256,7 @@ class TableSummary(TransformComponent):
             from rag.ingest.describe import shared_service
 
             self._service = shared_service(
+                self._settings,
                 text_model=self.model or "",
                 cache_path=self.cache_path,
                 budget_cny=self.budget_cny,
