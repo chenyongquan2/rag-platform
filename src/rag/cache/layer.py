@@ -406,6 +406,7 @@ class ResultCache:
             layer=LAYER,
             outcome=run.outcome,
             not_stored_reason=run.not_stored_reason if run.outcome == "miss" else "",
+            reason=run.reason if run.outcome in ("bypass", "error") else "",
         )
         metrics.record_step("cache_lookup", run.lookup_ms / 1000.0, outcome=attr.OUTCOME_OK, kb=kb)
 

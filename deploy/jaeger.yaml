@@ -1,0 +1,42 @@
+# Jaeger v2 all-in-one with a bounded in-memory trace store (spec P5-02, design s15-1, s16-5).
+# Same layout as the built-in all-in-one configuration, with one change: `max_traces` is written
+# out, 20000 instead of the built-in 100000, so the container's memory has a known ceiling (the
+# container also has a memory limit in docker-compose.yml). When the limit is reached the oldest
+# traces are dropped. Nothing is written to disk: a restart of the container empties Jaeger; the
+# Collector's trace file (deploy/otel-collector.yaml, 3 days) keeps the raw spans.
+extensions:
+  healthcheckv2:
+    use_v2: true
+    http:
+      endpoint: 0.0.0.0:13133
+  jaeger_query:
+    storage:
+      traces: some_store
+  jaeger_storage:
+    backends:
+      some_store:
+        memory:
+          max_traces: 20000
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+
+exporters:
+  jaeger_storage_exporter:
+    trace_storage: some_store
+
+service:
+  extensions: [jaeger_storage, jaeger_query, healthcheckv2]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [jaeger_storage_exporter]

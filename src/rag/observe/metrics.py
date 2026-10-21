@@ -201,13 +201,22 @@ class Metrics:
         layer: str,
         outcome: str,
         not_stored_reason: str = "",
+        reason: str = "",
     ) -> None:
         """One request's way through a cache layer; a miss whose result was not written also
-        counts under its reason."""
+        counts under its reason. `reason` (why a request bypassed the cache or hit an error:
+        `breaker_open`, `read_off`, the store's error) is a label of the request count itself, so
+        an alert can tell "the breaker is open" from "this call may not read the cache"."""
         base = _drop_none({attr.KB: kb, attr.TOOL: tool})
         try:
             self.cache_requests.add(
-                1, {**base, attr.CACHE_LAYER: layer, attr.CACHE_OUTCOME: outcome}
+                1,
+                {
+                    **base,
+                    attr.CACHE_LAYER: layer,
+                    attr.CACHE_OUTCOME: outcome,
+                    **({attr.CACHE_REASON: reason} if reason else {}),
+                },
             )
             if not_stored_reason:
                 self.cache_not_stored.add(1, {**base, attr.CACHE_REASON: not_stored_reason})

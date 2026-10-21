@@ -1,0 +1,34 @@
+# Prometheus for local development (spec P5-02, design s15-1, s16-5).
+#
+# One scrape target: the OTel Collector's Prometheus-format endpoint. Every process of this
+# project (search service, probe, eval jobs) sends its metrics over OTLP to the Collector, and the
+# Collector turns them into one set of series; there is nothing else to scrape. (The Collector's
+# own health is the `up` series of this target.)
+#
+# Timing budget of an alert (design s15-1: from the fault to the alert in 2 to 3 minutes):
+# app export every 30 s (probe: every 10 s) + this scrape every 15 s + rule evaluation every 15 s
+# + the rule's `for:` (see rules.yml). The worst case adds up to about 2 minutes.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+# No Alertmanager: the local receiver (`uv run python -m rag.monitor receiver`, port 29093 on the
+# host) speaks the part of Alertmanager's HTTP API that Prometheus uses and writes every alert to
+# data/observe/alerts.jsonl. `host.docker.internal` is the host, set in docker-compose.yml.
+alerting:
+  alertmanagers:
+    - scheme: http
+      timeout: 5s
+      static_configs:
+        - targets: ["host.docker.internal:29093"]
+
+scrape_configs:
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]
+    # The Collector's exporter already names the series by service (job and instance labels of the
+    # resource); keep those instead of overwriting them with this job's name.
+    honor_labels: true

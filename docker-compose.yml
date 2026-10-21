@@ -10,6 +10,11 @@
 #   Collector health http://127.0.0.1:33133/
 #   Metrics (Prometheus format) http://127.0.0.1:28889/metrics
 #   Jaeger UI        http://127.0.0.1:36686/
+# Profile `monitoring` (spec P5-02; `docker compose --profile monitoring up -d`), not started by default:
+#   Prometheus       http://127.0.0.1:29090/   (alert rules: deploy/prometheus/rules.yml)
+#   Grafana          http://127.0.0.1:23000/   (dashboard "RAG platform overview", provisioned)
+# Profile `langfuse` (several GB of memory, see README): Langfuse web http://127.0.0.1:23001/
+# Every service below has a memory limit: a container that grows past it is killed, not the machine.
 name: rag-platform
 
 # Container stdout logs also fill the Docker disk; Docker keeps them forever by default.
@@ -76,15 +81,25 @@ services:
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.162.0
-    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    # Two config files are merged: the base, and one overlay from deploy/otel/ named by
+    # COLLECTOR_EXTRA (default `none`; `langfuse` adds the Langfuse exporter, spec P5-02).
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+      - --config=/etc/otelcol-contrib/extra/${COLLECTOR_EXTRA:-none}.yaml
+    environment:
+      # Only the langfuse overlay reads it: base64 of "<public key>:<secret key>".
+      LANGFUSE_BASIC_AUTH: ${LANGFUSE_BASIC_AUTH:-}
     volumes:
       - ./deploy/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - ./deploy/otel:/etc/otelcol-contrib/extra:ro
       - ./data/otel:/data/otel
     ports:
       - "127.0.0.1:24317:4317"
       - "127.0.0.1:24318:4318"
       - "127.0.0.1:33133:13133"
       - "127.0.0.1:28889:8889"
+    # The memory_limiter processor stops at 400 MiB; this is the wall behind it.
+    mem_limit: 512m
     logging: *small-logs
     # The image has no shell or HTTP client, so there is no container healthcheck;
     # scripts/dev_up.sh polls the health_check extension from the host instead.
@@ -95,6 +110,11 @@ services:
   jaeger:
     # Jaeger v2 all-in-one (v1 all-in-one is end of life); traces are kept in memory.
     image: jaegertracing/jaeger:2.22.0
+    # The built-in all-in-one configuration with `max_traces` written out (deploy/jaeger.yaml).
+    command: ["--config=file:/etc/jaeger/config.yaml"]
+    volumes:
+      - ./deploy/jaeger.yaml:/etc/jaeger/config.yaml:ro
+    mem_limit: 768m
     logging: *small-logs
     ports:
       - "127.0.0.1:36686:16686"
@@ -104,5 +124,228 @@ services:
       timeout: 3s
       retries: 20
 
+  # ---- profile `monitoring` (spec P5-02): metrics, alert rules, dashboards ----------------------
+  # Start: docker compose --profile monitoring up -d       Stop: docker compose --profile monitoring stop
+  # (`down` without the profile does not touch them). Memory: see the limits; measured use is in
+  # docs/reports/P5-report.md section 2.
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: [monitoring]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Retention: 7 days or 1 GB of samples, whichever is reached first (design s16-5: small disk).
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=1GB
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:29090:9090"
+    # The alert receiver runs on the host (it writes data/observe/alerts.jsonl).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 512m
+    logging: *small-logs
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    profiles: [monitoring]
+    environment:
+      # Local use only (port bound to 127.0.0.1). Anyone on this machine may look at the dashboard;
+      # changing it needs the admin login (password: GRAFANA_ADMIN_PASSWORD in .env, default admin).
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:23000:3000"
+    mem_limit: 384m
+    logging: *small-logs
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # ---- profile `langfuse` (spec P5-02): Langfuse v3 for the LLM-call view of traces ----------------
+  # Langfuse v3 needs Postgres, ClickHouse, Redis (with no eviction) and S3-compatible storage
+  # (MinIO) besides its two application containers. v2 (Postgres only) has no OTLP endpoint, so it
+  # could not receive what the Collector sends. Secrets: `uv run python scripts/langfuse_env.py`
+  # writes them to .env. Start: docker compose --profile langfuse up -d, then switch the
+  # Collector on (deploy/otel/langfuse.yaml). Stop and free the memory: docker compose --profile
+  # langfuse down (add -v to also delete its data).
+
+  langfuse-postgres:
+    image: postgres:17-alpine
+    profiles: [langfuse]
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-}
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse-postgres:/var/lib/postgresql/data
+    mem_limit: 256m
+    logging: *small-logs
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  langfuse-redis:
+    # Not the cache Redis: Langfuse's queues must never lose a key, so no eviction here.
+    image: redis:8.10.2-alpine
+    profiles: [langfuse]
+    command:
+      - redis-server
+      - --requirepass
+      - ${LANGFUSE_REDIS_PASSWORD:-}
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - noeviction
+    mem_limit: 192m
+    logging: *small-logs
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${LANGFUSE_REDIS_PASSWORD:-}
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.3-alpine
+    profiles: [langfuse]
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - langfuse-clickhouse:/var/lib/clickhouse
+    # ClickHouse sizes itself from the container limit (90% of it).
+    mem_limit: 1536m
+    logging: *small-logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  langfuse-minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    profiles: [langfuse]
+    entrypoint: sh
+    command: ["-c", "mkdir -p /data/langfuse && minio server --address ':9000' /data"]
+    environment:
+      MINIO_ROOT_USER: langfuse
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_PASSWORD:-}
+    volumes:
+      - langfuse-minio:/data
+    mem_limit: 256m
+    logging: *small-logs
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    profiles: [langfuse]
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-}@langfuse-postgres:5432/langfuse
+      SALT: ${LANGFUSE_SALT:-}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-}
+      NEXTAUTH_URL: http://127.0.0.1:23001
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-}
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:-}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      NODE_OPTIONS: --max-old-space-size=384
+    mem_limit: 640m
+    logging: *small-logs
+    depends_on: &langfuse-deps
+      langfuse-postgres: {condition: service_healthy}
+      langfuse-redis: {condition: service_healthy}
+      langfuse-clickhouse: {condition: service_healthy}
+      langfuse-minio: {condition: service_healthy}
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    profiles: [langfuse]
+    environment:
+      <<: *langfuse-env
+      # A first project with API keys and a first user, so no sign-up page is needed: the keys are
+      # what the Collector overlay authenticates with (LANGFUSE_BASIC_AUTH, see scripts/langfuse_env.py).
+      LANGFUSE_INIT_ORG_ID: rag-platform
+      LANGFUSE_INIT_ORG_NAME: rag-platform
+      LANGFUSE_INIT_PROJECT_ID: rag-local
+      LANGFUSE_INIT_PROJECT_NAME: rag-local
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@localhost.test}
+      LANGFUSE_INIT_USER_NAME: admin
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
+      NODE_OPTIONS: --max-old-space-size=768
+    ports:
+      - "127.0.0.1:23001:3000"
+    mem_limit: 1024m
+    logging: *small-logs
+    depends_on: *langfuse-deps
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/public/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
 volumes:
   es-data:
+  prometheus-data:
+  grafana-data:
+  langfuse-postgres:
+  langfuse-clickhouse:
+  langfuse-minio:

@@ -122,6 +122,7 @@ def test_a_good_search_sets_success_latency_and_last_success(tmp_path: Path) -> 
         assert result.outcome == "ok" and 0.2 < result.duration_s < 0.3
         assert _gauge(obs, "rag.probe.success", "search") == 1
         assert _gauge(obs, "rag.probe.last_success_timestamp", "search") == clock.now
+        assert 0.2 < (_gauge(obs, "rag.probe.last_duration", "search") or 0) < 0.3
         assert _runs(obs) == {("search", "ok"): 1}
         (point,) = [p for _, p in metric_points(obs, "rag.probe.duration")]
         assert point.count == 1 and 0.2 < point.sum < 0.3

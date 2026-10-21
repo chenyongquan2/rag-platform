@@ -1,0 +1,36 @@
+# Overlay: also send traces to a self-hosted Langfuse v3 (spec P5-02, design s15-1).
+#
+#   uv run python scripts/langfuse_env.py                # once: writes the Langfuse secrets to .env
+#   docker compose --profile langfuse up -d              # the Langfuse stack (about 3 GB, see README)
+#   COLLECTOR_EXTRA=langfuse docker compose up -d otel-collector    # the Collector adds this exporter
+#
+# Back to the default: `docker compose up -d otel-collector` (COLLECTOR_EXTRA unset) and
+# `docker compose --profile langfuse down`.
+#
+# Langfuse takes OTLP over HTTP only, at /api/public/otel (no gRPC; design s15-1), with Basic
+# authentication: base64("<public key>:<secret key>") of the project keys that
+# scripts/langfuse_env.py creates, put into LANGFUSE_BASIC_AUTH. It reads the OpenInference span
+# attributes the LlamaIndex and LangChain instrumentation sets.
+#
+# A separate pipeline, so a slow or stopped Langfuse cannot hold back Jaeger or the trace file:
+# the exporter has its own bounded queue and drops spans when it is full.
+exporters:
+  otlphttp/langfuse:
+    traces_endpoint: http://langfuse-web:3000/api/public/otel/v1/traces
+    headers:
+      Authorization: "Basic ${env:LANGFUSE_BASIC_AUTH}"
+    sending_queue:
+      enabled: true
+      queue_size: 512
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 120s
+
+service:
+  pipelines:
+    traces/langfuse:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/langfuse]

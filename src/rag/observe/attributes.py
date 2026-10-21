@@ -150,6 +150,7 @@ METRIC_PROBE_RUNS = "rag.probe.runs"
 METRIC_PROBE_DURATION = "rag.probe.duration"
 METRIC_PROBE_SUCCESS = "rag.probe.success"
 METRIC_PROBE_LAST_SUCCESS = "rag.probe.last_success_timestamp"
+METRIC_PROBE_LAST_DURATION = "rag.probe.last_duration"  # seconds of the latest run, any outcome
 PROBE_KIND = "rag.probe.kind"
 PROBE_OUTCOME = "rag.probe.outcome"
 

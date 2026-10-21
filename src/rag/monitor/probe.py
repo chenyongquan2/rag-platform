@@ -122,6 +122,11 @@ class Prober:
         self._success = meter.create_gauge(
             attr.METRIC_PROBE_SUCCESS, unit="", description="1 when the last probe run was ok"
         )
+        self._last_duration = meter.create_gauge(
+            attr.METRIC_PROBE_LAST_DURATION,
+            unit="s",
+            description="Seconds the latest probe request took (an alert reads a slow service)",
+        )
         self._last_success = meter.create_gauge(
             attr.METRIC_PROBE_LAST_SUCCESS,
             unit="s",
@@ -202,6 +207,7 @@ class Prober:
             self._runs.add(1, {**attrs, attr.PROBE_OUTCOME: outcome})
             self._duration.record(duration_s, attrs)
             self._success.set(1 if outcome == OK else 0, attrs)
+            self._last_duration.set(duration_s, attrs)
             if outcome == OK:
                 self._last_success.set(self.clock(), attrs)
         except Exception:
