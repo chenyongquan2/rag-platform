@@ -210,7 +210,7 @@ def test_config_version_of_a_knowledge_base_without_the_flag_is_unchanged() -> N
     settings = ServiceSettings(_env_file=None)  # type: ignore[call-arg]
     cfg = KnowledgeBaseConfig(kb=KB)
     # The version as it was computed before the setting existed: the setting is not in the dump.
-    dump = cfg.model_dump(mode="json", exclude={"description", "agent"})
+    dump = cfg.model_dump(mode="json", exclude={"description", "agent", "cache"})
     dump["retrieval"].pop("dedupe_by_page_key")
     # added by spec P6-01: off = not in the version
     dump["retrieval"].pop("replace_table_summaries")

@@ -92,6 +92,18 @@ JUDGE_SKIPPED = "rag.judge.skipped"  # sub-questions grounded by their rerank sc
 CLARIFY_QUESTION = "rag.clarify.question"
 CLARIFY_RESUMED = "rag.clarify.resumed"  # the step ran again with the caller's answer
 
+# Result cache (design s12, spec P5-01): set on the request span. The outcome is `hit`, `shared`
+# (waited for an identical request that was computing), `miss`, `bypass` (cache not used: breaker
+# open, or the call may not read it) or `error` (the store failed; the request was computed).
+CACHE_LAYER = "rag.cache.layer"  # l1
+CACHE_OUTCOME = "rag.cache.outcome"
+CACHE_REASON = "rag.cache.reason"  # why bypass or error, or why a miss was not stored
+CACHE_LOOKUP_MS = "rag.cache.lookup_ms"
+CACHE_STORED = "rag.cache.stored"  # the miss's result was written
+CACHE_SHADOW = (
+    "rag.cache.shadow_verdict"  # L2 shadow verdict: would_hit | wrong_hit | no_candidate | ...
+)
+
 # Value of ERROR_CATEGORY when an exception has no category (a bug, not a known failure).
 UNCLASSIFIED = "unclassified"
 OUTCOME_OK = "ok"
@@ -117,6 +129,11 @@ METRIC_STEP_DURATION = "rag.step.duration"
 # rerank threshold, and the distribution of the best rerank score per search.
 METRIC_NOT_FOUND = "rag.requests.not_found"
 METRIC_TOP_RERANK_SCORE = "rag.rerank.top_score"
+# Result cache (spec P5-01): requests by layer and outcome, results not written by reason, and
+# what the shadow-mode semantic cache would have done.
+METRIC_CACHE = "rag.cache.requests"
+METRIC_CACHE_NOT_STORED = "rag.cache.not_stored"
+METRIC_CACHE_SHADOW = "rag.cache.shadow"
 METRIC_MODEL_CALLS = "rag.model.calls"
 METRIC_MODEL_TOKENS = "rag.model.tokens"
 METRIC_MODEL_COST = "rag.model.cost"

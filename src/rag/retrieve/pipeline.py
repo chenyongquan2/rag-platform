@@ -51,7 +51,7 @@ def search_config_version(
 ) -> str:
     """First 16 hex digits of the sha256 of what decides a search result besides the data: the
     whole KB config, the embedding model and the reranker (model and input length)."""
-    kb_config = cfg.model_dump(mode="json", exclude={"description", "agent"})
+    kb_config = cfg.model_dump(mode="json", exclude={"description", "agent", "cache"})
     if not cfg.retrieval.dedupe_by_page_key:
         # A setting that is off changes no result: the version of a knowledge base that never
         # heard of it (the Hugging Face one) stays what it was before the setting existed.

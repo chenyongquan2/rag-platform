@@ -45,6 +45,7 @@ SEARCH_FIELDS = {
     "timings_ms",
     "chunks",
     "below_threshold",
+    "cache",  # P5-01: null when the service has no cache layer, as here
 }
 CHUNK_FIELDS = {"chunk_id", "text", "untrusted", "suspicious_instruction", "source_url"}
 
@@ -127,6 +128,7 @@ def test_http_end_to_end(client: tuple[TestClient, Any], records_path: Path) -> 
     assert r.status_code == 200, r.text
     body = r.json()
     assert set(body) == SEARCH_FIELDS  # no routes, rerank or threshold
+    assert body["cache"] is None
     assert body["request_id"] == "it-search-025" == r.headers["x-request-id"]
     assert body["kb"] == "hf_docs" and body["index_version"].startswith("fake_kb_hf_docs")
     assert body["config_version"] and body["data_generation"] >= 0

@@ -17,6 +17,7 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from rag.cache.info import CacheInfo
 from rag.retrieve.filters import CALLER_FILTER_KEYS
 from rag.serve.errors import error_message
 from rag.types import (
@@ -57,12 +58,20 @@ class SearchResponse(BaseModel):
     below_threshold: list[Chunk] = Field(
         default_factory=list, description="With not_found: the best chunks below the threshold."
     )
+    cache: CacheInfo | None = Field(
+        default=None, description="How the result cache served this request (null: no cache)."
+    )
 
     @classmethod
     def from_result(
-        cls, result: RetrievalResult, *, timings_ms: Mapping[str, float] | None = None
+        cls,
+        result: RetrievalResult,
+        *,
+        timings_ms: Mapping[str, float] | None = None,
+        cache: CacheInfo | None = None,
     ) -> SearchResponse:
         return cls(
+            cache=cache,
             request_id=result.request_id,
             kb=result.kb,
             index_version=result.index_version,
@@ -164,12 +173,20 @@ class AskResponse(BaseModel):
     error_categories: list[str] = Field(description="Flags set above, as category names.")
     citation_check: CitationCheck
     timings_ms: dict[str, float] = Field(description="Milliseconds per step.")
+    cache: CacheInfo | None = Field(
+        default=None, description="How the result cache served this request (null: no cache)."
+    )
 
     @classmethod
     def from_result(
-        cls, result: AskResult, *, timings_ms: Mapping[str, float] | None = None
+        cls,
+        result: AskResult,
+        *,
+        timings_ms: Mapping[str, float] | None = None,
+        cache: CacheInfo | None = None,
     ) -> AskResponse:
         return cls(
+            cache=cache,
             request_id=result.request_id,
             kb=result.kb,
             session_id=result.session_id,

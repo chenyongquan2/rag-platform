@@ -276,7 +276,7 @@ def test_table_replace_is_wired_into_the_hybrid_search_too() -> None:
 def test_search_config_version_ignores_replace_table_summaries_when_off() -> None:
     settings = ServiceSettings(_env_file=None)  # type: ignore[call-arg]
     cfg = KnowledgeBaseConfig(kb=KB)
-    dump = cfg.model_dump(mode="json", exclude={"description", "agent"})
+    dump = cfg.model_dump(mode="json", exclude={"description", "agent", "cache"})
     dump["retrieval"].pop("dedupe_by_page_key")
     dump["retrieval"].pop("replace_table_summaries")
     dump["retrieval"].pop("replace_table_summaries_after_rerank")  # spec P6-01

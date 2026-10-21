@@ -104,7 +104,7 @@ def test_the_stage_setting_does_nothing_while_the_replacement_is_off() -> None:
 def test_config_version_ignores_the_stage_setting_when_it_is_off() -> None:
     settings = ServiceSettings(_env_file=None)  # type: ignore[call-arg]
     cfg = KnowledgeBaseConfig(kb=KB)
-    dump = cfg.model_dump(mode="json", exclude={"description", "agent"})
+    dump = cfg.model_dump(mode="json", exclude={"description", "agent", "cache"})
     for key in (
         "dedupe_by_page_key",
         "replace_table_summaries",
