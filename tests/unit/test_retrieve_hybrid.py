@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 from elastic_transport import ApiResponseMeta, ConnectionError, ConnectionTimeout, HttpHeaders
@@ -500,3 +501,90 @@ def test_retriever_uses_rrf_weights() -> None:
     from rag.retrieve.hybrid import ROUTES
 
     assert RRF_ROUTES == ROUTES  # the config's copy of the route names stays in step
+
+
+# ---- spec P3-06 AC10: a query may ask the vector wait to leave time for the rerank ----------
+
+
+def test_embedding_wait_leaves_time_for_rerank() -> None:
+    """1 s limit, 50 ms kept for the search, a query that asks for 500 ms for the rerank: a
+    gateway that does not answer is waited for 450 ms, so about half a second is left. Without
+    the reserve the wait runs to the search reserve and the rerank that follows finds no time
+    (P3-05: round-two searches with no rerank score)."""
+
+    def run(rerank_reserve_ms: int) -> tuple[float, HybridQuery]:
+        es = FakeMsearchClient(bm25=BM25_HITS, vector=VECTOR_HITS)
+        query = _query(deadline_ms=1000, rerank_reserve_ms=rerank_reserve_ms)
+        retriever = _retriever(es, _SlowEmbedding(dim=DIM, delay_s=2.0), es_reserve_ms=50)
+        retriever.retrieve(query)
+        assert query.deadline is not None
+        return query.deadline.remaining_s(), query
+
+    left, query = run(500)
+    assert left >= 0.4  # 0.5 s in theory
+    assert query.trace.failed_routes == {VECTOR: "embedding: timeout"}
+    assert list(query.trace.routes) == [BM25]
+    left_without, _ = run(0)
+    assert left_without < 0.15  # only the search reserve (50 ms) and the search itself
+
+
+def test_a_plain_query_waits_as_before_for_a_slow_gateway() -> None:
+    """Review probe (P3-06): the embedding takes 1.5 s and the caller's limit is 3 s. A plain
+    query, which is what `search_docs` and the retrieval evals send, gets both routes and is not
+    degraded; only a query that asks for a rerank reserve (the ask_docs graph, round two and
+    later) gives up the vector earlier."""
+    es = FakeMsearchClient(bm25=BM25_HITS, vector=VECTOR_HITS)
+    slow = _SlowEmbedding(dim=DIM, delay_s=1.5)
+    plain = _query(deadline_ms=3000)
+    _retriever(es, slow).retrieve(plain)
+    assert plain.rerank_reserve_ms == 0
+    assert plain.trace.degraded is False and set(plain.trace.routes) == {BM25, VECTOR}
+
+    reserved = _query(deadline_ms=3000, rerank_reserve_ms=2000)
+    _retriever(FakeMsearchClient(bm25=BM25_HITS, vector=VECTOR_HITS), slow).retrieve(reserved)
+    assert reserved.trace.degraded is True and list(reserved.trace.routes) == [BM25]
+
+
+def test_rerank_reserve_is_at_most_half_of_the_time_limit() -> None:
+    # A reserve larger than the limit must not leave the vector no time at all: with a 400 ms
+    # limit and a 5 s reserve the vector still gets about 120 ms (400 - 80 - 200), enough for a
+    # fast embedding; both routes answer.
+    for deadline_ms in (400, 800, 1000):
+        es = FakeMsearchClient(bm25=BM25_HITS, vector=VECTOR_HITS)
+        query = _query(deadline_ms=deadline_ms, rerank_reserve_ms=5_000)
+        _retriever(es, es_reserve_ms=200).retrieve(query)
+        assert query.trace.degraded is False, (deadline_ms, query.trace.failed_routes)
+        assert set(query.trace.routes) == {BM25, VECTOR}
+
+
+def test_rerank_reserve_boundaries() -> None:
+    reserve = EsHybridRetriever.rerank_reserve_s
+    assert reserve(Deadline.after_ms(10_000), 2_000) == pytest.approx(2.0)
+    assert reserve(Deadline.after_ms(3_000), 2_000) == pytest.approx(1.5)  # half of the limit
+    assert reserve(Deadline.after_ms(4_000), 2_000) == pytest.approx(2.0)  # exactly half
+    assert reserve(Deadline.after_ms(10_000), 0) == 0.0
+    assert reserve(Deadline.after_ms(10_000), -5) == 0.0
+    # A deadline that does not know its total time limit (total_s 0) takes the reserve as given.
+    unknown = Deadline(at=time.monotonic() + 5, total_s=0.0)
+    assert reserve(unknown, 700) == pytest.approx(0.7)
+
+
+def test_rerank_reserve_changes_nothing_with_ample_time() -> None:
+    """With time to spare the same scripted search gives the same nodes, route lists and trace
+    flags whatever the reserve: the field only moves the end of the vector wait."""
+
+    def run(rerank_reserve_ms: int) -> tuple[Any, ...]:
+        es = FakeMsearchClient(bm25=BM25_HITS, vector=VECTOR_HITS)
+        query = _query(deadline_ms=10_000, rerank_reserve_ms=rerank_reserve_ms)
+        nodes = _retriever(es, es_reserve_ms=200).retrieve(query)
+        bodies = [
+            {k: v for k, v in s.items() if k != "timeout"} for s in es.calls[0]["searches"] if s
+        ]
+        return (
+            [(n.node.node_id, n.score, dict(n.node.metadata)) for n in nodes],
+            {name: list(hits) for name, hits in query.trace.routes.items()},
+            (query.trace.degraded, dict(query.trace.failed_routes), query.trace.index_version),
+            bodies,
+        )
+
+    assert run(0) == run(2_000) == run(4_000)

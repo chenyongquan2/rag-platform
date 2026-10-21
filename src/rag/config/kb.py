@@ -239,6 +239,14 @@ class AgentConfig(_Strict):
     - `multi_queries`: phrasings of each missing sub-question in round two (multi-query).
     - `hyde`: round three searches with a hypothetical answer passage (HyDE, s8-2); off: round
       three asks for new phrasings again.
+    - `judge_skip_score` (spec P3-06): a sub-question that has a chunk with a rerank score at or
+      above this is taken as grounded without asking the judge model; when no sub-question is left
+      to ask, no model call is made. None: the model is asked about every sub-question that has
+      chunks above the threshold (the P3-03 behaviour).
+    - `round2_on_not_enough` (spec P3-06): with the judge on, a plain `not_enough` (no chunk
+      passed the threshold in any round) goes on to another round (true, design s13-4). False:
+      it goes straight to "not found" with the nearest chunks, and a further round runs only for
+      `partly_enough`, which names a missing sub-question. Data behind the switch: decisions.md.
     """
 
     max_rounds: int = Field(default=3, ge=1)
@@ -250,6 +258,8 @@ class AgentConfig(_Strict):
     judge: bool = False
     multi_queries: int = Field(default=3, ge=1, le=6)
     hyde: bool = True
+    judge_skip_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    round2_on_not_enough: bool = True
 
 
 class KnowledgeBaseConfig(_Strict):
@@ -267,6 +277,17 @@ class KnowledgeBaseConfig(_Strict):
     access: AccessConfig = Field(default_factory=AccessConfig)
     answer: AnswerConfig = Field(default_factory=AnswerConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+
+    @model_validator(mode="after")
+    def _skip_score_is_not_below_the_threshold(self) -> Self:
+        skip = self.agent.judge_skip_score
+        if skip is not None and skip < self.retrieval.threshold:
+            raise ValueError(
+                f"agent.judge_skip_score ({skip}) must not be below retrieval.threshold "
+                f"({self.retrieval.threshold}): a chunk that does not pass the threshold is "
+                "not a sure one"
+            )
+        return self
 
     @model_validator(mode="after")
     def _default_eval_dir(self) -> Self:

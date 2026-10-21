@@ -17,7 +17,12 @@ BM25 search is sent (degraded). Only when no route answers does the retriever ra
 Deadline: the request's `Deadline` (s16-2) bounds everything. A query vector in the L0 cache
 is used whenever the cache answers within half of the remaining time. The gateway call is
 waited for at most until min(`es_reserve_ms`, `es_reserve_ratio` x the request's time limit)
-before the deadline, the time kept for the search; the `_msearch` gets the remaining time as its
+before the deadline, the time kept for the search. A query may also carry `rerank_reserve_ms`
+(`HybridQuery`; at most half of the request's time limit, 0 by default): the wait then ends that
+much earlier, so the rerank that follows still has time. Only the ask_docs graph sets it, for the
+searches of round two and later (spec P3-06): a vector that arrives with no time left for the
+rerank gave a result with no rerank score. `search_docs` and the retrieval evals never set it,
+so their results do not depend on it; the `_msearch` gets the remaining time as its
 HTTP time-out, and each search inside it an Elasticsearch `timeout` shorter by `es_margin_ms` (at
 most half of the remaining time, so the searches keep the other half), so a
 slow route is reported as timed out before the HTTP request itself is cut off.
@@ -187,6 +192,15 @@ class EsHybridRetriever(BaseRetriever):
             return cap
         return min(cap, self.es_reserve_ratio * deadline.total_s)
 
+    @staticmethod
+    def rerank_reserve_s(deadline: Deadline, reserve_ms: int) -> float:
+        """Time kept for the rerank while waiting for the gateway: `reserve_ms`, at most half of
+        the request's whole time limit (so a short deadline still waits for a vector)."""
+        cap = max(0, reserve_ms) / 1000.0
+        if deadline.total_s <= 0:
+            return cap
+        return min(cap, 0.5 * deadline.total_s)
+
     def close(self) -> None:
         """Stop the query-embedding threads (calls already running finish on their own)."""
         self._executor.shutdown(wait=False, cancel_futures=True)
@@ -240,7 +254,11 @@ class EsHybridRetriever(BaseRetriever):
         cached = self._cached_vector(query.query_str, deadline)
         if cached is not None:
             return cached, None
-        wait_s = deadline.remaining_s() - self.es_reserve_s(deadline)
+        wait_s = (
+            deadline.remaining_s()
+            - self.es_reserve_s(deadline)
+            - self.rerank_reserve_s(deadline, query.rerank_reserve_ms)
+        )
         if wait_s <= 0:
             return None, EMBED_TIMEOUT
         future = self._executor.submit(self._embed_model.get_query_embedding, query.query_str)

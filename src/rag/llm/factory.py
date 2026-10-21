@@ -43,6 +43,7 @@ def make_chat_model(
     async_transport: httpx.AsyncBaseTransport | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    max_tokens: int | None = None,
 ) -> BaseChatModel:
     """Chat model for `profile` (`online`, `offline` or `cheap`).
 
@@ -53,9 +54,15 @@ def make_chat_model(
     `chat_fake_reply` to every call; it sends nothing and writes no ledger line.
     Fails before any request when the gateway URL or key is missing or the model has no price.
     `ledger`, `transport`, `async_transport`, `clock` and `sleep` (sync retries) are for tests.
+    `max_tokens` replaces the profile's output cap for this model only (spec P3-06: the graph's
+    answer call); None keeps the profile's.
     """
     settings = settings or ServiceSettings()
     config = resolve_chat_profile(profile, settings)
+    if max_tokens is not None:
+        if max_tokens < 1:
+            raise ValueError(f"max_tokens must be >= 1, got {max_tokens}")
+        config = config.model_copy(update={"max_tokens": max_tokens})
     if settings.chat_backend == "fake":
         return FakeChatModel(default_response=settings.chat_fake_reply)
     if not settings.llm_base_url:

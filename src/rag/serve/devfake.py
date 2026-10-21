@@ -132,6 +132,7 @@ class DevSearchBackend(ScriptedSearchBackend):
         deadline_ms: int | None = None,
         request_id: str | None = None,
         acl_groups: Sequence[str] | None = None,
+        rerank_reserve_ms: int = 0,
     ) -> RetrievalResult:
         time.sleep(self.search_ms / 1000.0)
         self.default = self._result(question)
@@ -143,6 +144,7 @@ class DevSearchBackend(ScriptedSearchBackend):
             deadline_ms=deadline_ms,
             request_id=request_id,
             acl_groups=acl_groups,
+            rerank_reserve_ms=rerank_reserve_ms,
         )
 
 

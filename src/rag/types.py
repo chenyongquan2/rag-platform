@@ -136,6 +136,9 @@ class _ResultMeta(BaseModel):
         generation_error = getattr(self, "generation_error", None)
         if generation_error is not None:
             categories.append(ErrorCategory(generation_error))
+        retrieval_error = getattr(self, "retrieval_error", None)
+        if retrieval_error is not None:
+            categories.append(ErrorCategory(retrieval_error))
         stop_reason = getattr(self, "stop_reason", None)
         if stop_reason in ("deadline", "recursion_limit"):
             categories.append(ErrorCategory.AGENT_DEADLINE)
@@ -246,13 +249,17 @@ class Answer(_ResultMeta):
         return " ".join(s.text for s in self.sentences)
 
 
-StopReason = Literal["deadline", "recursion_limit", "token_cap", "max_rounds", "no_new_query"]
+StopReason = Literal[
+    "deadline", "recursion_limit", "token_cap", "max_rounds", "no_new_query", "retrieval_error"
+]
 """Why an `ask_docs` run stopped searching before it confirmed it had searched enough (s13-3):
 its total deadline, its recursion limit, the per-request token cap, the KB's `max_rounds` with
 part of the question still without grounds, or `no_new_query` (the judge wanted another round
 and no new phrasing could be made: the model failed, every phrasing was refused, or the KB
 does not allow a model before the answer). Three rounds in which nothing reached the rerank
-threshold are not a stop reason: that is a plain `not_found` (s13-4)."""
+threshold are not a stop reason: that is a plain `not_found` (s13-4). `retrieval_error`: a
+search of round two or later failed (spec P3-06; `AskResult.retrieval_error` says which
+category) and the run answered from the earlier rounds."""
 
 Sufficiency = Literal["enough", "partly_enough", "not_enough"]
 """The sufficiency judge's verdict on what a run found (s13-4)."""
@@ -307,6 +314,9 @@ class AskResult(_ResultMeta):
     standalone_question: str | None = None
     search_queries: list[str] = Field(default_factory=list)
     fallbacks: list[str] = Field(default_factory=list)
+    retrieval_error: ErrorCategory | None = None
+    """A search of round two or later failed (`retrieval_timeout` or `retrieval_failed`) and the
+    run answered from the earlier rounds (spec P3-06); the request is also `degraded`."""
 
     @property
     def chunks(self) -> list[Chunk]:

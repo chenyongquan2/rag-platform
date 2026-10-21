@@ -27,13 +27,15 @@ class JudgeOutcome:
     (nothing passed the threshold in any round). `missing` are the sub-questions still without
     grounds, as the first round's queries; the next round asks about these only. `fallback`
     names why the model's judgement was not used (the rules decided alone); `used_model` is set
-    when the model's judgement was used.
+    when the model's judgement was used; `skipped` counts the sub-questions taken as grounded by
+    their rerank score alone (`agent.judge_skip_score`, spec P3-06).
     """
 
     verdict: Sufficiency
     missing: tuple[str, ...] = ()
     fallback: str | None = None
     used_model: bool = False
+    skipped: int = 0
 
 
 @dataclass(frozen=True)

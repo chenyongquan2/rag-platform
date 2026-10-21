@@ -117,6 +117,7 @@ class SearchBackend(Protocol):
         deadline_ms: int | None = None,
         request_id: str | None = None,
         acl_groups: Sequence[str] | None = None,
+        rerank_reserve_ms: int = 0,
     ) -> RetrievalResult: ...
 
     def get_context(

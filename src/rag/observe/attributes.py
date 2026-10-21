@@ -88,6 +88,7 @@ REWRITE_TECHNIQUE = "rag.rewrite.technique"  # round two and later: multi_query 
 JUDGE_MISSING = "rag.judge.missing"  # the sub-questions still without grounds
 JUDGE_MODEL_USED = "rag.judge.model_used"
 JUDGE_FALLBACK = "rag.judge.fallback"  # why the rules alone decided
+JUDGE_SKIPPED = "rag.judge.skipped"  # sub-questions grounded by their rerank score, not asked
 CLARIFY_QUESTION = "rag.clarify.question"
 CLARIFY_RESUMED = "rag.clarify.resumed"  # the step ran again with the caller's answer
 

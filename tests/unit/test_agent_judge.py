@@ -229,3 +229,110 @@ def test_judge_model_falls_back_to_the_helper_model_and_is_guarded_by_the_token_
     outcome = asyncio.run(judge_rounds(ctx, [_round("A", [0.9])]))
     assert outcome.fallback == "token_cap" and model.calls == []
     assert ctx.budget.cap_hit
+
+
+def test_judge_does_not_count_unscored_chunks() -> None:
+    """Spec P3-06 AC5: a chunk the reranker never scored (it timed out first) is not grounds. It
+    used to count as above the threshold, which made every sub-question "enough" by the rules."""
+    base = scored_result(KB, [0.5], pages=[1])
+    unscored = base.model_copy(
+        update={"chunks": [c.model_copy(update={"rerank_score": None}) for c in base.chunks]}
+    )
+    rounds = [RetrievalRound.from_result(1, "A", unscored)]
+    model = FakeChatModel(responses=[])  # a call raises
+    outcome = _judge(rounds, model)
+    assert (outcome.verdict, outcome.missing, outcome.used_model) == ("not_enough", ("A",), False)
+    assert model.calls == []
+    # With a scored chunk next to the unscored one only the scored one is shown to the model.
+    mixed = base.model_copy(
+        update={"chunks": [base.chunks[0], *unscored.chunks[:0], _unscored_chunk(7)]}
+    )
+    model = FakeChatModel(responses=[judge_reply(True)])
+    outcome = _judge([RetrievalRound.from_result(1, "A", mixed)], model)
+    assert outcome.verdict == "enough"
+    assert "body of page 7" not in _prompt(model)
+
+
+def _unscored_chunk(page: int) -> Any:
+    from rag.testing.serve import fake_chunk
+
+    return fake_chunk(KB, page)
+
+
+def test_judge_skip_score() -> None:
+    """Spec P3-06 AC8: a sub-question with a chunk at or above `judge_skip_score` is grounded
+    without asking; the model gets the others; none left to ask: no call at all."""
+    cfg = kb_config(KB, judge=True, judge_skip_score=0.98)
+    rounds = [_round("A", [0.99, 0.5], pages=[1, 2]), _round("B", [0.9], pages=[3])]
+    model = FakeChatModel(responses=[judge_reply(False)])
+    outcome = _judge(rounds, model, cfg=cfg)
+    # A is sure (0.99 >= 0.98): not asked. B is asked, and the model says no.
+    assert (outcome.verdict, outcome.missing, outcome.skipped) == ("partly_enough", ("B",), 1)
+    assert len(model.calls) == 1
+    assert "body of page 3" in _prompt(model) and "body of page 1" not in _prompt(model)
+
+    model = FakeChatModel(responses=[])  # a call raises
+    outcome = _judge([_round("A", [0.98], pages=[1])], model, cfg=cfg)  # equal to the score: sure
+    assert (outcome.verdict, outcome.used_model, outcome.skipped) == ("enough", False, 1)
+    assert model.calls == []
+
+    # Just below the score the model is asked; unset (the default) it is always asked.
+    model = FakeChatModel(responses=[judge_reply(True)])
+    outcome = _judge([_round("A", [0.979], pages=[1])], model, cfg=cfg)
+    assert (outcome.verdict, outcome.used_model, outcome.skipped) == ("enough", True, 0)
+    model = FakeChatModel(responses=[judge_reply(False)])
+    outcome = _judge([_round("A", [0.999], pages=[1])], model)
+    assert (outcome.verdict, outcome.used_model, outcome.skipped) == ("partly_enough", True, 0)
+
+    # A sure sub-question stays enough when the model fails for the others (rules decide those).
+    model = FakeChatModel(responses=[])
+    rounds = [_round("A", [0.99], pages=[1]), _round("B", [0.9], pages=[2])]
+    outcome = _judge(rounds, model, cfg=cfg)
+    assert (outcome.verdict, outcome.skipped) == ("enough", 1) and outcome.fallback
+
+
+@pytest.mark.parametrize(
+    "state",
+    [{"two_hop": True}, {"multi_hop": "yes"}, {"multi_hop": "maybe"}],
+    ids=["two_hop", "multi_hop yes", "multi_hop maybe"],
+)
+def test_judge_skip_is_off_for_a_question_that_may_need_two_pages(state: dict[str, Any]) -> None:
+    """Review probe (P3-06): one chunk at 0.99 does not show that a question that needs two pages
+    has both; the route flagged it, so the model is asked whatever the score."""
+    cfg = kb_config(KB, judge=True, judge_skip_score=0.98)
+    ctx = make_context(cfg=cfg, judge_model=FakeChatModel(responses=[judge_reply(False)]))
+    rounds = [_round("A", [0.99], pages=[1])]
+    outcome = asyncio.run(SufficiencyJudge()({"rounds": rounds, **state}, ctx))  # type: ignore[arg-type]
+    assert (outcome.verdict, outcome.used_model, outcome.skipped) == ("partly_enough", True, 0)
+    # The same question, not flagged by the route, is skipped.
+    ctx = make_context(cfg=cfg, judge_model=FakeChatModel(responses=[]))
+    outcome = asyncio.run(SufficiencyJudge()({"rounds": rounds, "multi_hop": "no"}, ctx))  # type: ignore[arg-type]
+    assert (outcome.verdict, outcome.used_model, outcome.skipped) == ("enough", False, 1)
+
+
+def test_judge_skip_needs_a_sure_chunk_that_is_not_another_sub_questions_too() -> None:
+    """Review probe (P3-06): two sub-questions whose searches return the same page-one chunk at
+    0.99 are not both settled by it. A sub-question is skipped only when it has a sure chunk of
+    its own."""
+    cfg = kb_config(KB, judge=True, judge_skip_score=0.98)
+    # Same chunk (page 1) is the only sure chunk of A and of B: both go to the model.
+    rounds = [_round("A", [0.99], pages=[1]), _round("B", [0.99], pages=[1])]
+    model = FakeChatModel(responses=[judge_reply(True, False)])
+    outcome = _judge(rounds, model, cfg=cfg)
+    assert (outcome.verdict, outcome.missing, outcome.skipped) == ("partly_enough", ("B",), 0)
+    assert len(model.calls) == 1
+    # B also has a sure chunk of its own (page 2): B is skipped, A is asked.
+    rounds = [_round("A", [0.99], pages=[1]), _round("B", [0.99, 0.995], pages=[1, 2])]
+    model = FakeChatModel(responses=[judge_reply(True)])
+    outcome = _judge(rounds, model, cfg=cfg)
+    assert (outcome.verdict, outcome.skipped, len(model.calls)) == ("enough", 1, 1)
+    assert "body of page 1" in _prompt(model)  # A's fragment, not B's page 2
+    assert "body of page 2" not in _prompt(model)
+
+
+def test_judge_skip_can_be_switched_off_per_call() -> None:
+    cfg = kb_config(KB, judge=True, judge_skip_score=0.98)
+    model = FakeChatModel(responses=[judge_reply(True)])
+    ctx = make_context(cfg=cfg, judge_model=model)
+    outcome = asyncio.run(judge_rounds(ctx, [_round("A", [0.99], pages=[1])], allow_skip=False))
+    assert (outcome.used_model, outcome.skipped, len(model.calls)) == (True, 0, 1)

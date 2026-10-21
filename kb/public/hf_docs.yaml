@@ -60,10 +60,18 @@ answer:
 agent:
   max_rounds: 3          # retrieval rounds of one ask_docs request at most (s13-4: three rounds)
   rewrite: true          # the small model rewrites the question when rules cannot (s8-2, s13-3)
-  declarative: true      # search with a statement ("Push a model with push_to_hub"), not a question
+  declarative: false     # false since P3-06: the declarative rewrite did not find the gold page more often
+                         # than the question itself (P3-05: 63 against 64 on 65 single-hop questions) and
+                         # cost a model call (2.7 s, 0.004 CNY) on 96% of questions; a follow-up or a
+                         # two-hop question still goes to the model. true = the P3-02 behaviour.
   max_sub_questions: 3   # a two-hop question makes at most this many searches
   clarify: true          # ask the caller back once when the question names nothing to search
   route_model: true      # the small model decides what the rules leave open
   judge: true            # after each round: enough / partly enough / not enough (s13-4); off = one round
   multi_queries: 3       # round 2 asks each missing sub-question in this many other phrasings
   hyde: true             # round 3 searches with a hypothetical answer passage
+  judge_skip_score: 0.98 # P3-06: a sub-question with a chunk scored >= 0.98 is grounded without asking
+                         # the judge model (P3-05 records: 73 of 100 answerable questions, judge
+                         # accuracy 95/100 against 92/100 with the model); null = always ask (P3-03).
+  round2_on_not_enough: true  # P3-06: false = a plain "not enough" is "not found" at once, only "partly
+                         # enough" gets round 2; true = design 13.4 (see decisions.md for the data)

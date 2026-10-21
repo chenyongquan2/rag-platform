@@ -102,6 +102,7 @@ class FakeSearchPipeline:
         deadline_ms: int | None = None,
         request_id: str | None = None,
         acl_groups: Sequence[str] | None = None,
+        rerank_reserve_ms: int = 0,
     ) -> RetrievalResult:
         self.calls.append(
             {
@@ -112,6 +113,7 @@ class FakeSearchPipeline:
                 "deadline_ms": deadline_ms,
                 "request_id": request_id,
                 "acl_groups": tuple(acl_groups) if acl_groups is not None else None,
+                "rerank_reserve_ms": rerank_reserve_ms,
             }
         )
         if self.raises is not None:

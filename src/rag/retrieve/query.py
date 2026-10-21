@@ -66,4 +66,8 @@ class HybridQuery(QueryBundle):
     acl_groups: tuple[str, ...] = ()
     filters: Mapping[str, Any] = field(default_factory=dict)
     deadline: Deadline | None = None
+    rerank_reserve_ms: int = 0
+    """Time the query-vector wait leaves for the rerank that follows (at most half of the
+    deadline's total). 0, the default, is the plain search: `search_docs` never sets it; the
+    ask_docs graph sets it for the searches of round two and later (spec P3-06)."""
     trace: RetrievalTrace = field(default_factory=RetrievalTrace)
