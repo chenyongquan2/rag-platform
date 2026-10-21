@@ -239,3 +239,34 @@ tests:
             exp_annotations:
               summary: "Model cost in the last 24 hours is above 2 CNY"
               description: "Spent 9.00 CNY in 24 hours (from the app's counters; the cost ledger has the full list)."
+
+  - interval: 1m
+    name: not-found rate over half with traffic
+    input_series:
+      - series: 'rag_requests_total{rag_tool="search_docs", rag_outcome="ok"}'
+        values: '0+60x60'      # one request a second
+      - series: 'rag_requests_not_found_total{rag_tool="search_docs"}'
+        values: '0+42x60'      # 70 % find nothing
+      - series: 'rag_requests_not_found_total{rag_tool="search_docs", rag_request_probe="1"}'
+        values: '0+1000x60'    # the probe's requests do not count
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: NotFoundRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Half the searches find nothing above the rerank threshold"
+              description: "Not-found share over 30 minutes: 70%. Check the last ingest and the questions users ask."
+
+  - interval: 1m
+    name: a normal not-found rate is not an alert
+    input_series:
+      - series: 'rag_requests_total{rag_tool="search_docs", rag_outcome="ok"}'
+        values: '0+60x60'
+      - series: 'rag_requests_not_found_total{rag_tool="search_docs"}'
+        values: '0+6x60'       # 10 %
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: NotFoundRateHigh
+        exp_alerts: []

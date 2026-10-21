@@ -113,6 +113,7 @@ def test_alert_rules_have_the_alerts_the_design_asks_for() -> None:
         "CacheBreakerOpen",
         "DailyCostOverBudget",
         "TokenBurnHigh",
+        "NotFoundRateHigh",
     } <= set(rules)
     for name, rule in rules.items():
         assert rule["labels"]["severity"] in {"critical", "warning"}, name
@@ -142,10 +143,12 @@ def test_every_tested_alert_exists_and_the_fault_alerts_are_tested() -> None:
     assert {"SearchProbeFailing", "DependencyDown", "HighErrorRate", "ProbeSlow"} <= tested
 
 
-def test_dashboard_is_valid_provisioned_json_with_about_ten_panels() -> None:
+def test_dashboard_is_valid_provisioned_json_with_about_a_dozen_panels() -> None:
+    # 8 to 12 before review round 1; issue 11 added the not-found and rerank-score panels and
+    # the mixed-unit panel was split in three, so the limit is now 16.
     dashboard = _dashboard()
     panels = dashboard["panels"]
-    assert 8 <= len(panels) <= 12
+    assert 8 <= len(panels) <= 16
     assert dashboard["uid"] == "rag-overview" and dashboard["refresh"]
     assert len({p["id"] for p in panels}) == len(panels)
     datasource = yaml.safe_load(
@@ -163,6 +166,64 @@ def test_dashboard_is_valid_provisioned_json_with_about_ten_panels() -> None:
         (DEPLOY / "grafana" / "provisioning" / "dashboards" / "dashboards.yml").read_text("utf-8")
     )["providers"][0]
     assert provider["options"]["path"] == "/etc/grafana/dashboards"
+
+
+def test_dashboard_shows_the_retrieval_quality_signals() -> None:
+    """Review P5-02 round 1, issue 11: the not-found counter and the best rerank score (design
+    s15-1, "indirect signals of retrieval quality") have panels."""
+    used: set[str] = set()
+    for panel in _dashboard()["panels"]:
+        for target in panel["targets"]:
+            used |= promql_metrics(target["expr"])
+    assert "rag_requests_not_found_total" in used
+    assert "rag_rerank_top_score_bucket" in used
+    assert {"rag_online_eval_judged_hit_rate", "rag_online_eval_judged_mrr"} <= used
+
+
+USER_SERIES = (
+    "rag_requests_total",
+    "rag_errors_total",
+    "rag_step_duration_seconds_bucket",
+    "rag_cache_requests_total",
+    "rag_requests_rerank_timeout_total",
+    "rag_requests_degraded_total",
+    "rag_requests_not_found_total",
+    "rag_rerank_top_score_bucket",
+)
+
+
+def _selectors(expr: str, name: str) -> list[str]:
+    return re.findall(rf"(?<![a-z_]){name}({{[^}}]*}})?", expr)
+
+
+def test_user_facing_panels_and_quality_alerts_leave_the_probe_out() -> None:
+    """Review P5-02 round 1, issue 4: every selector of a request series in the dashboard and in
+    the quality alerts excludes `rag_request_probe="1"`."""
+    expressions = [t["expr"] for p in _dashboard()["panels"] for t in p["targets"]]
+    data = yaml.safe_load(RULES.read_text("utf-8"))
+    quality = next(g for g in data["groups"] if g["name"] == "rag-quality")
+    expressions += [rule["expr"] for rule in quality["rules"]]
+    checked = 0
+    for expr in expressions:
+        for name in USER_SERIES:
+            for labels in _selectors(expr, name):
+                assert 'rag_request_probe!="1"' in labels, (name, expr)
+                checked += 1
+    assert checked >= 20
+
+
+def test_every_panel_has_one_unit_and_the_cost_panel_says_cny() -> None:
+    panels = {p["title"]: p for p in _dashboard()["panels"]}
+    assert "CNY" in panels["Model cost per hour (CNY)"]["fieldConfig"]["defaults"]["unit"]
+    for panel in panels.values():
+        # A panel draws one quantity: seconds, verdict counts and a 0-to-1 share are not mixed.
+        metrics = set()
+        for target in panel["targets"]:
+            metrics |= promql_metrics(target["expr"])
+        mixed = any(m.endswith("_seconds") for m in metrics) and any(
+            m.endswith("_total") for m in metrics
+        )
+        assert not mixed, panel["title"]
 
 
 # ---- Prometheus and compose ----------------------------------------------------------------

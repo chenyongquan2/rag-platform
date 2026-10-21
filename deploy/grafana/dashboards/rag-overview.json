@@ -23,7 +23,7 @@
     {
       "id": 1,
       "title": "Request rate",
-      "description": "Requests per second by tool (search_docs, ask_docs).",
+      "description": "Requests per second by tool (search_docs, ask_docs). Probe requests are left out.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -41,7 +41,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (rag_tool) (rate(rag_requests_total{rag_tool=~\"search_docs|ask_docs\"}[$__rate_interval]))",
+          "expr": "sum by (rag_tool) (rate(rag_requests_total{rag_tool=~\"search_docs|ask_docs\", rag_request_probe!=\"1\"}[$__rate_interval]))",
           "legendFormat": "{{rag_tool}}",
           "refId": "A"
         }
@@ -65,7 +65,7 @@
     {
       "id": 2,
       "title": "Error rate",
-      "description": "Share of requests that ended with an error. Alert HighErrorRate fires above 10%.",
+      "description": "Share of requests that ended with an error. Alert HighErrorRate fires above 10%. Probe requests are left out.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -83,7 +83,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(rag_requests_total{rag_tool=~\"search_docs|ask_docs\", rag_outcome=\"error\"}[$__rate_interval])) / sum(rate(rag_requests_total{rag_tool=~\"search_docs|ask_docs\"}[$__rate_interval]))",
+          "expr": "sum(rate(rag_requests_total{rag_tool=~\"search_docs|ask_docs\", rag_outcome=\"error\", rag_request_probe!=\"1\"}[$__rate_interval])) / sum(rate(rag_requests_total{rag_tool=~\"search_docs|ask_docs\", rag_request_probe!=\"1\"}[$__rate_interval]))",
           "legendFormat": "error share",
           "refId": "A"
         }
@@ -107,7 +107,7 @@
     {
       "id": 3,
       "title": "Errors by category",
-      "description": "Error categories of the result (design s16-8), per second. degraded and rerank_timeout are results, not failures.",
+      "description": "Error categories of the result (design s16-8), per second. degraded and rerank_timeout are results, not failures. Probe requests are left out.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -125,7 +125,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (rag_error_category) (rate(rag_errors_total[$__rate_interval]))",
+          "expr": "sum by (rag_error_category) (rate(rag_errors_total{rag_request_probe!=\"1\"}[$__rate_interval]))",
           "legendFormat": "{{rag_error_category}}",
           "refId": "A"
         }
@@ -149,7 +149,7 @@
     {
       "id": 4,
       "title": "search_docs latency P50 / P95",
-      "description": "Measured P95 4 to 6 s on this machine. Alert SearchLatencyP95High at 8 s.",
+      "description": "Measured P95 4 to 6 s on this machine. Alert SearchLatencyP95High at 8 s. Probe requests are left out.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -167,7 +167,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step=\"search_docs\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step=\"search_docs\", rag_request_probe!=\"1\"}[$__rate_interval])))",
           "legendFormat": "P50",
           "refId": "A"
         },
@@ -176,7 +176,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step=\"search_docs\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step=\"search_docs\", rag_request_probe!=\"1\"}[$__rate_interval])))",
           "legendFormat": "P95",
           "refId": "B"
         }
@@ -200,7 +200,7 @@
     {
       "id": 5,
       "title": "ask_docs latency P50 / P95",
-      "description": "Measured P95 about 21 s; default deadline 30 s. Alert AskLatencyP95High at 30 s.",
+      "description": "Measured P95 about 21 s; default deadline 30 s. Alert AskLatencyP95High at 30 s. Probe requests are left out.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -218,7 +218,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step=\"ask_docs\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step=\"ask_docs\", rag_request_probe!=\"1\"}[$__rate_interval])))",
           "legendFormat": "P50",
           "refId": "A"
         },
@@ -227,7 +227,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step=\"ask_docs\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step=\"ask_docs\", rag_request_probe!=\"1\"}[$__rate_interval])))",
           "legendFormat": "P95",
           "refId": "B"
         }
@@ -251,7 +251,7 @@
     {
       "id": 6,
       "title": "Cache hit rate",
-      "description": "Share of requests served from the L1 cache; bypass and error mean the cache was skipped.",
+      "description": "Share of requests served from the L1 cache; bypass and error mean the cache was skipped. Probe requests are left out.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -269,7 +269,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(rag_cache_requests_total{rag_cache_outcome=~\"hit|shared\"}[$__rate_interval])) / sum(rate(rag_cache_requests_total[$__rate_interval]))",
+          "expr": "sum(rate(rag_cache_requests_total{rag_cache_outcome=~\"hit|shared\", rag_request_probe!=\"1\"}[$__rate_interval])) / sum(rate(rag_cache_requests_total{rag_request_probe!=\"1\"}[$__rate_interval]))",
           "legendFormat": "hit or shared",
           "refId": "A"
         },
@@ -278,7 +278,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(rag_cache_requests_total{rag_cache_outcome=~\"bypass|error\"}[$__rate_interval])) / sum(rate(rag_cache_requests_total[$__rate_interval]))",
+          "expr": "sum(rate(rag_cache_requests_total{rag_cache_outcome=~\"bypass|error\", rag_request_probe!=\"1\"}[$__rate_interval])) / sum(rate(rag_cache_requests_total{rag_request_probe!=\"1\"}[$__rate_interval]))",
           "legendFormat": "bypass or error",
           "refId": "B"
         }
@@ -302,7 +302,7 @@
     {
       "id": 7,
       "title": "Rerank timeouts and degraded results",
-      "description": "Share of requests with a rerank timeout, and of requests answered by only one retrieval route.",
+      "description": "Share of requests with a rerank timeout, and of requests answered by only one retrieval route. Probe requests are left out.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -320,7 +320,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(rag_requests_rerank_timeout_total[$__rate_interval])) / sum(rate(rag_requests_total{rag_tool=~\"search_docs|ask_docs\"}[$__rate_interval]))",
+          "expr": "sum(rate(rag_requests_rerank_timeout_total{rag_request_probe!=\"1\"}[$__rate_interval])) / sum(rate(rag_requests_total{rag_tool=~\"search_docs|ask_docs\", rag_request_probe!=\"1\"}[$__rate_interval]))",
           "legendFormat": "rerank timeout",
           "refId": "A"
         },
@@ -329,7 +329,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(rag_requests_degraded_total[$__rate_interval])) / sum(rate(rag_requests_total{rag_tool=~\"search_docs|ask_docs\"}[$__rate_interval]))",
+          "expr": "sum(rate(rag_requests_degraded_total{rag_request_probe!=\"1\"}[$__rate_interval])) / sum(rate(rag_requests_total{rag_tool=~\"search_docs|ask_docs\", rag_request_probe!=\"1\"}[$__rate_interval]))",
           "legendFormat": "degraded (one route)",
           "refId": "B"
         }
@@ -429,7 +429,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "none"
+          "unit": "suffix: CNY"
         },
         "overrides": []
       },
@@ -569,8 +569,8 @@
     },
     {
       "id": 12,
-      "title": "Probe latency and feedback",
-      "description": "Seconds the latest probe request took; user verdicts in the last hour; mean score of the last online sample.",
+      "title": "Probe latency",
+      "description": "Seconds the latest probe request took, per kind (search, ask). The alert ProbeSlow fires above 8 s (search) or 28 s (ask).",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -589,7 +589,91 @@
             "uid": "prometheus"
           },
           "expr": "rag_probe_last_duration_seconds",
-          "legendFormat": "probe {{rag_probe_kind}} (s)",
+          "legendFormat": "probe {{rag_probe_kind}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "title": "User feedback per hour",
+      "description": "Verdicts sent with the feedback tool or POST /v1/feedback in the last hour, by verdict.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (rag_feedback_verdict) (increase(rag_feedback_total[1h]))",
+          "legendFormat": "{{rag_feedback_verdict}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "title": "Online sample: judged hit@k and MRR",
+      "description": "Set once per run of python -m rag.eval.online_sample: the share of sampled requests with a passage the judge called relevant among the first k, and the judged MRR. Compare with the week before, not with a fixed target.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 28,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rag_online_eval_judged_hit_rate",
+          "legendFormat": "judged hit@k",
           "refId": "A"
         },
         {
@@ -597,23 +681,113 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (rag_feedback_verdict) (increase(rag_feedback_total[1h]))",
-          "legendFormat": "feedback {{rag_feedback_verdict}} per hour",
+          "expr": "rag_online_eval_judged_mrr",
+          "legendFormat": "judged MRR",
           "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "title": "Not-found rate",
+      "description": "Share of user searches where no passage reached the rerank threshold, per tool (design s15-1). A jump: new documents were not ingested, or users ask what the knowledge base does not have. Probe requests are left out.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 28,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (rag_tool) (rate(rag_requests_not_found_total{rag_request_probe!=\"1\"}[$__rate_interval])) / sum by (rag_tool) (rate(rag_requests_total{rag_tool=~\"search_docs|ask_docs\", rag_request_probe!=\"1\"}[$__rate_interval]))",
+          "legendFormat": "{{rag_tool}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "title": "Best rerank score P50 / P10",
+      "description": "Distribution of the best rerank score per user search (design s15-1). A drop of the whole curve means a change made retrieval worse. Probe requests are left out.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(rag_rerank_top_score_bucket{rag_request_probe!=\"1\"}[$__rate_interval])))",
+          "legendFormat": "P50",
+          "refId": "A"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rag_online_eval_judged_hit_rate",
-          "legendFormat": "online sample judged hit@k (0 to 1)",
-          "refId": "C"
+          "expr": "histogram_quantile(0.1, sum by (le) (rate(rag_rerank_top_score_bucket{rag_request_probe!=\"1\"}[$__rate_interval])))",
+          "legendFormat": "P10",
+          "refId": "B"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "none",
+          "min": 0,
+          "max": 1
         },
         "overrides": []
       },

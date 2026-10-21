@@ -78,13 +78,15 @@ groups:
 
   - name: rag-quality
     rules:
+      # Every rule of this group reads user requests only: `rag_request_probe!="1"` leaves the
+      # probe's requests out (the probe has its own alerts above).
       # More than one request in ten fails. Chosen, not measured: P3 and P5 runs had no failures
       # outside the faults that were put in on purpose. Needs some traffic.
       - alert: HighErrorRate
         expr: |
-          sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_outcome="error"}[5m]))
-            / sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs"}[5m])) > 0.10
-          and sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs"}[5m])) > 0.02
+          sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_outcome="error", rag_request_probe!="1"}[5m]))
+            / sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[5m])) > 0.10
+          and sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[5m])) > 0.02
         for: 2m
         labels:
           severity: critical
@@ -94,8 +96,8 @@ groups:
 
       - alert: SearchLatencyP95High
         expr: |
-          histogram_quantile(0.95, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step="search_docs"}[5m]))) > 8
-          and sum(rate(rag_requests_total{rag_tool="search_docs"}[5m])) > 0.02
+          histogram_quantile(0.95, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step="search_docs", rag_request_probe!="1"}[5m]))) > 8
+          and sum(rate(rag_requests_total{rag_tool="search_docs", rag_request_probe!="1"}[5m])) > 0.02
         for: 3m
         labels:
           severity: warning
@@ -105,8 +107,8 @@ groups:
 
       - alert: AskLatencyP95High
         expr: |
-          histogram_quantile(0.95, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step="ask_docs"}[5m]))) > 30
-          and sum(rate(rag_requests_total{rag_tool="ask_docs"}[5m])) > 0.02
+          histogram_quantile(0.95, sum by (le) (rate(rag_step_duration_seconds_bucket{rag_step="ask_docs", rag_request_probe!="1"}[5m]))) > 30
+          and sum(rate(rag_requests_total{rag_tool="ask_docs", rag_request_probe!="1"}[5m])) > 0.02
         for: 3m
         labels:
           severity: warning
@@ -119,9 +121,9 @@ groups:
       # starved or the rerank limit is too low.
       - alert: RerankTimeoutRateHigh
         expr: |
-          sum(rate(rag_requests_rerank_timeout_total[10m]))
-            / sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs"}[10m])) > 0.20
-          and sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs"}[10m])) > 0.02
+          sum(rate(rag_requests_rerank_timeout_total{rag_request_probe!="1"}[10m]))
+            / sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[10m])) > 0.20
+          and sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[10m])) > 0.02
         for: 5m
         labels:
           severity: warning
@@ -133,9 +135,9 @@ groups:
       # vector search failed). Same threshold as above, chosen.
       - alert: DegradedRateHigh
         expr: |
-          sum(rate(rag_requests_degraded_total[10m]))
-            / sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs"}[10m])) > 0.20
-          and sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs"}[10m])) > 0.02
+          sum(rate(rag_requests_degraded_total{rag_request_probe!="1"}[10m]))
+            / sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[10m])) > 0.20
+          and sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[10m])) > 0.02
         for: 5m
         labels:
           severity: warning
@@ -143,10 +145,27 @@ groups:
           summary: "One request in five was answered by only one retrieval route"
           description: "Degraded share over 10 minutes: {{ $value | humanizePercentage }}. Usually the model gateway or Elasticsearch."
 
+      # Searches where no passage reached the rerank threshold (design s15-1: "not found" going
+      # up means new documents were not ingested, or users ask what the knowledge base does not
+      # have). Chosen, not measured: no week of real traffic exists yet, so "half the requests
+      # over 30 minutes" is a starting point. Design s15-1 asks to compare with the 7 days
+      # before; change the rule to that once a week of data exists.
+      - alert: NotFoundRateHigh
+        expr: |
+          sum(rate(rag_requests_not_found_total{rag_request_probe!="1"}[30m]))
+            / sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[30m])) > 0.5
+          and sum(rate(rag_requests_total{rag_tool=~"search_docs|ask_docs", rag_request_probe!="1"}[30m])) > 0.02
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Half the searches find nothing above the rerank threshold"
+          description: "Not-found share over 30 minutes: {{ $value | humanizePercentage }}. Check the last ingest and the questions users ask."
+
       # The cache layer skips Redis because its breaker is open (5 failures in a row opens it).
       # Requests still work, but every one pays the full cost.
       - alert: CacheBreakerOpen
-        expr: sum(rate(rag_cache_requests_total{rag_cache_outcome="bypass", rag_cache_reason="breaker_open"}[2m])) > 0
+        expr: sum(rate(rag_cache_requests_total{rag_cache_outcome="bypass", rag_cache_reason="breaker_open", rag_request_probe!="1"}[2m])) > 0
         for: 1m
         labels:
           severity: warning
