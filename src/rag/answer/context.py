@@ -37,6 +37,10 @@ FRAGMENT_TAG = "doc_fragment"
 FRAGMENT_CLOSE = f"</{FRAGMENT_TAG}>"
 DEFAULT_METADATA_KEYS: tuple[str, ...] = ("title_path", "source_rel")
 TITLE_SEPARATOR = " > "
+GENERATED_NOTE = (
+    "model-written text (a figure description or a table summary), not a quote from the document"
+)
+"""Added to the fragment of a chunk flagged `has_generated_text` (spec P6-01, design s5-3)."""
 
 # `<doc_fragment` or `</doc_fragment`, any case, spaces allowed: what a chunk must not contain.
 # Characters a model may not see: zero-width space, non-joiner, joiner, word joiner, BOM.
@@ -182,6 +186,8 @@ def render_fragment(number: int, chunk: Chunk, metadata_keys: Sequence[str]) -> 
         value = _metadata_value(chunk, key)
         if value:
             lines.append(f"{key}: {escape_delimiters(value)}")
+    if chunk.metadata.get("has_generated_text") is True:
+        lines.append(f"note: {GENERATED_NOTE}")
     lines.append("")
     lines.append(escape_delimiters(chunk.text.strip("\n")))
     lines.append(FRAGMENT_CLOSE)

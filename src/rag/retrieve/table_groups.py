@@ -15,7 +15,9 @@ dedupe and before the reranker, `TableSummaryReplace` therefore
 The reranker then reads the table text, and the answer prompt never holds a summary. A summary
 whose table cannot be found (deleted, other ACL group) is dropped. When the index cannot be read,
 the summary hit stays and `RetrievalTrace.table_fetch_error` names the error: a degraded result
-is better than none. Chunks without a `chunk_kind` (every other knowledge base) pass untouched.
+is better than none, and the result is marked `degraded` (so it is not cached either). A summary
+that reaches the answer prompt carries the note of a model-written chunk (`has_generated_text`).
+Chunks without a `chunk_kind` (every other knowledge base) pass untouched.
 """
 
 from __future__ import annotations
@@ -122,6 +124,7 @@ class TableSummaryReplace(BaseNodePostprocessor):
         except Exception as exc:  # a degraded result beats none: the summary hits stay
             if trace is not None:
                 trace.table_fetch_error = type(exc).__name__
+                trace.degraded = True  # the caller sees it, and the result is not cached
             return nodes
 
         out: list[NodeWithScore] = []
