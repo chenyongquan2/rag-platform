@@ -665,7 +665,11 @@ class SearchService:
             self._check_ask_args(
                 question, session_id, deadline_ms, request_id, resume_token, answer
             )
-            await asyncio.to_thread(self._check_budget, caller, request_id, call)
+            if self._budget is not None:
+                # Read the ledger in a thread, then check and hold on the loop with no await
+                # in between, so a cancel cannot leave a hold nobody releases.
+                await asyncio.to_thread(self._budget.refresh)
+            self._check_budget(caller, request_id, call, read=False)
             deadline = Deadline.after_ms(deadline_ms)
             pipeline = await asyncio.to_thread(self._ready_pipeline, cfg.kb, deadline, request_id)
             listener = None
@@ -1160,13 +1164,15 @@ class SearchService:
                 retry_after_s=admission.retry_after_s,
             )
 
-    def _check_budget(self, caller: Caller, request_id: str, call: _Call) -> None:
+    def _check_budget(
+        self, caller: Caller, request_id: str, call: _Call, *, read: bool = True
+    ) -> None:
         """Refuse an ask_docs request before any model call when today's spending of the caller
         or of the service, plus what the asks in flight hold, plus this request's estimate,
         would pass its daily budget; an admitted request holds its estimate until it ends."""
         if self._budget is None:
             return
-        held = self._budget.hold(caller.caller_id)
+        held = self._budget.hold(caller.caller_id, read=read)
         refusal = held.refusal
         if refusal is None:
             call.cleanups.append(held.release)

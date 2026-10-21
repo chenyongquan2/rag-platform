@@ -224,3 +224,55 @@ def test_the_service_releases_the_reservation_after_the_ask(ledger: Path) -> Non
     assert len(refused) == 1 and refused[0].category == ErrorCategory.BUDGET_EXCEEDED
     # Both finished: nothing is held any more, so one more ask fits again.
     assert asyncio.run(service.ask_docs(creds, kb="hf_docs", question="again?")).kb == "hf_docs"
+
+
+def test_an_ask_cancelled_during_the_budget_check_holds_nothing(
+    ledger: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review P8-01 round 2: the ledger is read in a worker thread; a cancel while it reads must
+    not leave a hold behind (it would block the caller's asks for good)."""
+    import time as _time
+
+    service, _ = _service(ledger)
+    b = budget(ledger, per_caller_cny=0.53, estimate_cny=0.02)  # room for exactly one ask
+    service._budget = b
+    service.load()
+    creds = Credentials(transport="http")
+    read = DailyBudget._read
+
+    def slow_read(self: DailyBudget) -> None:
+        _time.sleep(0.3)
+        read(self)
+
+    monkeypatch.setattr(DailyBudget, "_read", slow_read)
+
+    async def cancel_mid_check() -> None:
+        task = asyncio.create_task(service.ask_docs(creds, kb="hf_docs", question="push?"))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.5)  # the worker thread finishes its read
+
+    asyncio.run(cancel_mid_check())
+    assert b.held_today("local") == 0.0
+    monkeypatch.setattr(DailyBudget, "_read", read)
+    assert asyncio.run(service.ask_docs(creds, kb="hf_docs", question="again?")).kb == "hf_docs"
+
+
+def test_holds_are_dropped_at_the_next_utc_day(tmp_path: Path) -> None:
+    now = {"t": NOW}
+    b = DailyBudget(
+        tmp_path / "empty.jsonl",
+        total_cny=0,
+        per_caller_cny=0.03,
+        callers={},
+        estimate_cny=0.02,
+        clock=lambda: now["t"],
+    )
+    held = b.hold("local")
+    assert held.refusal is None and b.hold("local").refusal is not None
+    now["t"] = datetime(2026, 10, 22, 0, 0, 1, tzinfo=UTC)
+    assert b.hold("local").refusal is None  # yesterday's hold no longer counts
+    held.release()  # releasing yesterday's hold later does not go below zero
+    assert b.held_today("local") == pytest.approx(0.02)

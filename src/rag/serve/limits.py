@@ -222,7 +222,9 @@ class DailyBudget:
         self._hold_lock = threading.Lock()
         self._offset = 0
         self._spent: dict[tuple[date, str], float] = {}
-        self._held: dict[str, float] = {}  # estimates of the asks in flight, per caller
+        # Estimates of the asks in flight, per (UTC day, caller): a hold counts only on its own
+        # day, so one that was never released (a bug) stops counting at midnight.
+        self._held: dict[tuple[date, str], float] = {}
 
     def _read(self) -> None:
         try:
@@ -245,10 +247,26 @@ class DailyBudget:
                 self._spent[(day, caller)] = self._spent.get((day, caller), 0.0) + cny
         self._offset += len(complete)
 
-    def spent_today(self, caller: str | None = None) -> float:
-        """CNY spent today by `caller`, or by every caller together."""
+    def refresh(self) -> None:
+        """Read the ledger lines appended since the last read (file I/O: callers on an event
+        loop run this in a worker thread, then call `hold(..., read=False)` on the loop)."""
         with self._lock:
             self._read()
+
+    def held_today(self, caller: str | None = None) -> float:
+        today = self._clock().astimezone(UTC).date()
+        return sum(
+            cny
+            for (day, who), cny in self._held.items()
+            if day == today and (caller is None or who == caller)
+        )
+
+    def spent_today(self, caller: str | None = None, *, read: bool = True) -> float:
+        """CNY spent today by `caller`, or by every caller together (`read=False`: as of the
+        last read, without touching the file)."""
+        with self._lock:
+            if read:
+                self._read()
             today = self._clock().astimezone(UTC).date()
             return sum(
                 cny
@@ -256,7 +274,7 @@ class DailyBudget:
                 if day == today and (caller is None or who == caller)
             )
 
-    def refusal(self, caller: str) -> BudgetRefusal | None:
+    def refusal(self, caller: str, *, read: bool = True) -> BudgetRefusal | None:
         """Why one more ask_docs of `caller` would pass a limit (counting what is held), or
         None."""
         now = self._clock().astimezone(UTC)
@@ -264,30 +282,37 @@ class DailyBudget:
         retry_after = (tomorrow - now).total_seconds()
         limit = self.callers.get(caller, self.per_caller_cny)
         if limit > 0:
-            spent = self.spent_today(caller) + self._held.get(caller, 0.0)
+            spent = self.spent_today(caller, read=read) + self.held_today(caller)
             if spent + self.estimate_cny > limit:
                 return BudgetRefusal("caller", spent, limit, retry_after)
         if self.total_cny > 0:
-            spent = self.spent_today() + sum(self._held.values())
+            spent = self.spent_today(read=read) + self.held_today()
             if spent + self.estimate_cny > self.total_cny:
                 return BudgetRefusal("service", spent, self.total_cny, retry_after)
         return None
 
-    def hold(self, caller: str) -> BudgetHold:
-        """Check and, when admitted, hold the estimate of one ask until `release`."""
+    def hold(self, caller: str, *, read: bool = True) -> BudgetHold:
+        """Check and, when admitted, hold the estimate of one ask until `release`. With
+        `read=False` nothing blocks (the ledger as of the last `refresh`), so an async caller
+        can take the hold and register its release with no await in between: a cancellation
+        then cannot fall between the two (review P8-01 round 2)."""
         with self._hold_lock:
-            refusal = self.refusal(caller)
+            refusal = self.refusal(caller, read=read)
             if refusal is not None:
                 return BudgetHold(refusal)
-            self._held[caller] = self._held.get(caller, 0.0) + self.estimate_cny
+            today = self._clock().astimezone(UTC).date()
+            for key in [k for k in self._held if k[0] != today]:
+                del self._held[key]
+            key = (today, caller)
+            self._held[key] = self._held.get(key, 0.0) + self.estimate_cny
 
         def release() -> None:
             with self._hold_lock:
-                left = self._held.get(caller, 0.0) - self.estimate_cny
+                left = self._held.get(key, 0.0) - self.estimate_cny
                 if left > 1e-12:
-                    self._held[caller] = left
+                    self._held[key] = left
                 else:
-                    self._held.pop(caller, None)
+                    self._held.pop(key, None)
 
         return BudgetHold(None, release)
 
