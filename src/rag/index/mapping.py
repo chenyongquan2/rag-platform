@@ -37,8 +37,10 @@ KEYWORD_FIELDS = (
     "images",  # s5-4: image paths of the unit, returned with the chunk
     "page_key",  # P4-01: the same page in two languages shares it (s8-4)
     "links_to",  # P4-01: page keys of the pages this page links to
+    "chunk_kind",  # P6-01: text | table | table_summary
+    "table_id",  # P6-01: links a table summary chunk to its table chunks
 )
-INTEGER_FIELDS = ("chunk_index",)
+INTEGER_FIELDS = ("chunk_index", "page")  # `page`: P6-01, the PDF page number
 BOOLEAN_FIELDS = ("has_generated_text", "suspicious_instruction")
 STORED_OBJECT_FIELDS = ("front_matter",)
 """Kept in `_source` only (`enabled: false`): any keys, nothing indexed. `front_matter` holds a

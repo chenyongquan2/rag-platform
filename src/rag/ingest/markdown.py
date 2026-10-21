@@ -10,6 +10,7 @@ at least as long, closes it; an unclosed block runs to the end of the text (Comm
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 FENCE_OPEN = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
@@ -179,3 +180,44 @@ def is_title_only(text: str) -> bool:
 def is_table_row(line: str) -> bool:
     stripped = line.strip()
     return stripped.startswith("|") and stripped.count("|") >= 2
+
+
+_TABLE_SEPARATOR_ROW = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+
+
+def table_header_lines(lines: list[str]) -> int:
+    """How many leading lines of a Markdown table are its header: 2 (the header row and the
+    `|---|---|` separator) when the second line is a separator row, else 0."""
+    if len(lines) >= 2 and _TABLE_SEPARATOR_ROW.match(lines[1]) and is_table_row(lines[0]):
+        return 2
+    return 0
+
+
+def split_table(
+    text: str, budget: int, count: Callable[[str], int], *, repeat_header: bool = True
+) -> list[str]:
+    """Cut a Markdown table between rows into parts of at most `budget` tokens (`count`).
+
+    With `repeat_header` every part starts with the header row and the separator row, so a
+    part read alone still says what its columns are; without it only the first part has them.
+    A table that fits stays whole. A row that does not fit even alone gets a part of its own
+    (it is the caller's job to cut inside it). Rows are never reordered or dropped.
+    """
+    if count(text) <= budget:
+        return [text]
+    lines = text.split("\n")
+    head_n = table_header_lines(lines)
+    header, rows = lines[:head_n], lines[head_n:]
+    again = header if repeat_header else []
+    parts: list[list[str]] = []
+    current = list(header)
+    prefix = head_n  # lines of `current` that are not rows
+    for row in rows:
+        if len(current) > prefix and count("\n".join([*current, row])) > budget:
+            parts.append(current)
+            current = [*again, row]
+            prefix = len(again)
+        else:
+            current.append(row)
+    parts.append(current)
+    return ["\n".join(part) for part in parts]

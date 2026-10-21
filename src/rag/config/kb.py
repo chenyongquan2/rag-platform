@@ -50,9 +50,12 @@ class PipelineConfig(_Strict):
 
     `clean` runs before the LlamaIndex IngestionPipeline; `steps` run inside it (design s5-1, s7-4).
     `reader` is a name in `rag.registry.readers`; `None` means look it up by the file extension.
+    `reader_params` are extra keyword arguments of that reader (spec P6-01: the PDF reader's
+    vision model and image sizes); empty for the readers that need none.
     """
 
     reader: str | None = None
+    reader_params: dict[str, Any] = Field(default_factory=dict)
     clean: list[StepConfig] = Field(default_factory=list)
     steps: list[StepConfig] = Field(
         default_factory=lambda: _steps(
@@ -133,6 +136,12 @@ class RetrievalConfig(_Strict):
       (same page, chunk_index within `expand_window`) or `parent` (its heading section).
     - `expand_max_tokens`: reranker tokens of returned chunks plus added context; context that
       does not fit is left out, returned chunks always stay.
+    - `replace_table_summaries` (spec P6-01): a hit on the summary chunk of a table is replaced by
+      the table's own chunk(s) before the rerank, so the answer sees the table, not the summary
+      (design s7-2). Off for knowledge bases without table summaries.
+    - `replace_table_summaries_after_rerank`: do that replacement after the reranker and the
+      threshold instead of before the reranker: the cross-encoder then scores the summary, and the
+      table takes its place and its rerank score. Only used with `replace_table_summaries`.
     - `dedupe_by_page_key`: a page that exists in several languages (CHM manuals share a
       `page_key`, design s8-4) keeps one version in the result, the one in the question's
       language (spec P4-01). Off for knowledge bases without such pages.
@@ -153,6 +162,8 @@ class RetrievalConfig(_Strict):
     expand_window: int = Field(default=1, ge=1)
     expand_max_tokens: int = Field(default=4000, gt=0)
     dedupe_by_page_key: bool = False
+    replace_table_summaries: bool = False
+    replace_table_summaries_after_rerank: bool = False
 
     @model_validator(mode="after")
     def _rrf_weights_per_route(self) -> Self:

@@ -85,6 +85,10 @@ SOURCE_FIELDS = (
     "parent_id",
     "images",
     "suspicious_instruction",
+    "page",  # P6-01: PDF page number, for "page N" in citations
+    "chunk_kind",  # P6-01: text | table | table_summary
+    "table_id",  # P6-01: links a table summary chunk to its table chunks
+    "has_generated_text",  # P6-01: the chunk holds model-written text (figure description, summary)
 )
 """Fields read from `_source`: what a `Chunk` needs; never the vector or the ACL groups."""
 

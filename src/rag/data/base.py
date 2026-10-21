@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import PureWindowsPath
 from typing import Any, Literal
 
@@ -46,6 +47,29 @@ def make_doc_id(kb: str, source_rel: str, unit: str | None = None) -> str:
     if not unit:
         raise ValueError("unit must not be empty; pass None for a file without units")
     return f"{kb}:{rel}#{unit}"
+
+
+UNIT_SEPARATOR = "#"
+"""Between the file part and the unit of a document id (`make_doc_id`); a `#` in the path is
+percent-encoded, so the first one after the knowledge base is always this separator."""
+
+
+def split_doc_id(doc_id: str) -> tuple[str, str | None]:
+    """`(file id, unit)` of a document id made by `make_doc_id`: `p:x.pdf#p2` gives
+    `("p:x.pdf", "p2")`, `p:x.pdf` gives `("p:x.pdf", None)`."""
+    file_id, sep, unit = doc_id.partition(UNIT_SEPARATOR)
+    return (file_id, unit) if sep else (doc_id, None)
+
+
+def units_of(doc_id: str, ids: Iterable[str]) -> list[str]:
+    """The ids of `ids` that `doc_id` stands for, in their order: `doc_id` itself, and, when it
+    names a whole file (no unit), every unit of that file. A connector that cannot read a file
+    of many units (a PDF of pages) hands over one document with the file id; the ingest job keeps
+    the stored copies of all its units (design s7-4)."""
+    file_id, unit = split_doc_id(doc_id)
+    if unit is not None:
+        return [i for i in ids if i == doc_id]
+    return [i for i in ids if i == doc_id or split_doc_id(i)[0] == file_id]
 
 
 class SourceDocument(BaseModel):

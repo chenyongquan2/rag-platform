@@ -10,6 +10,7 @@ sees all of them) and one `pipeline_version`.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ from llama_index.core.schema import BaseNode, Document, TransformComponent
 from rag.config import KnowledgeBaseConfig, PipelineConfig, ServiceSettings, StepConfig
 from rag.data import SourceDocument
 from rag.ingest.clean import CleanRule, RuleStats
+from rag.ingest.describe import DescribeBudgetError
 from rag.ingest.language import UNDETERMINED
 from rag.ingest.meta import apply_whitelist
 from rag.ingest.readers import reader_name_for
@@ -39,7 +41,7 @@ def pipeline_version(
     so the IngestionPipeline processes the pages again although their text did not change (s5-4).
     """
     pipe = _pipeline(cfg, ext)
-    payload = {
+    payload: dict[str, Any] = {
         "code": INGEST_CODE_VERSION,
         "reader": reader_name_for(ext, pipe),
         "clean": [_hashed(s) for s in pipe.clean],
@@ -48,9 +50,15 @@ def pipeline_version(
         "language": cfg.language,
         "tokenizer": tokenizer_model or ServiceSettings().reranker_model,
     }
+    params = {k: v for k, v in pipe.reader_params.items() if k not in READER_RUN_PARAMS}
+    if params:  # absent for readers without parameters: their versions stay what they were
+        payload["reader_params"] = params
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
     return f"v{INGEST_CODE_VERSION}-{digest[:10]}"
 
+
+READER_RUN_PARAMS = ("budget_cny", "cache_path")
+"""Reader parameters that say how a run is paid for or where it caches, not what it writes."""
 
 GUARD_PARAMS = ("max_page_share", "max_corpus_share", "guard_min_chars")
 """Cleaning-rule parameters that decide whether a run stops (design s6-3), not what it writes."""
@@ -60,7 +68,8 @@ def _hashed(step: StepConfig) -> dict[str, Any]:
     """A step as it goes into the pipeline version: the removal-guard limits are left out, so
     tuning a limit does not make every page look changed."""
     dumped = step.model_dump()
-    dumped["params"] = {k: v for k, v in dumped["params"].items() if k not in GUARD_PARAMS}
+    left_out = (*GUARD_PARAMS, *READER_RUN_PARAMS)
+    dumped["params"] = {k: v for k, v in dumped["params"].items() if k not in left_out}
     return dumped
 
 
@@ -118,13 +127,19 @@ class KbProcessor:
             self._ext_version[ext.lower()] = version
             if version in self._groups:
                 continue
+            name = reader_name_for(ext, pipe)
+            options: dict[str, Any] = {}
+            if "settings" in inspect.signature(readers.get(name)).parameters:
+                options["settings"] = self.settings  # readers that call a model use these
             reader = readers.create(
-                reader_name_for(ext, pipe),
+                name,
                 kb=cfg.kb,
                 pipeline_version=version,
                 language=self.kb_language,
                 embed_keys=cfg.metadata.embed,
                 llm_keys=cfg.metadata.llm,
+                **options,
+                **pipe.reader_params,
             )
             context = {"kb_language": self.kb_language}
             rules = [r for s in pipe.clean for r in _create(s, context)]
@@ -151,6 +166,8 @@ class KbProcessor:
                 continue
             try:
                 result.documents.extend(self._groups[version].reader.load_data(src))
+            except DescribeBudgetError:
+                raise  # the budget of the run is used up: stop, do not index half the figures
             except Exception as exc:  # one bad file must not stop the run (s7-4); it is reported
                 result.skipped[src.doc_id] = "read_error"
                 result.errors[src.doc_id] = f"{type(exc).__name__}: {exc}"
@@ -189,6 +206,7 @@ class KbProcessor:
                 "kb_language": self.kb_language,
                 "tokenizer": self.tokenizer,
                 "tokenizer_model": self.settings.reranker_model,
+                "settings": self.settings,
                 "embed_keys": list(self.cfg.metadata.embed),
                 "llm_keys": list(self.cfg.metadata.llm),
             }
@@ -216,6 +234,17 @@ class KbProcessor:
             stats = getattr(group.reader, "stats", None)
             if stats is not None and hasattr(stats, "to_dict"):
                 found[version] = stats.to_dict()
+        return found
+
+    def step_stats(self) -> dict[str, dict[str, Any]]:
+        """Counts of the built chunk steps that keep them (`stats`, a dict: the table summary
+        step), by step name; empty until `steps_for` or `chunk` built the steps."""
+        found: dict[str, dict[str, Any]] = {}
+        for group in self._groups.values():
+            for step in group.steps or []:
+                stats = getattr(step, "stats", None)
+                if isinstance(stats, dict):
+                    found[type(step).class_name()] = stats
         return found
 
     def rule_stats(self) -> list[tuple[str, RuleStats]]:
