@@ -5,6 +5,9 @@
                                                            # and the Q&A page at /
     uv run python -m rag.serve http --dev-fake             # the same over fake data (no gateway)
 
+`AUTH_MODE=local` (default) answers only on a local address; `AUTH_MODE=oauth` checks bearer
+tokens on `/v1/` and `/mcp` (spec P8-01) and may listen anywhere (stdio is unchanged).
+
 Both set up observability (service name `rag-serve`), read the KB configs and start loading the
 reranker in a background thread: over stdio the MCP handshake and `list_knowledge_bases` answer
 at once and a search waits for the load within its deadline; over HTTP `/readyz` turns 200 when
@@ -21,6 +24,7 @@ from typing import Any
 from rag.config import ServiceSettings
 from rag.observe import init_observability, shutdown_observability
 from rag.observe.health import DependencyChecker, register_dependency_gauge
+from rag.security.tokens import make_token_verifier
 from rag.serve.http_app import build_http_app
 from rag.serve.mcp_server import build_mcp_server
 from rag.serve.server import make_server
@@ -70,6 +74,17 @@ def main(
 ) -> int:
     settings = settings if settings is not None else ServiceSettings()
     args = build_parser(settings).parse_args(argv)
+    local_only = settings.auth_mode == "local" and not getattr(args, "dev_fake", False)
+    if args.command == "http" and local_only and args.host not in LOCAL_HOSTS:
+        # Local mode serves everyone as the configured caller, private KBs included: only the
+        # local machine may reach it (spec P8-01).
+        print(
+            f"AUTH_MODE=local serves every request as caller {settings.service_caller!r}: listen "
+            f"on {' or '.join(LOCAL_HOSTS)}, or set AUTH_MODE=oauth (bearer tokens) to listen "
+            "on another address",
+            file=sys.stderr,
+        )
+        return 2
     if args.command == "http" and args.dev_fake:
         if args.host not in LOCAL_HOSTS:
             hosts = " or ".join(LOCAL_HOSTS)
@@ -95,14 +110,16 @@ def main(
             service.start()
             run_stdio(build_mcp_server(service, transport="stdio"))
         else:
-            mcp = build_mcp_server(service, transport="streamable-http")
+            verifier = make_token_verifier(settings) if settings.auth_mode == "oauth" else None
+            mcp = build_mcp_server(service, transport="streamable-http", token_verifier=verifier)
             if run_http is None:
 
                 def run_http(app: Any, host: str, port: int) -> None:
                     make_server(app, host, port, service=service, settings=settings).run()
 
             # The app's lifespan starts the load once uvicorn runs.
-            run_http(build_http_app(service, mcp=mcp, host=args.host), args.host, args.port)
+            app = build_http_app(service, mcp=mcp, host=args.host, token_verifier=verifier)
+            run_http(app, args.host, args.port)
     finally:
         service.close()
         shutdown_observability()

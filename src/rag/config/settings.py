@@ -160,6 +160,33 @@ def _chat_profile_default(name: str) -> ChatProfile:
     return ChatProfile(**CHAT_PROFILE_DEFAULTS[name])
 
 
+# Asymmetric JWS algorithms the token verifier may accept (spec P8-01). HMAC (HS*) is left out
+# on purpose: a resource server that accepts it can be fooled with a token keyed by the public
+# key (key confusion), and `none` is no signature at all.
+ASYMMETRIC_JWT_ALGORITHMS = frozenset(
+    {"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"}
+)
+
+
+class AuthCallerConfig(BaseModel):
+    """One OAuth scope and the caller it stands for (spec P8-01, design s16-4): a token carrying
+    `scope` is the caller `caller` (matched against `access.callers` of each KB config) with
+    the document ACL groups `acl_groups`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope: str = Field(min_length=1)
+    caller: str = Field(min_length=1)
+    acl_groups: list[str] = Field(min_length=1)
+
+    @field_validator("acl_groups")
+    @classmethod
+    def _groups(cls, value: list[str]) -> list[str]:
+        if not all(isinstance(g, str) and g for g in value):
+            raise ValueError("acl_groups must be non-empty group names")
+        return value
+
+
 class ServiceSettings(BaseSettings):
     """Process-wide settings. Env var names are the upper-case field names (no prefix).
 
@@ -517,6 +544,57 @@ class ServiceSettings(BaseSettings):
     session_store_url: str = "sqlite://data/sessions/sessions.db"
     session_lock_url: str = "memory://"
 
+    # Who may call over HTTP (spec P8-01, design s16-4). `local` (the default): every request is
+    # the one configured caller (`service_caller`); the HTTP server then refuses to listen on an
+    # address other than the local machine's. `oauth`: the HTTP API and MCP streamable-http are
+    # an OAuth 2.1 resource server: every request carries `Authorization: Bearer <JWT access
+    # token>` signed by `auth_issuer`'s keys (a JWKS file `auth_jwks_path` or URL
+    # `auth_jwks_url`, cached `auth_jwks_cache_s`), for audience `auth_audience`, with one of
+    # `auth_algorithms`; `exp` is required and `auth_leeway_s` of clock skew is allowed. The
+    # token's scopes pick the caller (`auth_callers`: exactly one listed scope per token).
+    # stdio stays the local caller. `auth_resource_url` is the MCP endpoint's public URL for
+    # the protected resource metadata (empty: `auth_audience`).
+    auth_mode: Literal["local", "oauth"] = "local"
+    auth_issuer: str = ""
+    auth_audience: str = ""
+    auth_jwks_path: str = ""
+    auth_jwks_url: str = ""
+    auth_jwks_cache_s: int = Field(default=300, gt=0)
+    auth_algorithms: list[str] = Field(default_factory=lambda: ["RS256", "ES256"], min_length=1)
+    auth_leeway_s: int = Field(default=30, ge=0, le=300)
+    auth_resource_url: str = ""
+    auth_callers: list[AuthCallerConfig] = Field(default_factory=list)
+
+    # Requests per caller per minute (spec P8-01, design s16-4): a fixed one-minute window
+    # counted in Redis (`redis_url`, keys under `rate_limit_key_prefix`, each command waits at
+    # most `rate_limit_timeout_ms`); `memory` counts in this process (tests, one instance).
+    # `rate_limit_per_minute` for every caller, `rate_limit_callers` per caller id (0 = no
+    # limit). search_docs, ask_docs and get_context count; a Redis error lets the request
+    # through (design: a lost counter only means one request less is limited).
+    rate_limit_mode: Literal["off", "redis", "memory"] = "redis"
+    rate_limit_per_minute: int = Field(default=120, ge=0)
+    rate_limit_callers: dict[str, int] = Field(default_factory=dict)
+    rate_limit_key_prefix: str = "rag:rl:"
+    rate_limit_timeout_ms: int = Field(default=50, gt=0)
+
+    # Daily model budget of the service (spec P8-01, design s16-4), from the cost ledger rows of
+    # the current UTC day that were written inside a service request (they carry `caller`):
+    # `budget_daily_cny` for all callers together, `budget_daily_caller_cny` for each caller,
+    # `budget_daily_callers` per caller id. An ask_docs request whose estimate
+    # (`budget_ask_estimate_cny`) would pass either is refused with `budget_exceeded` before any
+    # model call; search_docs is still served. 0 turns a limit off.
+    budget_daily_cny: float = Field(default=2.0, ge=0)
+    budget_daily_caller_cny: float = Field(default=1.0, ge=0)
+    budget_daily_callers: dict[str, float] = Field(default_factory=dict)
+    budget_ask_estimate_cny: float = Field(default=0.02, ge=0)
+
+    # Chat gateway circuit breaker (spec P8-01, design s16-8): after `chat_breaker_failures`
+    # failed calls in a row (gateway errors and timeouts after the retries, not 4xx or budget
+    # stops) chat calls fail at once for `chat_breaker_open_s` seconds, then one trial call
+    # decides. One breaker per gateway URL in a process. 0 failures turns it off.
+    chat_breaker_failures: int = Field(default=5, ge=0)
+    chat_breaker_open_s: float = Field(default=30.0, gt=0)
+
     # Money: stop real model jobs when spent + estimate would exceed budget_stop_cny.
     budget_cny: float = Field(default=30.0, ge=0)
     budget_stop_cny: float = Field(default=28.0, ge=0)
@@ -571,6 +649,35 @@ class ServiceSettings(BaseSettings):
                 f"agent_answer_reserve_tokens ({self.agent_answer_reserve_tokens}) must be "
                 f"below agent_token_cap ({self.agent_token_cap})"
             )
+        return self
+
+    @field_validator("auth_algorithms")
+    @classmethod
+    def _asymmetric_only(cls, value: list[str]) -> list[str]:
+        bad = [alg for alg in value if alg not in ASYMMETRIC_JWT_ALGORITHMS]
+        if bad:
+            raise ValueError(
+                f"auth_algorithms: {bad} not allowed; use asymmetric ones "
+                f"({', '.join(sorted(ASYMMETRIC_JWT_ALGORITHMS))})"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _oauth_complete(self) -> Self:
+        if self.auth_mode != "oauth":
+            return self
+        missing = [
+            name for name in ("auth_issuer", "auth_audience") if not getattr(self, name).strip()
+        ]
+        if missing:
+            raise ValueError(f"auth_mode=oauth needs {', '.join(missing)}")
+        if bool(self.auth_jwks_path) == bool(self.auth_jwks_url):
+            raise ValueError("auth_mode=oauth needs exactly one of auth_jwks_path, auth_jwks_url")
+        if not self.auth_callers:
+            raise ValueError("auth_mode=oauth needs auth_callers (scope -> caller, acl_groups)")
+        scopes = [c.scope for c in self.auth_callers]
+        if len(set(scopes)) != len(scopes):
+            raise ValueError("auth_callers: each scope may appear once")
         return self
 
     @model_validator(mode="after")

@@ -18,7 +18,12 @@ One Starlette app, so one process holds one reranker for every way in:
 
 JSON bodies are checked against fixed models (unknown fields are `invalid_request`). Errors are
 `{error, request_id, message}` with the category's status (`rag.serve.errors.http_status`);
-`not_ready` adds `Retry-After`. A caller may send `X-Request-Id` (letters, digits, `._:-`, at
+`not_ready`, `rate_limited` and `budget_exceeded` add `Retry-After`. With a token verifier
+(`AUTH_MODE=oauth`, spec P8-01) every `/v1/` route needs `Authorization: Bearer <access token>`:
+a missing or refused token is `401 unauthorized` with a `WWW-Authenticate: Bearer` challenge
+that points to the protected resource metadata; the page, `/ui/`, `/healthz` and `/readyz` stay
+open. `/mcp` checks its tokens itself (the SDK's `RequireAuthMiddleware`, same verifier). A
+caller may send `X-Request-Id` (letters, digits, `._:-`, at
 most 64); every answer carries the request id in that header. Starlette rather than FastAPI:
 the MCP SDK's streamable-http app is already a Starlette app (mounted here as it is), Starlette
 comes with the SDK, and four routes need no generated docs or dependency injection.
@@ -29,6 +34,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import logging
+import math
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -37,16 +43,19 @@ from typing import Any
 
 import anyio
 from mcp.server import MCPServer
+from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser, BearerAuthBackend
+from mcp.server.auth.provider import TokenVerifier
 from pydantic import BaseModel, ConfigDict, ValidationError
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
-from starlette.requests import Request
+from starlette.requests import HTTPConnection, Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import BaseRoute, Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from rag.observe import new_request_id
 from rag.security.access import Credentials
+from rag.security.tokens import protected_resource_metadata_url
 from rag.serve.errors import ServiceError, http_status
 from rag.serve.schema import ErrorResponse
 from rag.serve.service import SearchService
@@ -179,6 +188,70 @@ class RequestGuard:
         await response(scope, receive, send)
 
 
+_API_PATH = "/v1/"
+
+
+class BearerGuard:
+    """Refuses a `/v1/` request without a valid bearer token (401, `unauthorized`, with the
+    RFC 6750 challenge) before any route runs; a request with one gets the SDK's
+    `AuthenticatedUser` in `scope["user"]`, which the routes turn into `Credentials`. The token
+    check is the SDK's `BearerAuthBackend` over our verifier, so `/v1/` and `/mcp` accept the
+    same tokens."""
+
+    def __init__(
+        self, app: ASGIApp, *, verifier: TokenVerifier, resource_metadata_url: str | None
+    ) -> None:
+        self.app = app
+        self.backend = BearerAuthBackend(verifier)
+        self.resource_metadata_url = resource_metadata_url
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not scope["path"].startswith(_API_PATH):
+            await self.app(scope, receive, send)
+            return
+        conn = HTTPConnection(scope)
+        result = await self.backend.authenticate(conn)
+        if result is not None:
+            _, user = result
+            scope["user"] = user
+            await self.app(scope, receive, send)
+            return
+        given = conn.headers.get(REQUEST_ID_HEADER, "")
+        request_id = given if _REQUEST_ID.fullmatch(given) else new_request_id()
+        has_token = conn.headers.get("authorization", "").lower().startswith("bearer ")
+        parts = ['error="invalid_token"'] if has_token else []
+        if self.resource_metadata_url:
+            parts.append(f'resource_metadata="{self.resource_metadata_url}"')
+        challenge = "Bearer " + ", ".join(parts) if parts else "Bearer"
+        logger.warning(
+            "request %s refused: %s bearer token on %s",
+            request_id,
+            "invalid" if has_token else "no",
+            scope["path"],
+        )
+        response = JSONResponse(
+            ErrorResponse.of(ErrorCategory.UNAUTHORIZED, request_id).model_dump(mode="json"),
+            status_code=401,
+            headers={REQUEST_ID_HEADER: request_id, "WWW-Authenticate": challenge},
+        )
+        await response(scope, receive, send)
+
+
+def credentials_of(request: Request) -> Credentials:
+    """What the transport knows about the sender: the verified token's client, subject and
+    scopes when `BearerGuard` accepted one; nothing else (local mode)."""
+    user = request.scope.get("user")
+    if isinstance(user, AuthenticatedUser):
+        token = user.access_token
+        return Credentials(
+            transport=TRANSPORT,
+            client_id=token.client_id,
+            subject=token.subject,
+            scopes=tuple(token.scopes),
+        )
+    return Credentials(transport=TRANSPORT)
+
+
 def _is_json(content_type: str) -> bool:
     return content_type.split(";", 1)[0].strip().lower() == "application/json"
 
@@ -190,10 +263,12 @@ def _request_id(request: Request) -> str:
     return new_request_id()
 
 
-def _error(category: str, request_id: str) -> JSONResponse:
+def _error(category: str, request_id: str, retry_after_s: float | None = None) -> JSONResponse:
     headers = {REQUEST_ID_HEADER: request_id}
     if category == ErrorCategory.NOT_READY:
         headers["Retry-After"] = str(RETRY_AFTER_S)
+    elif retry_after_s is not None:
+        headers["Retry-After"] = str(max(1, math.ceil(retry_after_s)))
     return JSONResponse(
         ErrorResponse.of(category, request_id).model_dump(mode="json"),
         status_code=http_status(category),
@@ -214,13 +289,15 @@ async def _body[M: BaseModel](request: Request, model: type[M]) -> tuple[M | Non
         return None, "body is not JSON"
 
 
-async def _call(fn: Callable[..., BaseModel], request_id: str, **kwargs: Any) -> JSONResponse:
+async def _call(
+    fn: Callable[..., BaseModel], credentials: Credentials, request_id: str, **kwargs: Any
+) -> JSONResponse:
     try:
         response = await anyio.to_thread.run_sync(
-            functools.partial(fn, Credentials(transport=TRANSPORT), request_id=request_id, **kwargs)
+            functools.partial(fn, credentials, request_id=request_id, **kwargs)
         )
     except ServiceError as err:
-        return _error(err.category, err.request_id)
+        return _error(err.category, err.request_id, err.retry_after_s)
     except Exception:
         logger.exception("request %s failed outside the service", request_id)
         return _error(ErrorCategory.INTERNAL_ERROR, request_id)
@@ -228,13 +305,16 @@ async def _call(fn: Callable[..., BaseModel], request_id: str, **kwargs: Any) ->
 
 
 async def _acall(
-    fn: Callable[..., Awaitable[BaseModel]], request_id: str, **kwargs: Any
+    fn: Callable[..., Awaitable[BaseModel]],
+    credentials: Credentials,
+    request_id: str,
+    **kwargs: Any,
 ) -> JSONResponse:
     """Like `_call` for a service method that is async (it runs on this event loop)."""
     try:
-        response = await fn(Credentials(transport=TRANSPORT), request_id=request_id, **kwargs)
+        response = await fn(credentials, request_id=request_id, **kwargs)
     except ServiceError as err:
-        return _error(err.category, err.request_id)
+        return _error(err.category, err.request_id, err.retry_after_s)
     except Exception:
         logger.exception("request %s failed outside the service", request_id)
         return _error(ErrorCategory.INTERNAL_ERROR, request_id)
@@ -242,11 +322,16 @@ async def _acall(
 
 
 def build_http_app(
-    service: SearchService, *, mcp: MCPServer | None = None, host: str = "127.0.0.1"
+    service: SearchService,
+    *,
+    mcp: MCPServer | None = None,
+    host: str = "127.0.0.1",
+    token_verifier: TokenVerifier | None = None,
 ) -> Starlette:
     """The app over `service`; its lifespan starts the service's load (and the MCP session
     manager when `mcp` is given, mounted at `/mcp`). `host` is where it listens: on 127.0.0.1
-    the MCP endpoint checks Host and Origin headers (DNS rebinding protection of the SDK)."""
+    the MCP endpoint checks Host and Origin headers (DNS rebinding protection of the SDK).
+    `token_verifier` (OAuth mode): `/v1/` routes need a bearer token it accepts."""
 
     def web_file(name: str, media_type: str) -> Response:
         return Response(
@@ -277,11 +362,12 @@ def build_http_app(
         }
         return JSONResponse(body, status_code=200 if service.ready else 503)
 
-    async def reject(tool: str, request_id: str, detail: str) -> JSONResponse:
+    async def reject(request: Request, tool: str, request_id: str, detail: str) -> JSONResponse:
         return await _call(
             functools.partial(
                 service.reject, tool, category=ErrorCategory.INVALID_REQUEST, detail=detail
             ),
+            credentials_of(request),
             request_id,
         )
 
@@ -289,9 +375,10 @@ def build_http_app(
         request_id = _request_id(request)
         body, problem = await _body(request, SearchRequest)
         if body is None:
-            return await reject("search_docs", request_id, problem)
+            return await reject(request, "search_docs", request_id, problem)
         return await _call(
             service.search_docs,
+            credentials_of(request),
             request_id,
             kb=body.kb,
             query=body.query,
@@ -304,9 +391,10 @@ def build_http_app(
         request_id = _request_id(request)
         body, problem = await _body(request, AskRequest)
         if body is None:
-            return await reject("ask_docs", request_id, problem)
+            return await reject(request, "ask_docs", request_id, problem)
         return await _acall(
             service.ask_docs,
+            credentials_of(request),
             request_id,
             kb=body.kb,
             question=body.question,
@@ -320,9 +408,9 @@ def build_http_app(
         request_id = _request_id(request)
         body, problem = await _body(request, AskRequest)
         if body is None:
-            return await reject("ask_docs", request_id, problem)
+            return await reject(request, "ask_docs", request_id, problem)
         events = service.ask_docs_stream(
-            Credentials(transport=TRANSPORT),
+            credentials_of(request),
             request_id=request_id,
             kb=body.kb,
             question=body.question,
@@ -336,7 +424,7 @@ def build_http_app(
         try:
             first = await anext(events)
         except ServiceError as err:
-            return _error(err.category, err.request_id)
+            return _error(err.category, err.request_id, err.retry_after_s)
         except Exception:
             logger.exception("request %s failed outside the service", request_id)
             return _error(ErrorCategory.INTERNAL_ERROR, request_id)
@@ -363,9 +451,10 @@ def build_http_app(
         request_id = _request_id(request)
         body, problem = await _body(request, FeedbackRequest)
         if body is None:
-            return await reject("feedback", request_id, problem)
+            return await reject(request, "feedback", request_id, problem)
         return await _call(
             service.feedback,
+            credentials_of(request),
             request_id,
             rated_request_id=body.request_id,
             useful=body.useful,
@@ -376,11 +465,19 @@ def build_http_app(
         request_id = _request_id(request)
         body, problem = await _body(request, ContextRequest)
         if body is None:
-            return await reject("get_context", request_id, problem)
-        return await _call(service.get_context, request_id, chunk_id=body.chunk_id, mode=body.mode)
+            return await reject(request, "get_context", request_id, problem)
+        return await _call(
+            service.get_context,
+            credentials_of(request),
+            request_id,
+            chunk_id=body.chunk_id,
+            mode=body.mode,
+        )
 
     async def knowledge_bases(request: Request) -> JSONResponse:
-        return await _call(service.list_knowledge_bases, _request_id(request))
+        return await _call(
+            service.list_knowledge_bases, credentials_of(request), _request_id(request)
+        )
 
     routes: list[BaseRoute] = [
         Route("/", page, methods=["GET"]),
@@ -411,8 +508,18 @@ def build_http_app(
         finally:
             await service.cancel_streams()  # runs of streams still open end cleanly
 
-    guard = Middleware(
-        RequestGuard,
-        allowed_hosts=allowed_host_names(host, service.settings.service_allowed_hosts),
-    )
-    return Starlette(routes=routes, lifespan=lifespan, middleware=[guard])
+    middleware = [
+        Middleware(
+            RequestGuard,
+            allowed_hosts=allowed_host_names(host, service.settings.service_allowed_hosts),
+        )
+    ]
+    if token_verifier is not None:
+        middleware.append(
+            Middleware(
+                BearerGuard,
+                verifier=token_verifier,
+                resource_metadata_url=protected_resource_metadata_url(service.settings),
+            )
+        )
+    return Starlette(routes=routes, lifespan=lifespan, middleware=middleware)

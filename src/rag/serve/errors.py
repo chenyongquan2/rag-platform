@@ -29,6 +29,10 @@ _STATUS: dict[str, int] = {
     ErrorCategory.AGENT_DEADLINE: 504,
     ErrorCategory.INVALID_RESUME_TOKEN: 400,
     ErrorCategory.SERVER_SHUTDOWN: 503,
+    ErrorCategory.UNAUTHORIZED: 401,
+    ErrorCategory.FORBIDDEN: 403,
+    ErrorCategory.RATE_LIMITED: 429,
+    ErrorCategory.BUDGET_EXCEEDED: 429,
 }
 
 _MESSAGES: dict[str, str] = {
@@ -70,18 +74,43 @@ _MESSAGES: dict[str, str] = {
 _MESSAGES[ErrorCategory.SERVER_SHUTDOWN] = (
     "The server is shutting down and stopped this request; ask again in a minute."
 )
+_MESSAGES[ErrorCategory.UNAUTHORIZED] = (
+    "A valid bearer access token is required (Authorization: Bearer <token>); it is missing, "
+    "expired or not issued for this service."
+)
+_MESSAGES[ErrorCategory.FORBIDDEN] = (
+    "The access token is valid but its scopes grant no access to this service, or name more "
+    "than one caller; ask for a token with exactly one of the service's scopes."
+)
+_MESSAGES[ErrorCategory.RATE_LIMITED] = (
+    "Too many requests from this caller in the current minute; retry after the number of "
+    "seconds in Retry-After (HTTP) or in a minute."
+)
+_MESSAGES[ErrorCategory.BUDGET_EXCEEDED] = (
+    "The daily model budget of this caller or of the service is used up; ask_docs is refused "
+    "until the next day (UTC), search_docs still works."
+)
 
 
 class ServiceError(Exception):
-    """A failed request as callers see it: category and request id, nothing else. `detail`
+    """A failed request as callers see it: category and request id, nothing else (and, for
+    `rate_limited` and `budget_exceeded`, when to retry). `detail`
     (what was wrong, for the log line) and the exception that caused it (`__cause__`) are
     logged, never returned; `str()` is the category alone."""
 
-    def __init__(self, category: str, request_id: str, *, detail: str = "") -> None:
+    def __init__(
+        self,
+        category: str,
+        request_id: str,
+        *,
+        detail: str = "",
+        retry_after_s: float | None = None,
+    ) -> None:
         super().__init__(str(category))
         self.category = str(category)
         self.request_id = request_id
         self.detail = detail
+        self.retry_after_s = retry_after_s  # HTTP sends it as Retry-After (whole seconds)
 
     def __repr__(self) -> str:
         return f"ServiceError({self.category!r}, request_id={self.request_id!r})"

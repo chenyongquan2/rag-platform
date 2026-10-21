@@ -13,7 +13,8 @@ answers `not_ready`. A KB whose chain cannot be built (no index behind its alias
 embedding model) is logged and answers `retrieval_failed`; the others work.
 
 Every call:
-1. resolves the caller (`AclResolver`; P0: the configured local user) and checks that it may
+1. resolves the caller (`AclResolver`: the configured local user, or the caller of a verified
+   OAuth token, P8-01; a token that grants none is `forbidden`) and checks that it may
    use the knowledge base - an unknown and a hidden KB both answer `kb_not_found`;
 2. validates the arguments (`invalid_request`) and the caller's filters against the whitelist
    (`invalid_filter`) before anything runs;
@@ -61,11 +62,13 @@ from rag.retrieve.deadline import Deadline
 from rag.retrieve.filters import FilterError, build_es_filter
 from rag.retrieve.observe import observe_retrieval
 from rag.security.access import (
+    EVERY_CALLER,
+    AccessDenied,
     AclResolver,
     Caller,
-    ConfigAclResolver,
     Credentials,
     kb_visible,
+    make_acl_resolver,
     visible_kbs,
 )
 from rag.serve.errors import ServiceError, error_category
@@ -271,7 +274,7 @@ class SearchService:
         self.configs: dict[str, KnowledgeBaseConfig] = (
             dict(configs) if configs is not None else load_kb_configs(repo_path(settings.kb_dir))
         )
-        self.resolver: AclResolver = resolver or ConfigAclResolver.from_settings(settings)
+        self.resolver: AclResolver = resolver or make_acl_resolver(settings)
         self._builder: PipelineBuilder = builder or DefaultPipelineBuilder(settings)
         self._pipelines: dict[str, SearchBackend] = {}
         self._unavailable: set[str] = set()
@@ -1089,8 +1092,16 @@ class SearchService:
             return KnowledgeBaseList(request_id=request_id, knowledge_bases=infos)
 
     def visible_configs(self, credentials: Credentials) -> list[KnowledgeBaseConfig]:
-        """The KB configs these credentials may use (for tool descriptions)."""
-        return visible_kbs(self.resolver.resolve(credentials), self.configs)
+        """The KB configs these credentials may use (for tool descriptions). Credentials that
+        name no caller (MCP over HTTP with OAuth: the descriptions are written before any token
+        arrives) see only the KBs open to every caller, so no description names a private KB."""
+        try:
+            return visible_kbs(self.resolver.resolve(credentials), self.configs)
+        except AccessDenied:
+            return sorted(
+                (cfg for cfg in self.configs.values() if EVERY_CALLER in cfg.access.callers),
+                key=lambda cfg: cfg.kb,
+            )
 
     # ---- helpers ----------------------------------------------------------------------------
 
@@ -1101,6 +1112,9 @@ class SearchService:
         hidden KBs look the same)."""
         try:
             caller = self.resolver.resolve(credentials)
+        except AccessDenied as exc:
+            logger.warning("request %s refused: %s", request_id, exc)
+            raise ServiceError(ErrorCategory.FORBIDDEN, request_id, detail=str(exc)) from exc
         except Exception as exc:
             logger.warning("request %s: caller not resolved: %r", request_id, exc)
             raise ServiceError(ErrorCategory.INTERNAL_ERROR, request_id) from exc

@@ -16,13 +16,20 @@ from rag.config.kb import (
     load_kb_configs,
 )
 from rag.config.paths import REPO_ROOT, repo_path
-from rag.config.settings import ChatProfile, ChatProfileName, ModelPrice, ServiceSettings
+from rag.config.settings import (
+    AuthCallerConfig,
+    ChatProfile,
+    ChatProfileName,
+    ModelPrice,
+    ServiceSettings,
+)
 
 __all__ = [
     "REPO_ROOT",
     "AccessConfig",
     "AgentConfig",
     "AnswerConfig",
+    "AuthCallerConfig",
     "ChatProfile",
     "ChatProfileName",
     "EsConfig",

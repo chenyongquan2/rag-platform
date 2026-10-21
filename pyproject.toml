@@ -48,6 +48,8 @@ dependencies = [
     # HTTP client of the embedding gateway client (already installed through openai/langchain).
     "httpx>=0.27",
     "pillow>=10",
+    # OAuth bearer tokens of the resource server (spec P8-01; already installed through mcp).
+    "pyjwt[crypto]>=2.10",
 ]
 
 [dependency-groups]

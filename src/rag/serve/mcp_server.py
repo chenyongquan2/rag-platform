@@ -26,14 +26,17 @@ from typing import Annotated, Any
 import anyio
 from mcp.server import MCPServer
 from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.provider import TokenVerifier
+from mcp.server.auth.settings import AuthSettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import BaseModel, Field
+from pydantic import AnyHttpUrl, BaseModel, Field
 
 from rag.config import KnowledgeBaseConfig
 from rag.observe import new_request_id
 from rag.retrieve.context import CONTEXT_MODES
 from rag.retrieve.filters import CALLER_FILTER_KEYS
 from rag.security.access import Credentials
+from rag.security.tokens import resource_url
 from rag.serve.errors import ServiceError
 from rag.serve.schema import (
     FEEDBACK_COMMENT_CHARS,
@@ -170,7 +173,8 @@ result was good. Do not put secrets or personal data in the comment."""
 
 
 def _credentials(transport: str) -> Credentials:
-    """What the transport knows about the sender; a verified OAuth token from P8 on."""
+    """What the transport knows about the sender: the client, subject and scopes of the token
+    the SDK verified (OAuth mode), else nothing."""
     token = get_access_token()
     if token is None:
         return Credentials(transport=transport)
@@ -206,15 +210,36 @@ async def _finish(call: Awaitable[BaseModel]) -> CallToolResult:
     return _result(response)
 
 
-def build_mcp_server(service: SearchService, *, transport: str = "stdio") -> MCPServer:
+def build_mcp_server(
+    service: SearchService,
+    *,
+    transport: str = "stdio",
+    token_verifier: TokenVerifier | None = None,
+) -> MCPServer:
     """The MCP server with the five tools over `service`. `transport` names the transport in
-    the credentials (`stdio` or `streamable-http`)."""
+    the credentials (`stdio` or `streamable-http`). With `token_verifier` (OAuth mode, spec
+    P8-01) the streamable-http endpoint is an OAuth resource server through the SDK's own hooks
+    (`AuthSettings`, `TokenVerifier`): requests without a token it accepts get 401 before any
+    tool runs, and `/.well-known/oauth-protected-resource/...` names the issuer. The verifier
+    checks the audience itself, so the SDK's resource check is off. In that mode the tool
+    descriptions name only the KBs open to every caller: they are written before any token."""
     configs = service.visible_configs(Credentials(transport=transport))
+    auth = None
+    if token_verifier is not None:
+        settings = service.settings
+        auth = AuthSettings(
+            issuer_url=AnyHttpUrl(settings.auth_issuer),
+            resource_server_url=AnyHttpUrl(resource_url(settings)),
+            validate_token_resource=False,
+            required_scopes=None,
+        )
     mcp: MCPServer = MCPServer(
         name=SERVER_NAME,
         title="Documentation search (RAG)",
         instructions=INSTRUCTIONS,
         log_level="WARNING",
+        auth=auth,
+        token_verifier=token_verifier,
     )
     default_deadline = service.settings.search_deadline_ms
     max_deadline = service.settings.search_max_deadline_ms

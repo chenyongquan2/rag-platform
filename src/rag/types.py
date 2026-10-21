@@ -50,6 +50,13 @@ class ErrorCategory(StrEnum):
     # The server is shutting down: a stream that was open gets an `error` event with this
     # category (and a request that arrives now, a 503) instead of the answer.
     SERVER_SHUTDOWN = "server_shutdown"
+    # Production guards (spec P8-01, design s16-4): no valid bearer token (HTTP 401); a valid
+    # token whose scopes name no configured caller, or several (403); too many requests of this
+    # caller in the current minute (429 with Retry-After). `budget_exceeded` before a call is
+    # the caller's or the service's daily budget (429 with Retry-After until the next UTC day).
+    UNAUTHORIZED = "unauthorized"
+    FORBIDDEN = "forbidden"
+    RATE_LIMITED = "rate_limited"
 
 
 class AnswerStatus(StrEnum):
