@@ -270,3 +270,38 @@ tests:
       - eval_time: 50m
         alertname: NotFoundRateHigh
         exp_alerts: []
+
+  # Spec P8-01: the gateway breaker opens at 2 min (the counter series appears with the
+  # opening), refuses calls for a while, then nothing more happens.
+  - interval: 15s
+    name: the gateway breaker opening fires and clears
+    input_series:
+      - series: 'rag_model_breaker_total{rag_breaker_event="opened", rag_breaker_name="chat"}'
+        values: '_x8 0 1x40'
+      - series: 'rag_model_breaker_total{rag_breaker_event="rejected", rag_breaker_name="chat"}'
+        values: '_x8 0 0+3x4 12x36'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ModelGatewayBreakerOpen
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ModelGatewayBreakerOpen
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "The chat gateway circuit breaker is open"
+              description: "Chat calls are refused without being sent (10 breaker events in 5 minutes): the model gateway failed repeatedly. ask_docs answers with passages only; search_docs is not affected. Check the gateway (LLM_BASE_URL)."
+      - eval_time: 10m
+        alertname: ModelGatewayBreakerOpen
+        exp_alerts: []
+
+  - interval: 15s
+    name: a breaker that never opens is no alert
+    input_series:
+      - series: 'rag_model_breaker_total{rag_breaker_event="closed", rag_breaker_name="chat"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ModelGatewayBreakerOpen
+        exp_alerts: []

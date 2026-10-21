@@ -173,6 +173,22 @@ groups:
           summary: "The result cache is bypassed: its circuit breaker is open"
           description: "Redis is failing for the cache. Check redis-cache and the cache metrics."
 
+  - name: rag-gateway
+    rules:
+      # The chat gateway circuit breaker opened (spec P8-01, design s16-8): five gateway errors or
+      # timeouts in a row (CHAT_BREAKER_FAILURES), so for CHAT_BREAKER_OPEN_S (30 s) every chat
+      # call fails at once and ask_docs answers with the passages only. Fires as soon as an
+      # opening or a refused call is seen in the last 5 minutes (one opening is already an
+      # outage of the gateway, not noise); it clears 5 minutes after the last refused call.
+      - alert: ModelGatewayBreakerOpen
+        expr: sum(increase(rag_model_breaker_total{rag_breaker_event=~"opened|rejected"}[5m])) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "The chat gateway circuit breaker is open"
+          description: "Chat calls are refused without being sent ({{ $value | printf \"%.0f\" }} breaker events in 5 minutes): the model gateway failed repeatedly. ask_docs answers with passages only; search_docs is not affected. Check the gateway (LLM_BASE_URL)."
+
   - name: rag-budget
     rules:
       # Daily budget for model calls made by the service. Chosen, not measured: the whole overnight

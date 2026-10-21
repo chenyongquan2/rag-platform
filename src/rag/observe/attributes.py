@@ -168,3 +168,7 @@ METRIC_ONLINE_EVAL_MRR = "rag.online_eval.judged_mrr"
 # User verdicts (spec P5-02): `rag.feedback` counts them by verdict (useful | not_useful).
 METRIC_FEEDBACK = "rag.feedback"
 FEEDBACK_VERDICT = "rag.feedback.verdict"
+# Chat gateway circuit breaker (spec P8-01): one counter, event = opened | rejected | closed.
+METRIC_MODEL_BREAKER = "rag.model.breaker"
+BREAKER_EVENT = "rag.breaker.event"
+BREAKER_NAME = "rag.breaker.name"

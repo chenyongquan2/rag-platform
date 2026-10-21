@@ -1,6 +1,8 @@
 """Shared pytest setup.
 
 - Tests without an explicit `integration` or `llm` marker are marked `unit`.
+- Every test starts with no shared chat gateway breaker (spec P8-01), so failures that one test
+  sends to a fake gateway never open the breaker of the next.
 - Every test runs with LlamaIndex `Settings.llm` set to a stub that raises when called and
   `Settings.embed_model` set to a deterministic fake, so nothing silently reaches OpenAI or MockLLM.
 """
@@ -11,6 +13,7 @@ from collections.abc import Iterator
 
 import pytest
 
+from rag.llm.breaker import reset_shared_breakers
 from rag.testing import use_safe_llama_settings
 
 pytest_plugins = ["pytester"]
@@ -28,3 +31,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 def _safe_llama_settings() -> Iterator[None]:
     with use_safe_llama_settings():
         yield
+
+
+@pytest.fixture(autouse=True)
+def _fresh_gateway_breakers() -> Iterator[None]:
+    reset_shared_breakers()
+    yield
+    reset_shared_breakers()

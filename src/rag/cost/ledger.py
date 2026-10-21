@@ -3,7 +3,9 @@
 One JSON object per line in the ledger file (`cost_ledger_path`, by default one file shared by
 every checkout): time (UTC), kind (`embedding`, `chat`), model, prompt/completion/total tokens
 from the response's `usage`, and the cost in CNY from the price table in the service settings.
-Callers add their own fields (profile, number of inputs).
+Callers add their own fields (profile, number of inputs). A line written inside a service
+request also carries that request's `caller` and `request_id` (spec P8-01: the daily budget per
+caller, `rag.serve.limits.DailyBudget`, sums these).
 
 The amount spent is a running total per file and process that reads only the lines appended
 since the last check (spec P1-01). Requests in flight hold a reservation of their estimated
@@ -169,6 +171,13 @@ class CostLedger:
     ) -> dict[str, Any]:
         """Append one line for a real call and return it."""
         cny = self.estimate(model, prompt_tokens, completion_tokens)
+        from rag.observe.context import current_request  # rag.observe imports this module
+
+        request = current_request()
+        if request is not None:
+            if request.caller and "caller" not in extra:
+                extra["caller"] = request.caller
+            extra.setdefault("request_id", request.request_id)
         row: dict[str, Any] = {
             "time": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "kind": kind,

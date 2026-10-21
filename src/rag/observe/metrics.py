@@ -150,6 +150,11 @@ class Metrics:
             unit="{CNY}",
             description="Model cost in CNY from the cost ledger",
         )
+        self.model_breaker = meter.create_counter(
+            attr.METRIC_MODEL_BREAKER,
+            unit="{event}",
+            description="Chat gateway circuit breaker: opened, rejected (a call not sent), closed",
+        )
 
     def record_request(
         self,
@@ -245,6 +250,13 @@ class Metrics:
             self.feedback.add(1, {attr.FEEDBACK_VERDICT: "useful" if useful else "not_useful"})
         except Exception:
             logger.warning("recording feedback metrics failed", exc_info=True)
+
+    def record_breaker(self, *, event: str, breaker: str) -> None:
+        """One breaker event (spec P8-01): `opened`, `rejected` or `closed`."""
+        try:
+            self.model_breaker.add(1, {attr.BREAKER_EVENT: event, attr.BREAKER_NAME: breaker})
+        except Exception:
+            logger.warning("recording breaker metrics failed", exc_info=True)
 
     def record_ledger_row(self, row: Mapping[str, Any]) -> None:
         """One call, its tokens and CNY from one cost ledger line (`rag.cost.add_record_listener`).

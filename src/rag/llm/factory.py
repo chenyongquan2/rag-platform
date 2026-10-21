@@ -20,6 +20,7 @@ from langchain_core.language_models import BaseChatModel
 
 from rag.config import ChatProfile, ChatProfileName, ServiceSettings
 from rag.cost import CostLedger
+from rag.llm.breaker import CircuitBreaker, shared_breaker
 from rag.llm.transport import AsyncLedgerTransport, LedgerTransport
 from rag.testing.fakes import FakeChatModel
 
@@ -44,6 +45,7 @@ def make_chat_model(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     max_tokens: int | None = None,
+    breaker: CircuitBreaker | None = None,
 ) -> BaseChatModel:
     """Chat model for `profile` (`online`, `offline` or `cheap`).
 
@@ -55,7 +57,8 @@ def make_chat_model(
     Fails before any request when the gateway URL or key is missing or the model has no price.
     `ledger`, `transport`, `async_transport`, `clock` and `sleep` (sync retries) are for tests.
     `max_tokens` replaces the profile's output cap for this model only (spec P3-06: the graph's
-    answer call); None keeps the profile's.
+    answer call); None keeps the profile's. `breaker` replaces the process's breaker of this
+    gateway (`shared_breaker(llm_base_url)`, off when `chat_breaker_failures` is 0; spec P8-01).
     """
     settings = settings or ServiceSettings()
     config = resolve_chat_profile(profile, settings)
@@ -73,7 +76,14 @@ def make_chat_model(
     ledger = ledger or CostLedger.from_settings(settings)
     ledger.price(config.model)  # no price -> fail now, before any money is spent
 
+    if breaker is None:
+        breaker = shared_breaker(
+            settings.llm_base_url,
+            failures=settings.chat_breaker_failures,
+            open_s=settings.chat_breaker_open_s,
+        )
     policy = {
+        "breaker": breaker,
         "ledger": ledger,
         "profile": profile,
         "max_retries": config.max_retries,

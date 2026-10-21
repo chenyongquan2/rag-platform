@@ -87,6 +87,7 @@ from rag.types import AnswerStatus, AskResult, ContextResult, ErrorCategory, Ret
 
 if TYPE_CHECKING:
     from rag.cache.layer import ResultCache
+    from rag.serve.limits import DailyBudget, RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,8 @@ _CALLER_ERRORS = {
     ErrorCategory.INVALID_FILTER,
     ErrorCategory.KB_NOT_FOUND,
     ErrorCategory.INVALID_RESUME_TOKEN,
+    ErrorCategory.RATE_LIMITED,
+    ErrorCategory.BUDGET_EXCEEDED,
 }
 # The request id a feedback verdict names: what `X-Request-Id` and `new_request_id` allow.
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
@@ -268,9 +271,15 @@ class SearchService:
         answer_model: Any = None,
         helper_model: Any = None,
         cache: ResultCache | None = None,
+        limiter: RateLimiter | None = None,
+        budget: DailyBudget | None = None,
     ) -> None:
         self.settings = settings
         self._cache = cache  # None: no result cache (a bare service; `from_settings` makes one)
+        # Spec P8-01: requests per caller per minute, and the daily model budget (None: none;
+        # `from_settings` makes them from the settings).
+        self._limiter = limiter
+        self._budget = budget
         self.configs: dict[str, KnowledgeBaseConfig] = (
             dict(configs) if configs is not None else load_kb_configs(repo_path(settings.kb_dir))
         )
@@ -292,9 +301,14 @@ class SearchService:
 
     @classmethod
     def from_settings(cls, settings: ServiceSettings, **kwargs: Any) -> SearchService:
-        """The service with the result cache the settings ask for (`cache_mode`; spec P5-01)."""
+        """The service with the result cache (`cache_mode`; spec P5-01), the rate limiter
+        (`rate_limit_mode`) and the daily budget (`budget_daily_*`; spec P8-01) the settings ask
+        for."""
         from rag.cache.factory import make_result_cache
+        from rag.serve.limits import make_daily_budget, make_rate_limiter
 
+        kwargs.setdefault("limiter", make_rate_limiter(settings))
+        kwargs.setdefault("budget", make_daily_budget(settings))
         return cls(settings, cache=make_result_cache(settings), **kwargs)
 
     @property
@@ -481,6 +495,7 @@ class SearchService:
             config_version=self._config_version(cfg, pipeline),
             extra=extra,
         ) as call:
+            self._admit(caller, request_id)
             if cfg is None:
                 raise ServiceError(ErrorCategory.KB_NOT_FOUND, request_id, detail=f"kb {kb!r}")
             retrieval = cfg.retrieval
@@ -640,12 +655,14 @@ class SearchService:
         ) as call:
             if cancel_note is not None:
                 call.cancel_note = cancel_note
+            self._admit(caller, request_id)
             if cfg is None:
                 raise ServiceError(ErrorCategory.KB_NOT_FOUND, request_id, detail=f"kb {kb!r}")
             deadline_ms = self.settings.agent_deadline_ms if deadline_ms is None else deadline_ms
             self._check_ask_args(
                 question, session_id, deadline_ms, request_id, resume_token, answer
             )
+            self._check_budget(caller, request_id)
             deadline = Deadline.after_ms(deadline_ms)
             pipeline = await asyncio.to_thread(self._ready_pipeline, cfg.kb, deadline, request_id)
             listener = None
@@ -1022,6 +1039,7 @@ class SearchService:
             config_version=self._config_version(cfg, pipeline),
             extra=extra,
         ) as call:
+            self._admit(caller, request_id)
             if kb is None:
                 raise ServiceError(
                     ErrorCategory.INVALID_REQUEST, request_id, detail="malformed chunk id"
@@ -1122,6 +1140,38 @@ class SearchService:
         if cfg is not None and not kb_visible(caller, cfg):
             cfg = None
         return caller, cfg
+
+    def _admit(self, caller: Caller, request_id: str) -> None:
+        """Count the request against the caller's minute (spec P8-01); over the limit it is
+        `rate_limited` with the seconds left in the minute. Counted before the KB is checked, so
+        guessing KB names costs requests too."""
+        if self._limiter is None:
+            return
+        admission = self._limiter.admit(caller.caller_id)
+        if not admission.allowed:
+            raise ServiceError(
+                ErrorCategory.RATE_LIMITED,
+                request_id,
+                detail=f"caller {caller.caller_id}: {admission.count} > {admission.limit}/min",
+                retry_after_s=admission.retry_after_s,
+            )
+
+    def _check_budget(self, caller: Caller, request_id: str) -> None:
+        """Refuse an ask_docs request before any model call when today's spending of the caller
+        or of the service, plus the request's estimate, would pass its daily budget."""
+        if self._budget is None:
+            return
+        refusal = self._budget.refusal(caller.caller_id)
+        if refusal is not None:
+            raise ServiceError(
+                ErrorCategory.BUDGET_EXCEEDED,
+                request_id,
+                detail=(
+                    f"{refusal.scope} daily budget: spent {refusal.spent_cny:.4f} of "
+                    f"{refusal.limit_cny:.4f} CNY"
+                ),
+                retry_after_s=refusal.retry_after_s,
+            )
 
     def _config_version(
         self, cfg: KnowledgeBaseConfig | None, pipeline: SearchBackend | None

@@ -24,6 +24,10 @@ for `invoke`, `stream`, structured output, sync and async calls.
   the gateway may have done and billed the work. Connect failures and 4xx/5xx answers write no
   line (the gateway did not process the request).
 - The API key echoed in an error body is masked before the SDK puts the body into its exception.
+- With a `breaker` (spec P8-01, `rag.llm.breaker`), an open breaker fails the call before
+  anything is reserved or sent; each call's final outcome (after the retries) is reported to it:
+  connect and read errors, timeouts and 408/429/5xx answers count as failures, any other answer
+  as a success, a budget stop or a cancellation as neither.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ from typing import Any
 import httpx
 
 from rag.cost import CostLedger
+from rag.llm.breaker import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +318,22 @@ def _passed_headers(response: httpx.Response) -> list[tuple[str, str]]:
     return [(k, v) for k, v in response.headers.multi_items() if k.lower() not in _DROP_HEADERS]
 
 
+def _report(breaker: CircuitBreaker, exc: BaseException) -> None:
+    """A call that raised: a gateway failure, or nothing (budget stop, bug, cancellation)."""
+    if isinstance(exc, httpx.TransportError):
+        breaker.record_failure()
+    else:
+        breaker.release()
+
+
+def _report_response(breaker: CircuitBreaker, response: httpx.Response) -> None:
+    """A call that got an answer: 408, 429 and 5xx (left after the retries) are failures."""
+    if _Policy.retryable(response):
+        breaker.record_failure()
+    else:
+        breaker.record_success()
+
+
 def _interrupted(exc: BaseException) -> bool:
     """Cancelled or interrupted (not an error, not the consumer closing a generator)."""
     return not isinstance(exc, Exception | GeneratorExit)
@@ -385,7 +406,9 @@ class LedgerTransport(httpx.BaseTransport):
         transport: httpx.BaseTransport | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
+        self._breaker = breaker
         self._policy = _Policy(
             ledger,
             profile=profile,
@@ -399,6 +422,18 @@ class LedgerTransport(httpx.BaseTransport):
         self._client = httpx.Client(transport=transport)
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if self._breaker is None:
+            return self._send(request)
+        self._breaker.before_call()
+        try:
+            response = self._send(request)
+        except BaseException as exc:
+            _report(self._breaker, exc)
+            raise
+        _report_response(self._breaker, response)
+        return response
+
+    def _send(self, request: httpx.Request) -> httpx.Response:
         policy = self._policy
         start, timeouts = policy.start(request)
         attempt = 0
@@ -457,7 +492,9 @@ class AsyncLedgerTransport(httpx.AsyncBaseTransport):
         transport: httpx.AsyncBaseTransport | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
+        self._breaker = breaker
         self._policy = _Policy(
             ledger,
             profile=profile,
@@ -471,6 +508,18 @@ class AsyncLedgerTransport(httpx.AsyncBaseTransport):
         self._client = httpx.AsyncClient(transport=transport)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if self._breaker is None:
+            return await self._send(request)
+        self._breaker.before_call()
+        try:
+            response = await self._send(request)
+        except BaseException as exc:
+            _report(self._breaker, exc)
+            raise
+        _report_response(self._breaker, response)
+        return response
+
+    async def _send(self, request: httpx.Request) -> httpx.Response:
         policy = self._policy
         start, timeouts = policy.start(request)
         attempt = 0

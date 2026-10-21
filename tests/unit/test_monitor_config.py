@@ -359,3 +359,14 @@ def test_readme_never_suggests_down_or_an_unnamed_profile_stop() -> None:
             stop = re.search(r"docker compose\s+--profile\s+\S+\s+(stop|rm -sf)\s*(\S*)", line)
             if stop:
                 assert stop.group(2) and not stop.group(2).startswith(("`", "#")), line
+
+
+def test_the_gateway_breaker_alert_reads_the_breaker_counter_and_is_tested() -> None:
+    """Spec P8-01 AC6: the breaker's counter is exported and its alert is unit-tested."""
+    assert "rag_model_breaker_total" in exported_series()
+    rules = {rule["alert"]: rule for rule in _rules()}
+    expr = rules["ModelGatewayBreakerOpen"]["expr"]
+    assert "rag_model_breaker_total" in expr and "opened" in expr and "rejected" in expr
+    tests = yaml.safe_load(RULES_TEST.read_text("utf-8"))["tests"]
+    tested = {case["alertname"] for test in tests for case in test.get("alert_rule_test", [])}
+    assert "ModelGatewayBreakerOpen" in tested
