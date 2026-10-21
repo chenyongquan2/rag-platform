@@ -14,7 +14,8 @@
 #   Prometheus       http://127.0.0.1:29090/   (alert rules: deploy/prometheus/rules.yml)
 #   Grafana          http://127.0.0.1:23000/   (dashboard "RAG platform overview", provisioned)
 # Profile `langfuse` (several GB of memory, see README): Langfuse web http://127.0.0.1:23001/
-# Every service below has a memory limit: a container that grows past it is killed, not the machine.
+# The services P5-02 added or changed (Collector, Jaeger, Prometheus, Grafana, Langfuse) have a memory
+# limit: a container that grows past it is killed, not the machine. Elasticsearch is bounded by its heap.
 name: rag-platform
 
 # Container stdout logs also fill the Docker disk; Docker keeps them forever by default.
