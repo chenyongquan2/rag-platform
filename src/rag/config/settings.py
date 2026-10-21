@@ -302,6 +302,16 @@ class ServiceSettings(BaseSettings):
     probe_ask_timeout_s: float = Field(default=45.0, gt=0)
     probe_ask_daily_cap: int = Field(default=3, ge=0)
     probe_state_path: str = "data/observe/probe_state.json"
+    # Online sampling (spec P5-02, `python -m rag.eval.online_sample`): `online_eval_n` random
+    # requests of the last `online_eval_window_hours` hours (never more than 50), each judged once
+    # by the sufficiency judge's model profile; the job refuses to start when its estimated cost
+    # (`online_eval_est_cny_per_call` per request) would pass the ledger's stop, and stops after
+    # `online_eval_max_cny` of its own spend.
+    online_eval_n: int = Field(default=20, ge=1)
+    online_eval_window_hours: float = Field(default=168.0, gt=0)
+    online_eval_max_cny: float = Field(default=0.10, gt=0)
+    online_eval_est_cny_per_call: float = Field(default=0.003, gt=0)
+    online_eval_report_dir: str = "data/reports/online"
     # Alerts (spec P5-02): Prometheus posts to the receiver (`python -m rag.monitor receiver`)
     # at `alert_receiver_host:alert_receiver_port` (Alertmanager's 9093 + 20000); it writes
     # `alert_log_path` and, when `ALERT_WEBHOOK_URL` is set, posts each change there too.

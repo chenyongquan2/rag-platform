@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from opentelemetry.metrics import Meter
 
 from rag.config import ServiceSettings
 from rag.config.paths import repo_path
@@ -100,6 +101,34 @@ class _State:
     last_ask_at: float = 0.0
 
 
+class ProbeInstruments:
+    """The probe's metric instruments (one place, so a test can list their names)."""
+
+    def __init__(self, meter: Meter) -> None:
+        self.runs = meter.create_counter(
+            attr.METRIC_PROBE_RUNS, unit="{run}", description="Probe runs by kind and outcome"
+        )
+        self.duration = meter.create_histogram(
+            attr.METRIC_PROBE_DURATION,
+            unit="s",
+            description="Time of one probe request",
+            explicit_bucket_boundaries_advisory=[0.1, 0.5, 1, 2, 3, 5, 8, 12, 20, 30, 45, 60],
+        )
+        self.success = meter.create_gauge(
+            attr.METRIC_PROBE_SUCCESS, unit="", description="1 when the last probe run was ok"
+        )
+        self.last_duration = meter.create_gauge(
+            attr.METRIC_PROBE_LAST_DURATION,
+            unit="s",
+            description="Seconds the latest probe request took (an alert reads a slow service)",
+        )
+        self.last_success = meter.create_gauge(
+            attr.METRIC_PROBE_LAST_SUCCESS,
+            unit="s",
+            description="Unix time of the last ok probe run",
+        )
+
+
 @dataclass
 class Prober:
     config: ProbeConfig
@@ -109,29 +138,7 @@ class Prober:
     _state: _State | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        meter = get_observability().meter
-        self._runs = meter.create_counter(
-            attr.METRIC_PROBE_RUNS, unit="{run}", description="Probe runs by kind and outcome"
-        )
-        self._duration = meter.create_histogram(
-            attr.METRIC_PROBE_DURATION,
-            unit="s",
-            description="Time of one probe request",
-            explicit_bucket_boundaries_advisory=[0.1, 0.5, 1, 2, 3, 5, 8, 12, 20, 30, 45, 60],
-        )
-        self._success = meter.create_gauge(
-            attr.METRIC_PROBE_SUCCESS, unit="", description="1 when the last probe run was ok"
-        )
-        self._last_duration = meter.create_gauge(
-            attr.METRIC_PROBE_LAST_DURATION,
-            unit="s",
-            description="Seconds the latest probe request took (an alert reads a slow service)",
-        )
-        self._last_success = meter.create_gauge(
-            attr.METRIC_PROBE_LAST_SUCCESS,
-            unit="s",
-            description="Unix time of the last ok probe run",
-        )
+        self._metrics = ProbeInstruments(get_observability().meter)
 
     # ---- the two checks ---------------------------------------------------------------------
 
@@ -204,12 +211,13 @@ class Prober:
     def _record(self, kind: str, outcome: str, duration_s: float) -> None:
         try:
             attrs = {attr.PROBE_KIND: kind}
-            self._runs.add(1, {**attrs, attr.PROBE_OUTCOME: outcome})
-            self._duration.record(duration_s, attrs)
-            self._success.set(1 if outcome == OK else 0, attrs)
-            self._last_duration.set(duration_s, attrs)
+            m = self._metrics
+            m.runs.add(1, {**attrs, attr.PROBE_OUTCOME: outcome})
+            m.duration.record(duration_s, attrs)
+            m.success.set(1 if outcome == OK else 0, attrs)
+            m.last_duration.set(duration_s, attrs)
             if outcome == OK:
-                self._last_success.set(self.clock(), attrs)
+                m.last_success.set(self.clock(), attrs)
         except Exception:
             logger.warning("recording probe metrics failed", exc_info=True)
 

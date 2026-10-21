@@ -154,6 +154,10 @@ METRIC_PROBE_LAST_DURATION = "rag.probe.last_duration"  # seconds of the latest 
 PROBE_KIND = "rag.probe.kind"
 PROBE_OUTCOME = "rag.probe.outcome"
 
+# Online sampling (spec P5-02, `rag.eval.online_sample`): share of sampled real requests whose
+# returned passages the judge found sufficient, 0 to 1; set once per run.
+METRIC_ONLINE_EVAL_SCORE = "rag.online_eval.score_mean"
+
 # User verdicts (spec P5-02): `rag.feedback` counts them by verdict (useful | not_useful).
 METRIC_FEEDBACK = "rag.feedback"
 FEEDBACK_VERDICT = "rag.feedback.verdict"

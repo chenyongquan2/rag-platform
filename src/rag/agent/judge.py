@@ -157,6 +157,13 @@ def _messages(entries: Sequence[tuple[int, str, list[Chunk]]], cap: int) -> list
     ]
 
 
+def sufficiency_messages(question: str, chunks: Sequence[Chunk], cap: int) -> list[BaseMessage]:
+    """The judge's messages for one question and its fragments (sub-question number 1), cut to
+    `cap` estimated tokens: what the online sampling job (spec P5-02) asks, with the very same
+    instructions the graph uses."""
+    return _messages([(1, question, list(chunks))], cap)
+
+
 async def _ask_model(
     ctx: AgentContext, asked: Sequence[str], grounds: dict[str, list[Chunk]]
 ) -> set[str]:
