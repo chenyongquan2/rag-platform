@@ -39,6 +39,7 @@ from rag.cache.store import CircuitBreaker
 from rag.config import KnowledgeBaseConfig, ServiceSettings
 from rag.observe import attributes as attr
 from rag.observe import get_observability
+from rag.observe.context import is_probe_request
 from rag.types import AskResult, RetrievalResult
 
 if TYPE_CHECKING:
@@ -60,6 +61,8 @@ ASK_CODEC: Codec[AskResult] = Codec(
 )
 
 
+PROBE_REASON = "probe"
+"""`rag.cache.reason` of a probe's request: it bypassed the cache on purpose."""
 SHADOW_MAX_PENDING = 16
 """Shadow lookups that may wait for the one worker; the next one is dropped (and counted)."""
 SHADOW_BREAKER_FAILURES = 5
@@ -217,6 +220,10 @@ class ResultCache:
         wait_s: float | None = None,
         vector_of: Callable[[str], list[float] | None] | None = None,
     ) -> CacheRun[RetrievalResult]:
+        if is_probe_request(request_id):
+            # The probe must reach Elasticsearch and the gateway, and its made-up questions must
+            # not fill L1 or L2 (spec P5-02, review round 1 issue 4).
+            return CacheRun(compute(), "bypass", reason=PROBE_REASON)
         build = self._fields(
             "search",
             cfg,
@@ -307,7 +314,10 @@ class ResultCache:
         wait_s: float | None = None,
     ) -> CacheRun[AskResult]:
         """`read=False` for a call that must not be served from the cache (it has a session:
-        a hit would skip writing the turn to the history); a complete answer is still written."""
+        a hit would skip writing the turn to the history); a complete answer is still written.
+        A probe's call neither reads nor writes."""
+        if is_probe_request(request_id):
+            return CacheRun(await compute(), "bypass", reason=PROBE_REASON)
         build = self._fields(
             "ask",
             cfg,

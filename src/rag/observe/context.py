@@ -37,6 +37,22 @@ def current_request() -> RequestContext | None:
     return _CURRENT.get()
 
 
+PROBE_REQUEST_PREFIX = "probe-"
+"""The scheduled probe (`rag.monitor.probe`) sends `X-Request-Id: probe-<hex>` (spec P5-02). The
+service does not cache what a probe asked and labels its metrics, and online sampling leaves it
+out: it is a fixed check, not something a user asked."""
+
+
+def is_probe_request(request_id: str | None) -> bool:
+    return bool(request_id) and str(request_id).startswith(PROBE_REQUEST_PREFIX)
+
+
+def current_request_is_probe() -> bool:
+    """True inside a request the probe sent."""
+    request = _CURRENT.get()
+    return request is not None and is_probe_request(request.request_id)
+
+
 def current_request_id() -> str | None:
     request = _CURRENT.get()
     return request.request_id if request is not None else None

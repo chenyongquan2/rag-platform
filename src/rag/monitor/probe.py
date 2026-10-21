@@ -46,16 +46,13 @@ from rag.config import ServiceSettings
 from rag.config.paths import repo_path
 from rag.observe import attributes as attr
 from rag.observe import get_observability
+from rag.observe.context import PROBE_REQUEST_PREFIX
 
 logger = logging.getLogger(__name__)
 
 OK = "ok"
 ERROR = "error"
 INSANE = "insane"
-
-PROBE_REQUEST_PREFIX = "probe-"
-"""Every probe request sends `X-Request-Id: probe-<hex>`, so its business record can be told
-apart from what users asked (online sampling leaves it out)."""
 
 
 @dataclass(frozen=True)

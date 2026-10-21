@@ -21,6 +21,7 @@ from llama_index.core.base.embeddings.base import BaseEmbedding, Embedding
 from pydantic import PrivateAttr
 
 from rag.factories import split_url, url_path
+from rag.observe.context import current_request_is_probe
 
 if TYPE_CHECKING:
     from redis import Redis
@@ -257,7 +258,10 @@ class CachedEmbedding(BaseEmbedding):
         for chunk in _chunks(pending, self.inner.embed_batch_size):
             vectors = self.inner._get_text_embeddings([text for _, text in chunk])
             fresh = {h: _as_float32(v) for (h, _), v in zip(chunk, vectors, strict=True)}
-            self._cache.put_many(self.cache_model, fresh)
+            # The scheduled probe asks a new question each run: its vectors would only fill the
+            # cache (spec P5-02, review round 1 issue 4), so they are read but never written.
+            if not current_request_is_probe():
+                self._cache.put_many(self.cache_model, fresh)
             found.update(fresh)
         return [found[h] for h in hashes]
 

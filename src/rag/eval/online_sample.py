@@ -57,9 +57,9 @@ from rag.eval.answer.usage import collect_ledger_rows
 from rag.eval.stats import wilson_interval
 from rag.index.names import KbIndexNames
 from rag.llm.structured import structured_output
-from rag.monitor.probe import PROBE_REQUEST_PREFIX
 from rag.observe import attributes as attr
 from rag.observe import get_observability
+from rag.observe.context import is_probe_request
 from rag.observe.records import BusinessRecord
 
 logger = logging.getLogger(__name__)
@@ -212,7 +212,7 @@ def _candidate(row: Mapping[str, Any], earliest: datetime) -> Candidate | None:
         return None
     if record.tool not in JUDGED_TOOLS or _SKIP_FLAGS & set(record.flags):
         return None
-    if record.request_id.startswith(PROBE_REQUEST_PREFIX):
+    if is_probe_request(record.request_id):
         return None  # the scheduled probe's own fixed question, not something a user asked
     try:
         when = datetime.fromisoformat(record.time)

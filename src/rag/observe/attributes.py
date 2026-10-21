@@ -155,6 +155,9 @@ METRIC_PROBE_LAST_DURATION = "rag.probe.last_duration"  # seconds of the latest 
 METRIC_PROBE_CONSECUTIVE_FAILURES = "rag.probe.consecutive_failures"
 PROBE_KIND = "rag.probe.kind"
 PROBE_OUTCOME = "rag.probe.outcome"
+# Set to "1" on every metric point recorded inside a request the probe sent (request id
+# `probe-<hex>`); user requests have no such attribute (spec P5-02).
+REQUEST_PROBE = "rag.request.probe"
 
 # Online sampling (spec P5-02, `rag.eval.online_sample`): judged hit@k and judged MRR of the last
 # sample of real requests (a judge model says which returned passages are relevant), 0 to 1;
