@@ -817,6 +817,28 @@ uv run python -m rag.eval.agentic judge --out data/reports/p3-06
 uv run python -m rag.eval.agentic compare --before data/reports/p3-05 --after data/reports/p3-06
 ```
 
+## Citation check level 2 (does the cited fragment support the sentence)
+
+Spec P1-06 (design s11-2, s14-3): `rag.answer.support.judge_support(sentences, chunks, model=...)`
+asks a cheap judge of another vendor (`qwen/qwen3.6-flash`, temperature 0, thinking off), in one
+forced tool call per answer, whether each cited fragment supports its sentence (`supported`,
+`partly`, `not_supported`; `unknown` when the judge fails); `build_judge_model(settings, config)`
+builds the judge. Online sampling (P5-02) can call the same function once request records keep
+the answer sentences and their cited chunks (today they keep chunk ids only). The eval runs it over stored answers only, never generating new ones, and reports
+citation precision (pairs) and recall (sentences) with Wilson intervals, judge stability, planted
+errors and a paired McNemar test when both systems have judged answers. P3 records written before
+P1-06 have no sentence citations and are skipped.
+
+```bash
+R=data/reports/answer-eval/answers/<run>/results.json
+uv run python -m rag.eval.support run --source p1-04 --path $R --out data/reports/p1-06 --limit 5   # pilot
+uv run python -m rag.eval.support run --source p1-04 --path $R --out data/reports/p1-06 --run 1
+uv run python -m rag.eval.support run --source p1-04 --path $R --out data/reports/p1-06 --run 2
+uv run python -m rag.eval.support plant --out data/reports/p1-06 --n 10      # planted unsupported sentences
+uv run python -m rag.eval.support human-sheet --out data/reports/p1-06 --n 40
+uv run python -m rag.eval.support report --out data/reports/p1-06 --md data/reports/p1-06/report.md
+```
+
 ## Synthetic question sets
 
 Dev and holdout sets generated from the corpus (spec P1-05, design s14-2): random spans of the

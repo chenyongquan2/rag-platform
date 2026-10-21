@@ -111,6 +111,18 @@ def _cited_pages(answer_sentences: Sequence[Any], chunks: Sequence[Chunk]) -> li
     return cited
 
 
+def _cited_chunks(answer_sentences: Sequence[Any], chunks: Sequence[Chunk]) -> list[Chunk]:
+    """The cited chunks, once each, in first-cited order (spec P1-06)."""
+    by_id = {c.chunk_id: c for c in chunks}
+    out: dict[str, Chunk] = {}
+    for sentence in answer_sentences:
+        for citation in sentence.citations:
+            chunk = by_id.get(citation.chunk_id)
+            if chunk is not None and citation.chunk_id not in out:
+                out[citation.chunk_id] = chunk
+    return list(out.values())
+
+
 # ---- standard RAG -------------------------------------------------------------------------------
 
 
@@ -157,6 +169,8 @@ async def _standard_one(
         retrieved_pages=_pages(ctx.chunks),
         context_pages=_pages(answer.chunks),
         cited_pages=_cited_pages(answer.sentences, answer.chunks),
+        answer_sentences=list(answer.sentences) if answer.found else [],
+        cited_chunks=_cited_chunks(answer.sentences, answer.chunks) if answer.found else [],
         retrieval_not_found=ctx.not_found,
         degraded=ctx.degraded,
         rerank_timeout=ctx.rerank_timeout,
@@ -301,6 +315,12 @@ def _agentic_record(
         retrieved_pages=_pages([c for r in rounds for c in r.chunks]),
         context_pages=_pages(result.sources) if not clarification else [],
         cited_pages=_cited_pages(result.sentences, result.sources),
+        answer_sentences=list(result.sentences) if result.found and not clarification else [],
+        cited_chunks=(
+            _cited_chunks(result.sentences, result.sources)
+            if result.found and not clarification
+            else []
+        ),
         retrieval_not_found=all(r.not_found for r in rounds) if rounds else False,
         total_ms=round(elapsed_ms, 3),
         steps_ms=dict(steps),
