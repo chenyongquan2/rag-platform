@@ -62,6 +62,11 @@ def search_config_version(
         cfg.retrieval.replace_table_summaries and cfg.retrieval.replace_table_summaries_after_rerank
     ):
         kb_config["retrieval"].pop("replace_table_summaries_after_rerank")
+    for pipeline in kb_config["pipelines"].values():
+        # Same rule for the reader parameters (spec P6-01): a pipeline without any has the
+        # version it had before the field existed (an empty dict would change the hash).
+        if not pipeline.get("reader_params"):
+            pipeline.pop("reader_params", None)
     payload = {
         # The description only tells callers what the KB holds (spec P0-09); `agent` (rounds of
         # the ask_docs graph, spec P3-01) is not part of a search. Neither changes a result.

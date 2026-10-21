@@ -105,6 +105,8 @@ def test_config_version_ignores_the_stage_setting_when_it_is_off() -> None:
     settings = ServiceSettings(_env_file=None)  # type: ignore[call-arg]
     cfg = KnowledgeBaseConfig(kb=KB)
     dump = cfg.model_dump(mode="json", exclude={"description", "agent", "cache"})
+    for pipe in dump["pipelines"].values():  # no reader_params: not in the version
+        pipe.pop("reader_params")
     for key in (
         "dedupe_by_page_key",
         "replace_table_summaries",
