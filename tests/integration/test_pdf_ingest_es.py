@@ -18,6 +18,8 @@ from elasticsearch import Elasticsearch
 from redis import Redis
 
 from rag.config import KnowledgeBaseConfig, ServiceSettings
+from rag.data.base import make_doc_id
+from rag.data.pdf.connector import PdfDirConnector
 from rag.index.names import KbIndexNames
 from rag.ingest import KbProcessor
 from rag.ingest.describe import IMAGE_MARKER_PREFIX, reset_shared_services, shared_service
@@ -25,7 +27,7 @@ from rag.ingest.job import IngestJob
 from rag.registry import connectors
 from rag.retrieve.search import make_hybrid_search
 from rag.testing.fakes import FakeEmbedding
-from rag.testing.pdf import make_test_pdf
+from rag.testing.pdf import FakeEngine, make_test_pdf, sample_pages
 
 pytestmark = pytest.mark.integration
 
@@ -266,3 +268,43 @@ def test_a_second_run_changes_nothing_and_calls_no_model(make_demo: Callable[...
     assert service.stats.tables_summarised == 0
     summary = [c for c in demo.sources().values() if c["chunk_kind"] == "table_summary"]
     assert summary and FAKE_DESCRIPTION in summary[0]["content"]
+
+
+def test_a_pdf_that_fails_on_a_later_run_keeps_its_pages_in_the_index(
+    make_demo: Callable[..., Demo], tmp_path: Path
+) -> None:
+    """Spec P6-01 review round 2: a file the connector cannot convert on a re-read stands for
+    all of its pages; the job keeps their stored copies and their chunks stay in Elasticsearch.
+    The conversion engine is a fake here (the real Docling ran in the tests above)."""
+    demo = make_demo()
+    raw = tmp_path / "two_files"
+    raw.mkdir()
+    (raw / "x.pdf").write_bytes(b"%PDF x first")
+    (raw / "y.pdf").write_bytes(b"%PDF y first")
+    settings = demo.settings.model_copy(update={"ingest_max_read_failure_ratio": 0.5})
+
+    def run(engine: FakeEngine) -> Any:
+        connector = PdfDirConnector(
+            kb=demo.cfg.kb, path=raw, cache_dir=tmp_path / "fake_cache", engine=engine
+        )
+        return IngestJob(
+            demo.cfg,
+            settings,
+            es=demo.es,
+            redis=demo.redis,
+            embed_model=FakeEmbedding(dim=DIMS),
+            connector=connector,
+            processor=KbProcessor(demo.cfg, settings=settings, tokenizer=words),
+            names=demo.names,
+        ).run()
+
+    run(FakeEngine(sample_pages()))
+    x_pages = sorted(make_doc_id(demo.cfg.kb, "x.pdf", f"p{n}") for n in (1, 2, 3))
+    before = sorted(i for i, c in demo.sources().items() if c["doc_id"] in x_pages)
+    assert before
+    (raw / "x.pdf").write_bytes(b"%PDF x broken now")
+    second = run(FakeEngine(sample_pages(), fail_on=["x.pdf"]))
+    assert list(second.read_failures) == [make_doc_id(demo.cfg.kb, "x.pdf")]
+    assert sorted(second.kept_old_version) == x_pages and second.deleted == []
+    after = sorted(i for i, c in demo.sources().items() if c["doc_id"] in x_pages)
+    assert after == before

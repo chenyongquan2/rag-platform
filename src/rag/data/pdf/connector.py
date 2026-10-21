@@ -118,7 +118,9 @@ class PdfDirConnector:
         """The page documents of a PDF; when the file cannot be converted (corrupt, too large,
         too many pages, too slow) one document that stands for the file and carries the reason,
         which the reader raises: the ingest job then counts a read failure and goes on with the
-        other files. A file that failed is not tried again in this process."""
+        other files. A file that failed is not tried again in this process. The id of that
+        document is the file part of the page ids (`split_doc_id`), so the job keeps the stored
+        copies of all pages of the file (`units_of`) instead of deleting them."""
         digest = file_sha256(path)
         key = (path.name, digest)
         reason = self._failed.get(key)

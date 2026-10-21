@@ -57,6 +57,7 @@ from rag.config import KnowledgeBaseConfig, ServiceSettings, load_kb_configs
 from rag.config.settings import mask_url
 from rag.cost import BudgetExceeded, CostLedger
 from rag.data import SourceDocument
+from rag.data.base import units_of
 from rag.embed import make_embedding
 from rag.factories import (
     JsonFileDocumentStore,
@@ -466,11 +467,15 @@ class IngestJob:
         for _rule, stats in self.processor.rule_stats():
             skipped_by_cleaning.update(stats.skipped)
         kept_old: list[str] = []
-        for doc_id in read.errors:
-            stored = docstore.get_document(doc_id, raise_error=False)
-            if isinstance(stored, Document):
-                documents.append(stored)
-                kept_old.append(doc_id)
+        stored_before = sorted(set(docstore.get_all_document_hashes().values()))
+        for failed_id in read.errors:
+            # A file of many units (a PDF of pages) that failed as a whole stands for all of
+            # them: each keeps its stored copy, or they would count as deleted (spec P6-01).
+            for doc_id in units_of(failed_id, stored_before):
+                stored = docstore.get_document(doc_id, raise_error=False)
+                if isinstance(stored, Document):
+                    documents.append(stored)
+                    kept_old.append(doc_id)
 
         ids = [d.id_ for d in documents]
         if len(set(ids)) != len(ids):
