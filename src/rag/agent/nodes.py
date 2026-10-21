@@ -394,6 +394,8 @@ def plan_next(
     if outcome.verdict == "enough":
         return False, None
     agent = ctx.cfg.agent
+    if outcome.verdict == "not_enough" and not agent.round2_on_not_enough:
+        return False, None  # a plain miss is "not found"; only `partly_enough` goes on
     if state.get("round", 0) >= agent.max_rounds:
         return False, None if outcome.verdict == "not_enough" else "max_rounds"
     if agent.judge and not agent.rewrite:

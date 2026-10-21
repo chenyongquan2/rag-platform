@@ -73,3 +73,5 @@ agent:
   judge_skip_score: 0.98 # P3-06: a sub-question with a chunk scored >= 0.98 is grounded without asking
                          # the judge model (P3-05 records: 73 of 100 answerable questions, judge
                          # accuracy 95/100 against 92/100 with the model); null = always ask (P3-03).
+  round2_on_not_enough: true  # P3-06: false = a plain "not enough" is "not found" at once, only "partly
+                         # enough" gets round 2; true = design 13.4 (see decisions.md for the data)

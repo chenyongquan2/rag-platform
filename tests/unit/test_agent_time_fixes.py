@@ -514,3 +514,55 @@ def test_the_graph_caps_the_answer_call_and_other_calls_keep_their_profile(
     runtime.default_model()
     runtime.default_helper_model()
     assert built == [("online", 900), ("cheap", None)]
+
+
+# ---- round2_on_not_enough (config key, default = the design's behaviour) ----------------------
+
+
+def test_round2_on_not_enough_is_on_by_default_and_plan_next_follows_it() -> None:
+    ctx_on = _ctx_with(25_000)
+    assert ctx_on.cfg.agent.round2_on_not_enough is True
+    assert plan_next({"round": 1}, NOT_ENOUGH, ctx_on, round_ms=1_000) == (True, None)
+    # Off: a plain "not enough" goes to "not found" (no stop reason); "partly enough", which
+    # names a missing sub-question, still gets its round.
+    ctx = make_context(
+        cfg=kb_config(KB, judge=True, rewrite=True, round2_on_not_enough=False),
+        settings=agent_settings(agent_answer_reserve_ms=6_000, agent_round_min_ms=8_000),
+    )
+    assert plan_next({"round": 1}, NOT_ENOUGH, ctx, round_ms=1_000) == (False, None)
+    assert plan_next({"round": 1}, PARTLY, ctx, round_ms=1_000) == (True, None)
+
+
+def test_with_round2_on_not_enough_off_a_plain_miss_is_answered_as_not_found() -> None:
+    nothing = scored_result(KB, [0.1], pages=[7])
+    cases = (({}, 2, 1), ({"round2_on_not_enough": False}, 1, 0))
+    for agent, expected_rounds, helper_calls in cases:
+        backend = ScriptedSearchBackend(KB, default=nothing)
+        helper = FakeChatModel(responses=[multi_query_reply((1, ["gamma epsilon"]))])
+        result = _ask(
+            "gamma delta",
+            backend,
+            helper=helper,
+            answer=FakeChatModel(responses=[]),  # nothing found: no answer call
+            agent={"hyde": False, **agent},
+            max_rounds=2,
+        )
+        assert result.rounds == expected_rounds and len(helper.calls) == helper_calls
+        assert result.status == AnswerStatus.NOT_FOUND and result.stop_reason is None
+        assert [c.chunk_id for c in result.nearest] == ["hf_docs:p7.md#0"]
+
+
+def test_only_searches_of_round_two_and_later_ask_for_the_rerank_reserve() -> None:
+    """Review must-fix 1 (P3-06): round one is the plain search `search_docs` makes (reserve 0);
+    later rounds pass `agent_rerank_reserve_ms`."""
+    backend = ScriptedSearchBackend(KB, default=scored_result(KB, [0.5], pages=[1]))
+    helper = FakeChatModel(responses=[multi_query_reply((1, ["gamma epsilon"]))])
+    judge = FakeChatModel(responses=[judge_reply(False), judge_reply(True)])
+    settings = agent_settings(agent_rerank_reserve_ms=2_500)
+    _ask(
+        "gamma delta", backend, helper=helper, judge=judge, settings=settings, agent={"hyde": False}
+    )
+    assert [(c["question"], c["rerank_reserve_ms"]) for c in backend.calls] == [
+        ("gamma delta", 0),
+        ("gamma epsilon", 2_500),
+    ]

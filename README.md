@@ -408,6 +408,7 @@ no accuracy, which would only be the share of "not enough" labels). `--rescue` a
 | KB config `agent.judge` | false (`hf_docs`: true) | Judge after each round, correct with more rounds |
 | KB config `agent.multi_queries` | 3 | Phrasings of each missing sub-question in round 2 |
 | KB config `agent.hyde` | true | Round 3 searches a hypothetical answer passage |
+| KB config `agent.round2_on_not_enough` | true | false: a plain `not_enough` is "not found" at once; only `partly_enough` gets another round (P3-06; not on by default, see decisions) |
 | KB config `agent.judge_skip_score` | null (`hf_docs`: 0.98) | A sub-question with a chunk scored at or above this needs no judge call (P3-06) |
 
 ## Streaming answers and the Q&A page (P3-04)

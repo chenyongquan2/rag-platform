@@ -59,6 +59,7 @@ def test_hf_docs_sets_agent_keys() -> None:
         multi_queries=3,
         hyde=True,
         judge_skip_score=0.98,  # P3-06
+        round2_on_not_enough=True,  # P3-06: the design's behaviour; a switch, not a change
     )
 
 
