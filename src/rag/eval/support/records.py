@@ -26,7 +26,8 @@ SkipReason = Literal["not_found", "no_answer", "no_sentence_citations", "no_sent
 class Planted(BaseModel):
     """A deliberately unsupported sentence in a copy of a real answer (judge sanity check)."""
 
-    kind: Literal["swap_fragment", "change_number"]
+    kind: Literal["swap_fragment", "change_number", "reviewer_hard"]
+    """`reviewer_hard`: a hand-made near miss of the P1-06 review (only on the human sheet)."""
     original_qid: str
     sentence: int = Field(ge=1)
     """1-based index of the changed sentence."""

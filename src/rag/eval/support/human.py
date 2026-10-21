@@ -1,11 +1,20 @@
 """Blind sheet for the owner's check of the support judge (spec P1-06, design s14-3).
 
 One row per (sentence, cited fragment) pair: the question, the sentence and the fragment's text,
-and an empty cell for the owner's label. Nothing names the system or shows the judge's verdict;
-the key file (sample id -> source, system, question id, sentence, chunk id, the judge's labels)
-is kept apart. Rows: every pair the judge did not call supported (at most half of the sheet,
-drawn at random when there are more), the rest drawn at random from the supported pairs, seeded,
-then shuffled. This module never writes a label.
+and empty cells for the owner's label and comment. Nothing names the system, the stratum or the
+judge's verdict; the key file (sample id -> stratum, source, system, question id, sentence,
+chunk id, the judge's labels, the known answer) is kept apart, so agreement can be computed per
+stratum. The rows, in four strata:
+
+- `judge_not_supported`: every real pair the judge did not call supported in run 1 or run 2;
+- `planted`: the planted pair of every planted copy (known answer: not supported);
+- `reviewer_hard`: the pairs of the changed sentence of every hand-made near miss passed as
+  `extra` (known answer: not supported);
+- `random_supported`: the rest of the `n` rows, drawn at random (seeded) from the real pairs both
+  runs called supported.
+
+The first three strata are always complete, even beyond `n`. The rows are shuffled. This module
+never writes a label.
 """
 
 from __future__ import annotations
@@ -16,7 +25,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from rag.answer.context import TITLE_SEPARATOR
+from rag.answer.support import PairVerdict, SentenceVerdict
 from rag.eval.support.records import SupportLine
+from rag.types import Chunk
 
 SHEET_COLUMNS = [
     "sample_id",
@@ -29,6 +40,7 @@ SHEET_COLUMNS = [
 ]
 KEY_COLUMNS = [
     "sample_id",
+    "stratum",
     "source",
     "system",
     "qid",
@@ -36,10 +48,13 @@ KEY_COLUMNS = [
     "chunk_id",
     "judge_label_run1",
     "judge_label_run2",
+    "known_answer",
 ]
 SHEET_NAME = "support_sheet.csv"
 KEY_NAME = "support_key.csv"
 RUBRIC_NAME = "support_rubric.txt"
+KNOWN_NOT_SUPPORTED = "not_supported_or_partly"
+"""Known answer of a planted or hand-made pair: the fragment does not fully support it."""
 
 _RUBRIC = """How to label (the same three labels the judge uses)
 
@@ -52,33 +67,74 @@ you know and not from other fragments, and write one of:
 
 Leave human_label empty to skip a row. Do not open support_key.csv before you are done.
 
-How the rows were chosen: pairs the judge did not call supported are over-represented on purpose
-(up to half of the sheet), the rest are drawn at random. The sheet does not say which rows are
-which.
+How the rows were chosen: pairs the judge doubted, sentences changed on purpose and pairs drawn
+at random are mixed. The sheet does not say which rows are which.
 """
+
+_Row = tuple[str, SupportLine, SentenceVerdict, PairVerdict, Chunk]
+
+
+def _pairs(line: SupportLine) -> list[tuple[SentenceVerdict, PairVerdict, Chunk]]:
+    if line.result is None:
+        return []
+    chunks = {c.chunk_id: c for c in line.item.chunks}
+    return [
+        (s, p, chunks[p.chunk_id])
+        for s in line.result.sentences
+        for p in s.pairs
+        if p.chunk_id in chunks
+    ]
+
+
+def _label(line: SupportLine | None, sentence: int, chunk_id: str) -> str:
+    if line is None or line.result is None:
+        return ""
+    for s in line.result.sentences:
+        for p in s.pairs:
+            if p.sentence == sentence and p.chunk_id == chunk_id:
+                return p.label
+    return ""
 
 
 def export_support_sheet(
-    lines: Sequence[SupportLine], *, n: int = 40, seed: int = 0, out_dir: str | Path
+    lines: Sequence[SupportLine],
+    *,
+    n: int = 40,
+    seed: int = 0,
+    out_dir: str | Path,
+    extra: Sequence[SupportLine] = (),
 ) -> tuple[Path, Path]:
-    """Write the sheet, the key and the rubric from the first pass; returns (sheet, key)."""
+    """Write the sheet, the key and the rubric; returns (sheet, key). `lines` are the eval's
+    lines (both runs, planted copies included); `extra` are hand-made near misses."""
     if n < 1:
         raise ValueError("n must be at least 1")
-    first = [x for x in lines if x.run == 1 and x.result is not None and x.item.planted is None]
-    second = {(x.source, x.system, x.qid): x for x in lines if x.run == 2 and x.result is not None}
-    pairs = []
-    for line in first:
-        assert line.result is not None
-        chunks = {c.chunk_id: c for c in line.item.chunks}
-        for s in line.result.sentences:
-            for p in s.pairs:
-                if p.label != "unknown" and p.chunk_id in chunks:
-                    pairs.append((line, s, p, chunks[p.chunk_id]))
+    run2 = {(x.source, x.system, x.qid): x for x in lines if x.run == 2 and x.result is not None}
+    must: list[_Row] = []
+    supported: list[_Row] = []
+    for line in lines:
+        if line.run != 1:
+            continue
+        planted = line.item.planted
+        for s, p, chunk in _pairs(line):
+            if planted is not None:
+                if s.index == planted.sentence and p.chunk_id == planted.chunk_id:
+                    must.append(("planted", line, s, p, chunk))
+                continue
+            if p.label == "unknown":
+                continue
+            other = _label(run2.get((line.source, line.system, line.qid)), p.sentence, p.chunk_id)
+            if p.label != "supported" or other in ("partly", "not_supported"):
+                must.append(("judge_not_supported", line, s, p, chunk))
+            else:
+                supported.append(("random_supported", line, s, p, chunk))
+    for line in extra:
+        planted = line.item.planted
+        for s, p, chunk in _pairs(line):
+            if planted is None or s.index == planted.sentence:
+                must.append(("reviewer_hard", line, s, p, chunk))
+
     rng = random.Random(seed)
-    other = [x for x in pairs if x[2].label != "supported"]
-    supported = [x for x in pairs if x[2].label == "supported"]
-    chosen = rng.sample(other, min(len(other), n // 2))
-    chosen += rng.sample(supported, min(len(supported), n - len(chosen)))
+    chosen = must + rng.sample(supported, max(0, min(len(supported), n - len(must))))
     rng.shuffle(chosen)
 
     out = Path(out_dir)
@@ -93,41 +149,36 @@ def export_support_sheet(
         wk = csv.DictWriter(fk, fieldnames=KEY_COLUMNS)
         ws.writeheader()
         wk.writeheader()
-        for i, (line, sentence, pair, chunk) in enumerate(chosen, start=1):
+        for i, (stratum, line, sentence, pair, chunk) in enumerate(chosen, start=1):
             sample_id = f"C{i:0{width}d}"
+            text = line.item.sentences[sentence.index - 1].text
             ws.writerow(
                 {
                     "sample_id": sample_id,
                     "question": line.item.question,
-                    "sentence": sentence.text,
+                    "sentence": text,
                     "fragment_title": TITLE_SEPARATOR.join(chunk.title_path),
                     "fragment_text": chunk.text,
                     "human_label": "",
                     "comment": "",
                 }
             )
-            run2 = second.get((line.source, line.system, line.qid))
-            label2 = ""
-            if run2 is not None and run2.result is not None:
-                label2 = next(
-                    (
-                        q.label
-                        for t in run2.result.sentences
-                        for q in t.pairs
-                        if q.sentence == pair.sentence and q.chunk_id == pair.chunk_id
-                    ),
-                    "",
-                )
             wk.writerow(
                 {
                     "sample_id": sample_id,
+                    "stratum": stratum,
                     "source": line.source,
                     "system": line.system,
                     "qid": line.qid,
                     "sentence_index": pair.sentence,
                     "chunk_id": pair.chunk_id,
                     "judge_label_run1": pair.label,
-                    "judge_label_run2": label2,
+                    "judge_label_run2": _label(
+                        run2.get((line.source, line.system, line.qid)), pair.sentence, pair.chunk_id
+                    ),
+                    "known_answer": KNOWN_NOT_SUPPORTED
+                    if stratum in ("planted", "reviewer_hard")
+                    else "",
                 }
             )
     (out / RUBRIC_NAME).write_text(_RUBRIC, encoding="utf-8", newline="\n")

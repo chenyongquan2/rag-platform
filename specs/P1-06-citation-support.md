@@ -56,8 +56,10 @@ with a stability pass, planted errors and a blind human sheet. P5-02 reuses the 
   at the spend cap and refuses past the ledger stop line — `test_run_resume_and_cost_cap`
 - [x] AC11 Planted errors: fragment swap and number change on copies of supported sentences,
   seeded, originals untouched — `test_plant_errors`
-- [x] AC12 Human sheet: 40 seeded rows (sentence, fragment text), no verdict column, key apart
-  — `test_support_human_sheet_is_blind`
+- [x] AC12 Human sheet (changed in review): every pair doubted in either run, every planted pair
+  and every hand-made near miss (`--extra`), the rest seeded random supported pairs; no cell
+  outside the quoted text holds a label, reason or stratum, owner cells empty; key with stratum
+  and known answer apart — `test_support_human_sheet_is_blind`
 - [x] AC13 CLI with fakes: run, report, plant, human-sheet — `test_support_cli_with_fakes`
 - [x] AC14 P3 records keep sentence citations and cited chunks — `test_records_keep_sentence_citations`
 

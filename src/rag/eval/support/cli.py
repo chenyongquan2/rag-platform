@@ -3,7 +3,7 @@
 uv run python -m rag.eval.support run --source p1-04|p3-05 --path P --out DIR [--run 1]
     [--limit K] [--max-cny 0.6] [--estimate-cny 0.0] [--retry-unknown] [--concurrency 4]
 uv run python -m rag.eval.support plant --out DIR [--n 10] [--seed 0] [--max-cny 0.6]
-uv run python -m rag.eval.support human-sheet --out DIR [--n 40] [--seed 0]
+uv run python -m rag.eval.support human-sheet --out DIR [--n 40] [--seed 0] [--extra FILE]
 uv run python -m rag.eval.support report --out DIR [--md FILE]
 
 `run` judges the stored answers of one source (P1-04 `results.json` or a P3-05 records
@@ -143,8 +143,9 @@ def _plant(args: argparse.Namespace, settings: ServiceSettings) -> int:
 
 def _human_sheet(args: argparse.Namespace) -> int:
     lines = latest_lines(read_lines(lines_file(args.out)))
+    extra = latest_lines(read_lines(args.extra)) if args.extra else []
     sheet, key = export_support_sheet(
-        lines, n=args.n, seed=args.seed, out_dir=Path(args.out) / "human"
+        lines, n=args.n, seed=args.seed, out_dir=Path(args.out) / "human", extra=extra
     )
     print(f"wrote {sheet} (to fill, blind) and {key} (do not open before labelling)")
     return 0
@@ -194,6 +195,9 @@ def _parser() -> argparse.ArgumentParser:
     p_sheet.add_argument("--out", required=True)
     p_sheet.add_argument("--n", type=int, default=40)
     p_sheet.add_argument("--seed", type=int, default=0)
+    p_sheet.add_argument(
+        "--extra", help="lines file of hand-made near misses (planted kind reviewer_hard)"
+    )
 
     p_report = sub.add_parser("report", help="Markdown tables from the lines")
     p_report.add_argument("--out", required=True)

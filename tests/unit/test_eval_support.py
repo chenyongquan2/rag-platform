@@ -36,7 +36,7 @@ from rag.eval.support.human import KEY_NAME, SHEET_NAME, export_support_sheet
 from rag.eval.support.items import load_p1_04, load_p3_05
 from rag.eval.support.metrics import by_group, paired_all_supported, stability, summarize
 from rag.eval.support.planted import plant
-from rag.eval.support.records import SupportItem, SupportLine, latest_lines, read_lines
+from rag.eval.support.records import Planted, SupportItem, SupportLine, latest_lines, read_lines
 from rag.eval.support.runner import run_support
 from rag.observe import shutdown_observability
 from rag.testing import FakeChatModel
@@ -487,28 +487,128 @@ def test_plant_errors() -> None:
 # ---- human sheet --------------------------------------------------------------------------------
 
 
+def _sheet_line(
+    qid: str,
+    labels: tuple[str, str],
+    *,
+    run: int = 1,
+    source: str = "p1-04",
+    planted: Planted | None = None,
+) -> SupportLine:
+    chunk = _chunk(f"p:{qid}#0", f"Fragment text {qid}.")
+    item = SupportItem(
+        source=source,
+        system="standard",
+        qid=qid,
+        qtype="single_hop",
+        question=f"Q {qid}?",
+        sentences=[
+            _sent(f"Sentence one {qid}.", chunk.chunk_id),
+            _sent(f"Sentence two {qid}.", chunk.chunk_id),
+        ],
+        chunks=[chunk],
+        planted=planted,
+    )
+    verdicts = [
+        SentenceVerdict(
+            index=i,
+            text=f"s{i}",
+            pairs=[
+                PairVerdict(
+                    sentence=i,
+                    fragment=1,
+                    chunk_id=chunk.chunk_id,
+                    label=label,  # type: ignore[arg-type]
+                    reason=f"REASON-{qid}-{i}-{run}",
+                )
+            ],
+        )
+        for i, label in enumerate(labels, start=1)
+    ]
+    return SupportLine(
+        **item.key_fields(), run=run, item=item, result=SupportResult(sentences=verdicts)
+    )
+
+
 def test_support_human_sheet_is_blind(tmp_path: Path) -> None:
-    lines = []
-    for i in range(30):
-        chunk = _chunk(f"p:{i}#0", f"Fragment text {i}.")
-        lines.append(_judged_line(f"q{i:02d}", f"Sentence {i}.", chunk))
-    sheet, key = export_support_sheet(lines, n=40, seed=0, out_dir=tmp_path)
+    ok = ("supported", "supported")
+    run1 = [_sheet_line(f"q{i:02d}", ok) for i in range(20)]
+    run1[0] = _sheet_line("q00", ("supported", "not_supported"))
+    run1[1] = _sheet_line("q01", ("partly", "supported"))
+    run2 = [_sheet_line(f"q{i:02d}", ok, run=2) for i in range(20)]
+    run2[2] = _sheet_line("q02", ("supported", "partly"), run=2)  # only run 2 doubts it
+    planted = [
+        _sheet_line(
+            f"planted-change_number:q{i:02d}",
+            ("not_supported", "supported"),
+            source="planted",
+            planted=Planted(
+                kind="change_number",
+                original_qid=f"q{i:02d}",
+                sentence=1,
+                before="a",
+                after="b",
+                chunk_id=f"p:planted-change_number:q{i:02d}#0",
+            ),
+        )
+        for i in (5, 6)
+    ]
+    hard = [
+        _sheet_line(
+            "hard:q07",
+            ("supported", "partly"),
+            source="reviewer-hard",
+            planted=Planted(
+                kind="reviewer_hard",
+                original_qid="q07",
+                sentence=2,
+                before="a",
+                after="b",
+                chunk_id="p:hard:q07#0",
+            ),
+        )
+    ]
+    lines = [*run1, *run2, *planted]
+    sheet, key = export_support_sheet(lines, n=12, seed=0, out_dir=tmp_path, extra=hard)
     assert (sheet.name, key.name) == (SHEET_NAME, KEY_NAME)
     with sheet.open(encoding="utf-8-sig", newline="") as fh:
         rows = list(csv.DictReader(fh))
-    assert len(rows) == 40
-    header = set(rows[0])
-    assert not any(w in h for h in header for w in ("judge", "system", "qid", "verdict_"))
-    assert all(r["human_label"] == "" for r in rows)
-    assert {"sentence", "fragment_text", "question"} <= header
     with key.open(encoding="utf-8-sig", newline="") as fh:
         keys = list(csv.DictReader(fh))
-    assert [k["sample_id"] for k in keys] == [r["sample_id"] for r in rows]
-    # Every pair the judge did not call supported is in the sheet (here 30, under half of 40 is
-    # 20: at most 20 of them, the rest drawn from the supported pairs).
-    labels = [k["judge_label_run1"] for k in keys]
-    assert labels.count("not_supported") == 20 and labels.count("supported") == 20
-    again, _ = export_support_sheet(lines, n=40, seed=0, out_dir=tmp_path / "b")
+    assert len(rows) == 12 and [k["sample_id"] for k in keys] == [r["sample_id"] for r in rows]
+
+    # Blind: no column names the system, the question id, the stratum or the judge; outside the
+    # quoted text (question, sentence, fragment) no cell holds a judge label or reason, and the
+    # cells for the owner are empty.
+    header = set(rows[0])
+    assert {"sentence", "fragment_text", "question", "human_label", "comment"} <= header
+    assert not any(w in h for h in header for w in ("judge", "system", "qid", "stratum", "known"))
+    quoted = {"question", "sentence", "fragment_text"}
+    for row in rows:
+        assert row["human_label"] == "" and row["comment"] == ""
+        for column, cell in row.items():
+            assert "REASON-" not in cell
+            if column not in quoted:
+                words = ("supported", "partly", "unknown", "random_", "planted", "reviewer")
+                assert not any(w in cell for w in words), column
+
+    # Strata: every pair either run doubted, every planted pair, every reviewer pair, then
+    # random pairs both runs called supported.
+    picked = {(k["qid"], k["sentence_index"]): k for k in keys}
+    strata = [k["stratum"] for k in keys]
+    assert strata.count("judge_not_supported") == 3
+    assert {("q00", "2"), ("q01", "1"), ("q02", "2")} <= set(picked)
+    assert picked["q02", "2"]["judge_label_run1"] == "supported"
+    assert picked["q02", "2"]["judge_label_run2"] == "partly"
+    assert strata.count("planted") == 2 and strata.count("reviewer_hard") == 1
+    assert ("planted-change_number:q05", "1") in picked
+    assert ("planted-change_number:q05", "2") not in picked  # not the planted sentence
+    assert ("hard:q07", "2") in picked
+    assert strata.count("random_supported") == 12 - 6
+    known = {k["stratum"]: k["known_answer"] for k in keys}
+    assert known["planted"] == known["reviewer_hard"] == "not_supported_or_partly"
+    assert known["random_supported"] == known["judge_not_supported"] == ""
+    again, _ = export_support_sheet(lines, n=12, seed=0, out_dir=tmp_path / "b", extra=hard)
     assert again.read_text(encoding="utf-8-sig") == sheet.read_text(encoding="utf-8-sig")
 
 
