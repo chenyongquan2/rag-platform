@@ -361,7 +361,7 @@ holdout 上各类：反义词 20 对里只看距离误命中 12 对，专有名�
 | 应用自报的依赖状态 | `rag_dependency_up{rag_dependency}` | 服务进程每次导出指标时检查 ES 和 Redis |
 | feedback 工具 | MCP 工具 `feedback`，计数器 `rag_feedback_total{verdict}` | 和 HTTP 接口用同一段校验代码 |
 | 在线抽样 | `python -m rag.eval.online_sample` | 默认 20 条，硬上限 50 条；没有定时启动 |
-| 保留期 | Collector trace 文件 3 天、4 个 20 MB 文件；Jaeger 最多 20000 条；Prometheus 7 天或 1 GB；`python -m rag.monitor prune` | 见决定日志第 7 项 |
+| 保留期 | Collector trace 文件 3 天、4 个 20 MB 文件；Jaeger 最多 3000 条（第一版 20000 条，审查第 1 轮按实测改）；Prometheus 7 天或 1 GB；`python -m rag.monitor prune` | 见决定日志第 7 项 |
 | Langfuse | `docker compose --profile langfuse up -d` 加 Collector 的 `langfuse` 配置 | 默认不启动，见 2.7 |
 
 ### 2.4 出了故障，多久收到提醒
@@ -380,6 +380,10 @@ holdout 上各类：反义词 20 对里只看距离误命中 12 对，专有名�
 两个故障都在设计要求的 2 到 3 分钟内。一次测量，没有重复；时间里包括测试进程自己的启动（约 8 到 10 秒）。时间花在哪里：应用每 30 秒导出一次指标（探针 10 秒）、Prometheus 最多等 15 秒拉取、规则最多等 15 秒算一次、规则自己的持续时间 1 分钟；探针类的规则再加最多等一次探针（60 秒）。
 
 另一条规则有一次没有计划的真实发作：`SearchProbeFailing` 在第一次真实运行（2.5）里，探针连续两次判错（10:30:40 和 10:31:42）后，在 10:32:22 发出，距第一次错 102 秒；`SearchProbeNoRecentSuccess` 在 10:33:37 跟着发出。两条在探针停掉后都写了「已恢复」。
+
+（审查第 1 轮补记）当时的 `SearchProbeFailing` 规则是「最近一次失败、持续 1 分钟」，一次失败就会发；这次碰巧是连续两次失败才发出。现在规则改成探针导出的「连续失败次数」大于等于 2，第二次失败被看到时就发。按各环节的最长等待算，从出故障到收到提醒最多约 160 秒：故障刚好发生在一次成功的检查之后，第 60 秒和第 120 秒两次检查失败，再加导出、抓取、计算规则各最多 10、15、15 秒。新规则只有 promtool 单元测试（失败一次不发，连续两次在 3 分钟内发），没有在真实服务上再测一次。
+
+探针进程本身停掉时的时间（按配置推算，没有实测）：`SearchProbeNoRecentSuccess` 在最后一次成功后约 3.5 到 4.5 分钟发出；Collector 10 分钟没收到更新就删掉探针的序列（`metric_expiration`），这条提醒随之变成「已恢复」；再过 10 分钟 `ProbeNotRunning` 发出，也就是停掉后约 20 分钟。
 
 提醒文件里的一行：`{"status": "firing", "alertname": "DependencyDown", "severity": "critical", "summary": "The service cannot reach elasticsearch", ..., "starts_at": "...", "received_at": "..."}`。
 
@@ -427,16 +431,16 @@ holdout 上各类：反义词 20 对里只看距离误命中 12 对，专有名�
 
 ### 2.8 在线抽样评测
 
-做了什么：从业务记录里取最近的 `search_docs` 和 `ask_docs` 请求，随机抽 N 条；排除探针发的请求、出错的、被取消的；从 Elasticsearch 读回返回的段的文字；用 P3-03 的「够不够」裁判（`cheap` 档，同样的指令）问一次：这些段里有没有问题要的信息。报告里写：抽中几条、判几条、命中多少、Wilson 区间，并设仪表值 `rag_online_eval_score_mean`。
+**审查第 1 轮以后的做法（现在的代码）。** 从业务记录里取最近的 `search_docs` 和 `ask_docs` 请求，随机抽 N 条；排除探针发的请求、出错的、被取消的；从 Elasticsearch 读回前 `online_eval_k`（默认 5）段的文字。每个请求调一次 `cheap` 档的裁判：把问题和编了号的段放在不可信数据块里，要它对每一段回答「和问题相关」或「不相关」。判断相关不需要参考答案。由此算出每个请求的「命中」（前 k 段里至少一段相关）和倒数排名（第一段相关的段排第 r 名就记 1/r，没有就记 0）。报告里写：判定命中率和它的 Wilson 区间、判定 MRR 和它的自助法区间、每个请求每一段的判断，并设两个仪表值 `rag_online_eval_judged_hit_rate`、`rag_online_eval_judged_mrr`。`ask_docs` 回答的引用精确率要等 P1-06 的逐句判断，报告里写成「等 P1-06」。新做法只用假模型的单元测试验证过，**没有用真实模型跑过**，花费 0 元。
 
-**它量的是**「返回的段够不够回答这个问题」，**不是**回答对不对：
-- 没有标准答案，所以量不了回答是否正确、引用准不准、召回率。
-- 搜索没返回的页面看不见：漏掉的页面只表现为「不够」。
-- 库里本来没有答案的问题也算「不够」。
-- 裁判自己会错：P3-03 量过，有答案的 100 题里 92 题对。
+**它量的是**「返回的段里有没有和问题相关的、排在第几」，**不是**回答对不对：
+- 没有标准答案，所以量不了回答是否正确；引用精确率等 P1-06。
+- 搜索没返回的页面看不见：搜索漏了的页面在报告里只表现为「没有相关段」。
+- 库里本来没有答案的问题也算「没命中」。
+- 裁判自己会错，相关性裁判还没有和人工标注对过。
 - 区间只是抽样误差，不含裁判的误差。
 
-真实运行（HF 文档库，裁判是 `cheap` 档的 deepseek-v4-flash）：
+**第一版的真实运行。** 下面两次运行用的是第一版的做法：P3-03 的「够不够」裁判问一次「这些段里有没有问题要的信息」（HF 文档库，裁判是 `cheap` 档的 deepseek-v4-flash）。数字只说明这条流程能从头到尾运行，和现在的判定命中率不是同一个量：
 
 | 运行 | 池子 | 抽 | 判「够」 | 比例 | Wilson 区间 | 花费 |
 |---|---|---|---|---|---|---|
@@ -448,7 +452,7 @@ holdout 上各类：反义词 20 对里只看距离误命中 12 对，专有名�
 ### 2.9 其他：feedback、保留期
 
 - feedback：MCP 工具和 HTTP 接口走同一个 `SearchService.feedback`。真实服务上调了一次 HTTP 接口，业务记录里有一行，键是被评价的请求的编号。MCP 一侧用严格布尔，所以字符串 `"yes"` 和数字 `1` 被拒绝（测试里 10 种坏输入逐个验证）。
-- 保留期：`rag.monitor prune` 的单元测试用造出来的文件时间验证：超过年龄的删、超过总量的从最旧的删、最新的一个永远留着、其他文件和文件夹不碰。Collector 的 3 天和 4 个 20 MB 文件是 Collector 自己的规则，测试只检查配置里的数字；Jaeger 的 20000 条上限是配置文件，没有压测它被填满时是不是真的丢最旧的。
+- 保留期：`rag.monitor prune` 的单元测试用造出来的文件时间验证：超过年龄的删、超过总量的从最旧的删、最新的一个永远留着、其他文件和文件夹不碰。Collector 的 3 天和 4 个 20 MB 文件是 Collector 自己的规则，测试只检查配置里的数字；Jaeger 的上限（现在 3000 条）是配置文件，没有真的把它填满，看它是不是丢最旧的。3000 条的依据：实测一条 `search_docs` trace 在 Jaeger 内存里约 142 KB，一条 `ask_docs` trace 347 到 589 KB，容器上限 768 MB；第一版的 20000 条放不下。
 
 ### 2.10 看板（截图描述）
 
@@ -460,7 +464,11 @@ holdout 上各类：反义词 20 对里只看距离误命中 12 对，专有名�
 
 ### 2.12 这一轮我犯的错：删掉了 Elasticsearch 和 Redis 容器与索引数据，以及恢复
 
-**发生了什么。** 测完 Langfuse 后我执行了 `docker compose --profile langfuse down -v` 想关掉它。`down` 会删除这个项目里所有服务的容器（不只是 profile 里的），`-v` 又删除了命名卷，包括 `rag-platform_es-data`。后果：Elasticsearch、Redis、Collector、Jaeger 的容器被删，两个真实索引 `kb_hf_docs_v1` 和 `kb_mt5_v1` 的数据被删；Redis 里的缓存和数据代号被删。约 11:11（UTC）发生，随即发现并开始恢复。这违反了任务里「不要改动或删除真实索引」的要求。**没有别的东西丢**：原始文档、docstore、向量缓存、花费账本都在主检出目录或共享目录里，没有被碰。
+**发生了什么。** 测完 Langfuse 后我执行了 `docker compose --profile langfuse down -v` 想关掉它。`down` 会删除这个项目里所有服务的容器（不只是 profile 里的），`-v` 又删除了命名卷，包括 `rag-platform_es-data`。后果：Elasticsearch、Redis、Collector、Jaeger 的容器被删，两个真实索引 `kb_hf_docs_v1` 和 `kb_mt5_v1` 的数据被删；Redis 里的缓存和数据代号被删。约 11:11（UTC）发生，随即发现并开始恢复。这违反了任务里「不要改动或删除真实索引」的要求。
+
+**一起被删掉的（审查第 1 轮更正：第一版写的是「没有别的东西丢」，不对）：** 共享 Elasticsearch 里别的索引都被删了，包括 P2-01 回滚要用的旧版本索引和 P2-03 消融实验的索引；如果有人开过 `CACHE_SEMANTIC_STORE=es`，`cache_semantic_*` 索引也被删了；Jaeger 内存里的 trace；Redis 里的全部缓存和数据代号。删之前具体有哪些索引我没有记下来，所以列不出完整的名单。
+
+**没有被删的：** P4-02 实验自己的数据卷（不在这个 compose 项目里）、`data/otel/` 下的 trace 文件、花费账本、向量缓存（`embeddings.sqlite3`），以及原始文档和 docstore（在主检出目录或共享目录里，没有被碰）。
 
 **恢复。** 立刻 `docker compose up -d` 起了空的服务，然后：
 
@@ -475,7 +483,7 @@ holdout 上各类：反义词 20 对里只看距离误命中 12 对，专有名�
 
 恢复后和删除前的差别：数据代号是新数字；Redis 缓存是空的；索引的内部 UUID 不同（所以主检出目录的 docstore 里记的旧索引 UUID 对不上，摄取任务把它当成另一个索引、全部页面重新处理——这次就是这样做的，没有碰主检出目录的 docstore）；`fake_` 前缀的假向量索引（一部分集成测试用）也被删了，我用 `rag.ingest.job --kb hf_docs --limit 50 --fake-embed` 重建（438 块，0 元）；依赖它的两个集成测试（MCP stdio、HTTP）恢复后通过；Collector 和 Jaeger 现在读的是我这个工作区的配置文件，合并后要从主检出目录再执行一次 `docker compose up -d otel-collector jaeger`（见 2.13）。
 
-**以后怎么避免。** README 和 `docker-compose.yml` 开头都写了警告：不要用 `docker compose --profile X down` 关一个 profile，用 `stop <服务名>` 或 `rm -sf <服务名>`；关于 `-v` 同样写在那里。
+**以后怎么避免。** README 和 `docker-compose.yml` 开头都写了警告：任何情况下都不用 `docker compose down`（带不带 profile、带不带 `-v` 都不用）；`--profile X stop` 后面必须写服务名，不写会把 Elasticsearch 和 Redis 也停掉；共用的 `elasticsearch` 和 `redis-cache` 不停。把 `es-data` 声明成外部卷可以让 `down -v` 删不掉它，但这一轮 Docker 没有运行，没法先确认这样改不会重建 Elasticsearch，所以没有改（决定日志第 13 项）。
 
 ### 2.13 没有覆盖、没有验证的
 
@@ -484,8 +492,22 @@ holdout 上各类：反义词 20 对里只看距离误命中 12 对，专有名�
 - 看板里的「在线抽样得分」只在运行后 10 分钟内有数据（Collector 的序列 10 分钟没更新就消失）。
 - 没有测 Prometheus 重启后规则和数据是否保留；Grafana 只看了一次。
 - 阈值里「自己定的」那些没有真实流量的基线（见 `rules.yml` 的注释）。
-- 在线抽样里 `search_docs` 的「够不够」按返回的全部段判断，`ask_docs` 只按被引用的段；两种混在一个比例里。
+- 在线抽样里 `search_docs` 判断的是返回列表的前 k 段，`ask_docs` 判断的是被引用的段；两种混在一个比例里。新的逐段判断没有用真实模型跑过。
 - Langfuse 只用假模型试过（2.7）。
-- Collector 现在挂载的是我这个工作区的 `deploy/` 和 `data/otel/`：这个工作区删除之前，必须从主检出目录执行 `docker compose up -d otel-collector jaeger` 重建这两个容器，否则 Collector 重启后找不到配置文件。
+- Collector、Jaeger、Prometheus、Grafana 现在挂载的是我这个工作区的 `deploy/`，Collector 还把 trace 写进这个工作区的 `data/otel/`。合并后、删除这个工作区之前，要在主检出目录 `C:/workspace/rag-platform` 里执行 `docker compose up -d otel-collector jaeger`，再执行 `docker compose --profile monitoring up -d prometheus grafana`（或者让这两个保持停止）。这样也会让 Jaeger 的 3000 条上限和两个容器的自动重启生效。不动 Elasticsearch 和 Redis。
+- 审查第 1 轮的修改期间 Docker Desktop 没有运行：promtool 的规则测试和监控栈的集成测试没有跑，`docker compose --dry-run` 也没法做。
 - 单元测试管不到「Collector 的 Prometheus 导出器改了命名规则」：集成测试 `tests/integration/test_monitor_stack.py` 会发现，但只在监控 profile 起着时才跑。
 - `docs/progress.md` 和 `docs/plan.md` 按要求没有改。
+
+### 2.14 审查第 1 轮改了什么
+
+逐项的原因和没选的做法见决定日志「P5-02：监控，每一项怎么定的」第 13 项。
+
+- 探针提醒改成连续两次失败才发（原来一次失败就发）。
+- 在线抽样改成逐段判断相关不相关，算判定命中率和判定 MRR；引用精确率等 P1-06。
+- 服务认出探针的请求：不写三层缓存，指标带 `rag_request_probe="1"`，看板和质量类提醒只看用户的请求。
+- 依赖检查改用工厂函数，带密码的 `ES_URL` 也能连上；日志不写地址。
+- 提醒接收器启动时从文件恢复状态；webhook 在后台发，最多试 3 次。
+- 看板加了「没找到的比例」和「第一名重排分」，加了 `NotFoundRateHigh` 提醒；面板 16 个。
+- Jaeger 上限 3000 条，Jaeger 和 Collector 加自动重启；README 去掉了 `docker compose down`；`.env.example` 补全。
+- 没做：`es-data` 改成外部卷、Langfuse 移到单独的 compose 项目（都要先用 Docker 确认不会重建现有容器，这一轮 Docker 没有运行）。
