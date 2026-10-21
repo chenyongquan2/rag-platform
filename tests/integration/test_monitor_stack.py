@@ -111,12 +111,16 @@ def _record_every_instrument() -> None:
         )
         register_dependency_gauge(obs.meter, DependencyChecker({"elasticsearch": lambda: None}))
         probe = ProbeInstruments(obs.meter)
-        attrs = {"rag.probe.kind": "search"}
+        # A kind no alert rule reads: a fresh last-success time with kind "search" would hide a
+        # stopped real probe from SearchProbeNoRecentSuccess for the 10 minutes the Collector keeps
+        # the series (review P5-02 round 1).
+        attrs = {"rag.probe.kind": "integration-test"}
         probe.runs.add(1, {**attrs, "rag.probe.outcome": "ok"})
         probe.duration.record(0.3, attrs)
         probe.success.set(1, attrs)
         probe.last_duration.set(0.3, attrs)
         probe.last_success.set(time.time(), attrs)
+        probe.consecutive_failures.set(0, attrs)
         hit, mrr = create_online_eval_gauges(obs.meter)
         hit.set(0.75)
         mrr.set(0.5)
