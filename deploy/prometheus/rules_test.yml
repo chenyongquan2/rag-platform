@@ -72,7 +72,7 @@ tests:
       - eval_time: 165s   # one failed run so far
         alertname: SearchProbeFailing
         exp_alerts: []
-      - eval_time: 3m     # the second failed run
+      - eval_time: 210s   # the second failed run (the series reaches 2 at 210 s)
         alertname: SearchProbeFailing
         exp_alerts:
           - exp_labels:

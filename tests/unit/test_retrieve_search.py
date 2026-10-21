@@ -255,3 +255,30 @@ def test_acl_groups_must_be_a_list() -> None:
     retriever = _search(_es()).retriever
     with pytest.raises(TypeError, match="acl_groups"):
         HybridSearch(retriever, acl_groups="grp", deadline_ms=1000)
+
+
+def test_query_embedding_thread_sees_the_probe_request() -> None:
+    """The query vector is computed in a thread pool; the request context must travel with it,
+    otherwise a probe's vector is written to the L0 cache (P5-02 review round 2)."""
+    from rag.observe.context import bind_request, current_request_is_probe
+
+    seen: list[bool] = []
+
+    class RecordingEmbedding(FakeEmbedding):
+        def _get_query_embedding(self, query: str) -> list[float]:
+            seen.append(current_request_is_probe())
+            return super()._get_query_embedding(query)
+
+    retriever = EsHybridRetriever(
+        _es(),
+        RecordingEmbedding(dim=4),
+        kb=KB,
+        index="kb_hf_docs",
+        config=RetrievalConfig(),
+        es_reserve_ms=100,
+        es_margin_ms=200,
+    )
+    search = HybridSearch(retriever, acl_groups=["public"], deadline_ms=5000)
+    with bind_request("probe-abc"):
+        search.retrieve("how to install?", kb=KB, top_k=2, request_id="probe-abc")
+    assert seen and all(seen)
