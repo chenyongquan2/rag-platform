@@ -92,6 +92,27 @@ pages; use them only with `--index-prefix` on a throw-away index. The full, repr
 paid for twice because the embedding cache and docstore are reused: set `DOCSTORE_URL` and
 `EMBED_INGEST_CACHE_URL` as in `docs/reports/P4-report.md` section 1.9).
 
+### Private knowledge base: PDF files and images (Docling)
+
+`kb/private/pdf_demo.yaml` (spec P6-01) reads four public arXiv papers and one chart image. The
+PDFs are not committed: `data/manifests/pdf_demo.json` lists the URLs and sha256 sums; put the
+files into `data/raw/pdf_demo/` (the chart: `uv run python scripts/p6_01_make_demo_chart.py`).
+
+```bash
+uv run python -m rag.ingest.pdf_report --kb pdf_demo --estimate   # calls no model: what a run would cost
+uv run python -m rag.ingest.pdf_report --kb pdf_demo              # convert, describe, chunk; counts only
+uv run python -m rag.ingest.job --kb pdf_demo --all               # kb_pdf_demo_v1, alias kb_pdf_demo
+```
+
+Docling converts each PDF once (cached by file hash and Docling version in `data/cache/pdf/`,
+about 4 s a page on this CPU). A page is one document; a table is its own chunk (header repeated
+when it is cut) with a summary chunk next to it, and a hit on the summary is replaced by the table
+at search time (`retrieval.replace_table_summaries`); a figure is described by a vision model and
+the description is written into the page text where the figure was (flagged
+`has_generated_text`). Model-written texts are cached by content hash in
+`data/cache/model_text.sqlite3`, so a second run costs nothing. Results and limits:
+`docs/reports/P6-report.md`.
+
 ## Embeddings and cost
 
 `rag.embed.make_embedding("ingest" | "query")` builds every embedding model: the same gateway
