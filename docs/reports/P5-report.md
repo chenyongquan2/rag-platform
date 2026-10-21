@@ -265,7 +265,7 @@ holdout 上各类：反义词 20 对里只看距离误命中 12 对，专有名�
 
 - **起真实服务进程的集成测试**：`test_serve_mcp_stdio.py` 起的服务进程现在按默认的 `l1_shadow` 工作，会往 Redis 写 `rag:l1:fake_hf_docs:*` 的键（假索引的前缀，1 小时后过期）；这些键只在这个测试的假数据里用，我手动删掉了，没有改那个测试。
 - **一个现有测试因规格变化改了**：`tests/integration/test_serve_http_es.py` 检查 `search_docs` 返回的字段集合，新增的 `cache` 字段（没有缓存层时为空）要加进期望的集合。没有别的现有测试需要改。
-- **`test_redis_generation.py::test_data_generation_counter` 偶尔失败**：和别的集成测试同一批跑时失败过一次，单独跑通过；这个测试靠时间戳比较，我没有改它也没有查原因，和缓存无关（我没有改数据代号的代码）。
+- **`test_redis_generation.py::test_data_generation_counter` 偶尔失败**：和别的集成测试同一批跑时失败过一次，单独运行时通过；这个测试靠时间戳比较，我没有改它也没有查原因，和缓存无关（我没有改数据代号的代码）。
 
 ### 1.10 花费
 
