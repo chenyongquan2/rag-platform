@@ -327,6 +327,39 @@ class ServiceSettings(BaseSettings):
     search_max_query_chars: int = Field(default=2000, gt=0)
     search_index_prefix: str = ""
 
+    # Result cache (spec P5-01, design s12). `cache_mode`: `off`; `l1` = exact cache in Redis for
+    # `search_docs` and `ask_docs`; `l1_shadow` = l1 plus the semantic cache in shadow mode (it
+    # records what it would have returned and never returns it). `cache_url`: empty = `redis_url`;
+    # the Redis keys start with `cache_key_prefix`. The store gets `cache_timeout_ms` for connecting
+    # and for each command (a slower Redis counts as down: the request is computed without the
+    # cache); after `cache_breaker_failures` failures in a row nothing is sent for
+    # `cache_breaker_open_s` seconds. A result lives `cache_ttl_s` (`cache_not_found_ttl_s` when it
+    # is a not-found result); a value above `cache_max_value_bytes` is not stored (no compression).
+    # Identical requests that arrive together compute once: the one that computes holds a Redis
+    # lock for at most `cache_lock_ttl_ms`; the others in other processes poll every
+    # `cache_lock_poll_ms` for at most `cache_lock_wait_ms`. Shadow mode: `cache_semantic_threshold`
+    # is the largest cosine distance (1 - cosine similarity) of a stored question that counts as a
+    # candidate (chosen on the dev questions of P5-01, docs/reports/P5-report.md), entries live
+    # `cache_semantic_ttl_s`, the records go to `<cache_shadow_dir>/shadow.jsonl`, and the stored
+    # questions live in `cache_semantic_store` (`memory` in this process, or `es`: index
+    # `cache_semantic_<kb>`).
+    cache_mode: Literal["off", "l1", "l1_shadow"] = "l1_shadow"
+    cache_url: str = ""
+    cache_key_prefix: str = "rag:l1:"
+    cache_timeout_ms: int = Field(default=50, gt=0)
+    cache_ttl_s: int = Field(default=3600, gt=0)
+    cache_not_found_ttl_s: int = Field(default=600, gt=0)
+    cache_max_value_bytes: int = Field(default=262_144, gt=0)
+    cache_breaker_failures: int = Field(default=5, ge=1)
+    cache_breaker_open_s: float = Field(default=5.0, gt=0)
+    cache_lock_ttl_ms: int = Field(default=30_000, gt=0)
+    cache_lock_wait_ms: int = Field(default=3_000, ge=0)
+    cache_lock_poll_ms: int = Field(default=25, gt=0)
+    cache_semantic_threshold: float = Field(default=0.15, ge=0.0, le=1.0)
+    cache_semantic_ttl_s: int = Field(default=86_400, gt=0)
+    cache_semantic_store: Literal["memory", "es"] = "memory"
+    cache_shadow_dir: str = "data/observe/cache"
+
     # Search service process (spec P0-09, design s16-1, s16-4). Until P8 (OAuth) every request
     # runs as one caller from config: `service_caller` is matched against `access.callers` of
     # each KB config and `service_acl_groups` are the document ACL groups it may read. The

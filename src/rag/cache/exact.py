@@ -216,6 +216,15 @@ class ExactCache:
         return ("bypass" if exc.reason == "breaker_open" else "error"), exc.reason
 
     @staticmethod
+    def _direct(result: T, key: str, read: bool) -> CacheRun[T]:
+        """A result computed outside any flight: by a call that may not read the cache
+        (`bypass`, and its result is still written when complete), or by a follower that gave
+        up waiting (`miss`)."""
+        if read:
+            return CacheRun(result, "miss", key=key)
+        return CacheRun(result, "bypass", reason="read_off", key=key)
+
+    @staticmethod
     def _follow(shared: CacheRun[T], adapt: Callable[[T], T] | None, began: float) -> CacheRun[T]:
         result = adapt(shared.result) if adapt is not None else shared.result
         outcome = shared.outcome if shared.outcome == "hit" else "shared"
@@ -267,7 +276,7 @@ class ExactCache:
                     break
                 except _LeaderFailed:
                     continue
-        run = CacheRun(compute(), "miss", key=key)
+        run = self._direct(compute(), key, read)
         self._store(run, fields, codec)
         run.elapsed_ms = _ms(began)
         return run
@@ -382,7 +391,7 @@ class ExactCache:
                 except _LeaderFailed:
                     continue
                 return self._follow(shared, adapt, began)
-        run = CacheRun(await compute(), "miss", key=key)
+        run = self._direct(await compute(), key, read)
         await asyncio.to_thread(self._store, run, fields, codec)
         run.elapsed_ms = _ms(began)
         return run

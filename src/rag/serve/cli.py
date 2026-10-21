@@ -63,7 +63,7 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     settings: ServiceSettings | None = None,
-    service_factory: Callable[[ServiceSettings], SearchService] = SearchService,
+    service_factory: Callable[[ServiceSettings], SearchService] = SearchService.from_settings,
     run_stdio: Callable[[Any], None] = _run_stdio,
     run_http: Callable[[Any, str, int], None] | None = None,
 ) -> int:

@@ -33,6 +33,24 @@ def _untrusted(chunks: list[Chunk]) -> list[Chunk]:
     return [c if c.untrusted else c.model_copy(update={"untrusted": True}) for c in chunks]
 
 
+class CacheInfo(BaseModel):
+    """How the result cache served this request (s12, spec P5-01); the response field `cache`
+    is null when the service runs without a cache layer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    layer: str = Field(description="The cache layer that was asked: l1 (exact).")
+    hit: bool = Field(description="The result came from the cache or from an identical request.")
+    outcome: str = Field(
+        description="hit; shared (waited for an identical request that was running); miss "
+        "(computed, written when complete); bypass (cache not used: breaker open, or a call "
+        "that must not read it); error (the cache store failed, the result was computed)."
+    )
+    age_s: float | None = Field(
+        default=None, description="Seconds since the cached result was made (hit only)."
+    )
+
+
 class SearchResponse(BaseModel):
     """Result of `search_docs`."""
 
@@ -57,12 +75,20 @@ class SearchResponse(BaseModel):
     below_threshold: list[Chunk] = Field(
         default_factory=list, description="With not_found: the best chunks below the threshold."
     )
+    cache: CacheInfo | None = Field(
+        default=None, description="How the result cache served this request (null: no cache)."
+    )
 
     @classmethod
     def from_result(
-        cls, result: RetrievalResult, *, timings_ms: Mapping[str, float] | None = None
+        cls,
+        result: RetrievalResult,
+        *,
+        timings_ms: Mapping[str, float] | None = None,
+        cache: CacheInfo | None = None,
     ) -> SearchResponse:
         return cls(
+            cache=cache,
             request_id=result.request_id,
             kb=result.kb,
             index_version=result.index_version,
@@ -164,12 +190,20 @@ class AskResponse(BaseModel):
     error_categories: list[str] = Field(description="Flags set above, as category names.")
     citation_check: CitationCheck
     timings_ms: dict[str, float] = Field(description="Milliseconds per step.")
+    cache: CacheInfo | None = Field(
+        default=None, description="How the result cache served this request (null: no cache)."
+    )
 
     @classmethod
     def from_result(
-        cls, result: AskResult, *, timings_ms: Mapping[str, float] | None = None
+        cls,
+        result: AskResult,
+        *,
+        timings_ms: Mapping[str, float] | None = None,
+        cache: CacheInfo | None = None,
     ) -> AskResponse:
         return cls(
+            cache=cache,
             request_id=result.request_id,
             kb=result.kb,
             session_id=result.session_id,

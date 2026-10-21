@@ -39,7 +39,7 @@ import time
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from rag.agent import AgentRuntime, valid_session_id
 from rag.config import KnowledgeBaseConfig, ServiceSettings, load_kb_configs, repo_path
@@ -48,6 +48,7 @@ from rag.observe import (
     RankedId,
     business_record_from_result,
     current_trace_id,
+    get_observability,
     layer_span,
     new_request_id,
     request_span,
@@ -79,7 +80,10 @@ from rag.serve.schema import (
     SearchResponse,
 )
 from rag.serve.stream import HEARTBEAT, Heartbeat, StreamEvent
-from rag.types import AnswerStatus, ContextResult, ErrorCategory, RetrievalResult
+from rag.types import AnswerStatus, AskResult, ContextResult, ErrorCategory, RetrievalResult
+
+if TYPE_CHECKING:
+    from rag.cache.layer import ResultCache
 
 logger = logging.getLogger(__name__)
 
@@ -260,8 +264,10 @@ class SearchService:
         agent: AgentRuntime | None = None,
         answer_model: Any = None,
         helper_model: Any = None,
+        cache: ResultCache | None = None,
     ) -> None:
         self.settings = settings
+        self._cache = cache  # None: no result cache (a bare service; `from_settings` makes one)
         self.configs: dict[str, KnowledgeBaseConfig] = (
             dict(configs) if configs is not None else load_kb_configs(repo_path(settings.kb_dir))
         )
@@ -280,6 +286,17 @@ class SearchService:
         self._shutting_down = False
         self._answer_model = answer_model  # None: the runtime's `online` chat model
         self._helper_model = helper_model  # None: the runtime's `agent_rewrite_profile` model
+
+    @classmethod
+    def from_settings(cls, settings: ServiceSettings, **kwargs: Any) -> SearchService:
+        """The service with the result cache the settings ask for (`cache_mode`; spec P5-01)."""
+        from rag.cache.factory import make_result_cache
+
+        return cls(settings, cache=make_result_cache(settings), **kwargs)
+
+    @property
+    def cache(self) -> ResultCache | None:
+        return self._cache
 
     # ---- lifecycle --------------------------------------------------------------------------
 
@@ -408,6 +425,8 @@ class SearchService:
             self._builder.close()
         except Exception:
             logger.warning("closing the pipeline builder failed", exc_info=True)
+        if self._cache is not None:
+            self._cache.close()
 
     def reject(
         self, tool: str, credentials: Credentials, *, request_id: str, category: str, detail: str
@@ -470,32 +489,64 @@ class SearchService:
                 raise FilterError("filters must be an object of filter keys")
             build_es_filter(kb=cfg.kb, acl_groups=caller.acl_groups, filters=filters)
             pipeline = self._ready_pipeline(cfg.kb, deadline, request_id)
-            remaining = int(deadline.remaining_ms())
-            if remaining <= 0:
-                raise ServiceError(ErrorCategory.RETRIEVAL_TIMEOUT, request_id, detail="no time")
-            with layer_span(
-                "retrieve",
-                attributes={
-                    attr.TOP_K: top_k,
-                    attr.RERANK_N: retrieval.rerank_n,
-                    attr.FINAL_K: retrieval.final_k,
-                    attr.THRESHOLD: retrieval.threshold,
-                },
-            ) as span:
-                result = pipeline.retrieve(
-                    query,
-                    cfg.kb,
-                    top_k,
-                    filters=dict(filters or {}),
-                    deadline_ms=remaining,
-                    request_id=request_id,
+
+            def compute() -> RetrievalResult:
+                remaining = int(deadline.remaining_ms())
+                if remaining <= 0:
+                    raise ServiceError(
+                        ErrorCategory.RETRIEVAL_TIMEOUT, request_id, detail="no time"
+                    )
+                with layer_span(
+                    "retrieve",
+                    attributes={
+                        attr.TOP_K: top_k,
+                        attr.RERANK_N: retrieval.rerank_n,
+                        attr.FINAL_K: retrieval.final_k,
+                        attr.THRESHOLD: retrieval.threshold,
+                    },
+                ) as span:
+                    fresh = pipeline.retrieve(
+                        query,
+                        cfg.kb,
+                        top_k,
+                        filters=dict(filters or {}),
+                        deadline_ms=remaining,
+                        request_id=request_id,
+                        acl_groups=caller.acl_groups,
+                    )
+                    span.set_attribute(attr.HITS, len(fresh.chunks))
+                return fresh
+
+            run = None
+            if self._cache is None:
+                result = compute()
+            else:
+                run = self._cache.search(
+                    cfg,
+                    config_version=pipeline.config_version,
+                    question=query,
+                    filters=filters,
                     acl_groups=caller.acl_groups,
+                    top_k=top_k,
+                    request_id=request_id,
+                    compute=compute,
+                    wait_s=deadline.remaining_s(),
+                    vector_of=getattr(pipeline, "query_vector", None),
                 )
-                span.set_attribute(attr.HITS, len(result.chunks))
+                result = run.result
             assert call.scope is not None
             call.scope.set_result(result)
-            self._observe_result(result, cfg.kb)
-            response = SearchResponse.from_result(result, timings_ms={"request": call.elapsed_ms()})
+            if run is not None:
+                self._cache.observe(call.scope.span, kb=cfg.kb, tool=call.tool, run=run)
+            if run is not None and run.outcome in ("hit", "shared"):
+                self._observe_cached(result, cfg.kb)  # no step timings: nothing ran
+            else:
+                self._observe_result(result, cfg.kb)
+            response = SearchResponse.from_result(
+                result,
+                timings_ms={"request": call.elapsed_ms()},
+                cache=self._cache.info(run) if run is not None else None,
+            )
             call.record = business_record_from_result(
                 result.model_copy(update={"timings_ms": response.timings_ms}),
                 tool=call.tool,
@@ -503,7 +554,12 @@ class SearchService:
                 caller=caller.caller_id,
                 rerank=[RankedId(chunk_id=h.chunk_id, score=h.score) for h in result.rerank],
                 threshold=result.threshold,
-                extra={**extra, "top_k": top_k, "not_found": result.not_found},
+                extra={
+                    **extra,
+                    "top_k": top_k,
+                    "not_found": result.not_found,
+                    **({"cache": self._cache.record(run)} if run is not None else {}),
+                },
             )
             return response
 
@@ -597,25 +653,63 @@ class SearchService:
                         call.stage = data.get("node")  # where a cancelled request was
                     emit(name, data)
 
-            result = await self.agent.ask(
-                question,
-                cfg=cfg,
-                retriever=pipeline,
-                session_id=session_id,
-                request_id=request_id,
-                caller_id=caller.caller_id,
-                acl_groups=caller.acl_groups,
-                # What is left of the call's time after waiting for the load.
-                deadline_ms=max(1, int(deadline.remaining_ms())),
-                model=self._answer_model,
-                helper_model=self._helper_model,
-                resume_token=resume_token,
-                answer=answer,
-                emit=listener,
-            )
+            async def run_graph() -> AskResult:
+                return await self.agent.ask(
+                    question,
+                    cfg=cfg,
+                    retriever=pipeline,
+                    session_id=session_id,
+                    request_id=request_id,
+                    caller_id=caller.caller_id,
+                    acl_groups=caller.acl_groups,
+                    # What is left of the call's time after waiting for the load and the cache.
+                    deadline_ms=max(1, int(deadline.remaining_ms())),
+                    model=self._answer_model,
+                    helper_model=self._helper_model,
+                    resume_token=resume_token,
+                    answer=answer,
+                    emit=listener,
+                )
+
+            run = None
+            if self._cache is None or resume_token is not None:
+                # A call that continues a question asked back is never cached (its result
+                # depends on the caller's reply).
+                result = await run_graph()
+            else:
+                run = await self._cache.ask(
+                    cfg,
+                    config_version=pipeline.config_version,
+                    question=question,
+                    acl_groups=caller.acl_groups,
+                    request_id=request_id,
+                    compute=run_graph,
+                    # A call with a session must write its turn to the history: it does not read
+                    # the cache (a complete answer to it may still fill it).
+                    read=session_id is None,
+                    wait_s=deadline.remaining_s(),
+                )
+                result = run.result
+                if listener is not None and run.outcome in ("hit", "shared"):
+                    listener(
+                        "progress",
+                        {
+                            "node": "cache",
+                            "phase": run.outcome,
+                            "layer": "l1",
+                            "ms": round(run.elapsed_ms, 3),
+                            "age_s": round(run.age_s, 3) if run.age_s is not None else None,
+                        },
+                    )
             assert call.scope is not None
             call.scope.set_result(result)
-            response = AskResponse.from_result(result, timings_ms={"request": call.elapsed_ms()})
+            if run is not None:
+                self._cache.observe(call.scope.span, kb=cfg.kb, tool=call.tool, run=run)
+            response = AskResponse.from_result(
+                result,
+                timings_ms={"request": call.elapsed_ms()},
+                cache=self._cache.info(run) if run is not None else None,
+            )
             cited = {c.chunk_id for s in result.sentences for c in s.citations}
             record = self._record(
                 call,
@@ -648,6 +742,7 @@ class SearchService:
                     "fallbacks": result.fallbacks,
                     "sufficiency": result.sufficiency,
                     "missing": [_clip(m, RECORD_TEXT_CHARS) for m in result.missing],
+                    **({"cache": self._cache.record(run)} if run is not None else {}),
                 },
             )
             call.record = record.model_copy(
@@ -793,9 +888,21 @@ class SearchService:
             )
         else:
             last = StreamEvent("answer", response.model_dump(mode="json"))
+        cache = (
+            {
+                "cache": {
+                    "layer": response.cache.layer,
+                    "hit": response.cache.hit,
+                    "outcome": response.cache.outcome,
+                }
+            }
+            if response.cache is not None
+            else {}
+        )
         done = StreamEvent(
             "done",
             {
+                **cache,
                 "request_id": response.request_id,
                 "status": response.status,
                 "rounds": response.rounds,
@@ -1082,6 +1189,18 @@ class SearchService:
     @staticmethod
     def _observe_result(result: RetrievalResult, kb: str) -> None:
         observe_retrieval(result, kb, "search_docs")
+
+    @staticmethod
+    def _observe_cached(result: RetrievalResult, kb: str) -> None:
+        """The quality signals of a search served from the cache: the same callers got the same
+        not-found answer and top score; no step ran, so no step time is recorded."""
+        scores = [c.rerank_score for c in result.chunks if c.rerank_score is not None]
+        get_observability().metrics.record_retrieval(
+            kb=kb,
+            tool="search_docs",
+            not_found=result.not_found,
+            top_rerank_score=max(scores) if scores else None,
+        )
 
     @staticmethod
     def _record(

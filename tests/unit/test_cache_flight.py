@@ -137,16 +137,24 @@ def test_n_concurrent_identical_async_requests_compute_once() -> None:
 
 def test_different_keys_do_not_wait_for_each_other() -> None:
     cache = _cache()
-    compute = SlowCompute(0.3)
-    began = time.perf_counter()
+    windows: list[tuple[float, float]] = []
+    lock = threading.Lock()
+
+    def compute() -> RetrievalResult:
+        began = time.monotonic()
+        time.sleep(0.3)
+        with lock:
+            windows.append((began, time.monotonic()))
+        return pages_result("hf_docs", [1, 2, 3])
 
     def one(q: str) -> CacheRun[RetrievalResult]:
         return cache.get_or_compute(_build(q), compute, codec=_codec(), decode=_decode)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(one, ["first question", "second question"]))
-    assert compute.calls == 2
-    assert time.perf_counter() - began < 0.55  # parallel, not 0.6
+    assert len(windows) == 2
+    first, second = sorted(windows)
+    assert second[0] < first[1]  # the second computation began before the first one ended
 
 
 def test_two_processes_on_one_store_compute_once_through_the_redis_lock() -> None:
@@ -181,7 +189,7 @@ def test_a_failed_leader_hands_over_to_one_follower_and_only_the_leader_sees_the
 
 
 def test_a_cancelled_async_leader_does_not_take_the_followers_down() -> None:
-    cache, compute = _cache(), SlowCompute(0.2)
+    cache, compute = _cache(), SlowCompute(0.6)
 
     async def one(i: int) -> CacheRun[RetrievalResult]:
         return await cache.aget_or_compute(
@@ -190,12 +198,12 @@ def test_a_cancelled_async_leader_does_not_take_the_followers_down() -> None:
 
     async def main() -> list[Any]:
         leader = asyncio.create_task(one(0))
-        await asyncio.sleep(0.02)  # the leader has the flight
+        while compute.calls < 1:  # the leader is inside its computation
+            await asyncio.sleep(0.005)
         followers = [asyncio.create_task(one(i)) for i in range(1, 4)]
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.25)  # the followers wait on its flight (generous: loaded machine)
         leader.cancel()
-        results = await asyncio.gather(leader, *followers, return_exceptions=True)
-        return results
+        return await asyncio.gather(leader, *followers, return_exceptions=True)
 
     results = asyncio.run(main())
     assert isinstance(results[0], asyncio.CancelledError)
@@ -214,7 +222,8 @@ def test_a_follower_that_waits_too_long_computes_for_itself() -> None:
 
     t = threading.Thread(target=leader)
     t.start()
-    time.sleep(0.05)
+    while compute.calls < 1:  # the leader is computing
+        time.sleep(0.005)
     run = cache.get_or_compute(_build(), compute, codec=_codec(), decode=_decode, wait_s=0.05)
     t.join()
     assert run.outcome == "miss" and compute.calls == 2

@@ -191,7 +191,8 @@ def test_read_false_computes_and_stores_without_reading() -> None:
     _run(cache, compute)
     gets = backend.calls.get("get", 0)
     run = _run(cache, compute, read=False)
-    assert run.outcome == "miss" and run.stored and compute.calls == 2
+    assert (run.outcome, run.reason) == ("bypass", "read_off")
+    assert run.stored and compute.calls == 2
     assert backend.calls.get("get", 0) == gets
 
 
