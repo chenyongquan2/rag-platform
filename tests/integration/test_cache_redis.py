@@ -39,7 +39,7 @@ def backend(redis_client: Redis, redis_key_prefix: str) -> RedisCacheBackend:
     return RedisCacheBackend(
         redis_client,
         key_prefix=f"{redis_key_prefix}l1:{uuid.uuid4().hex[:6]}:",
-        generation_key_prefix=f"{redis_key_prefix}data_generation:",
+        generation_key_prefix=f"{redis_key_prefix}cache_generation:",
     )
 
 
@@ -91,7 +91,7 @@ def test_generation_comes_from_the_counter_ingestion_bumps(
 ) -> None:
     first = backend.generation("hf_docs")
     assert backend.generation("hf_docs") == first
-    incr_data_generation(redis_client, "hf_docs", key_prefix=f"{redis_key_prefix}data_generation:")
+    incr_data_generation(redis_client, "hf_docs", key_prefix=f"{redis_key_prefix}cache_generation:")
     assert backend.generation("hf_docs") == first + 1
 
 
@@ -109,7 +109,7 @@ def test_miss_hit_and_a_new_generation_misses(
     again = cache.get_or_compute(_build(), compute, codec=_codec(), decode=_decode)
     assert (run.outcome, again.outcome) == ("miss", "hit") and len(calls) == 1
     assert again.age_s is not None and again.age_s < 5
-    incr_data_generation(redis_client, "hf_docs", key_prefix=f"{redis_key_prefix}data_generation:")
+    incr_data_generation(redis_client, "hf_docs", key_prefix=f"{redis_key_prefix}cache_generation:")
     assert cache.get_or_compute(_build(), compute, codec=_codec(), decode=_decode).outcome == "miss"
     # the stored value is JSON with created_at and the key fields, and it expires
     (key,) = [k for k in redis_client.scan_iter(match=f"{backend.key_prefix}hf_docs:search:*")][:1]
@@ -183,7 +183,7 @@ def test_the_service_with_real_redis_serves_a_repeat_from_the_cache(
     backend = RedisCacheBackend(
         redis_client,
         key_prefix=settings.cache_key_prefix,
-        generation_key_prefix=f"{redis_key_prefix}data_generation:",
+        generation_key_prefix=f"{redis_key_prefix}cache_generation:",
     )
     pipeline = FakeSearchPipeline("hf_docs")
     service = SearchService(

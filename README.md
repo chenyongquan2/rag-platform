@@ -552,8 +552,14 @@ Responses carry `cache: {layer, hit, outcome, age_s}` (null without a cache laye
 hit}`, `answer`, `done` (no `token` events). A Redis that is down or slower than
 `CACHE_TIMEOUT_MS` never fails a request: it is counted (`rag.cache.requests`, outcome `error` or
 `bypass`) and a circuit breaker stops sending for a few seconds. The semantic cache (L2) only
-records to `data/observe/cache/shadow.jsonl`; it never changes a result. Numbers and the rule for
-turning it on: `docs/reports/P5-report.md`.
+records to `data/observe/cache/shadow.jsonl`; it never changes a result, runs on one background
+worker (a full queue drops work, a failing store is tried less and logged once a minute), and its
+questions are kept in memory unless `CACHE_SEMANTIC_STORE=es`: then it creates the index
+`cache_semantic_<kb>` in the real Elasticsearch and adds one 1024-number vector per clean miss
+(expired entries are deleted every 500 writes). A knowledge base can opt out with `cache: false`
+in its YAML (no lookup, no write, no `cache` field); `CACHE_ASK_ANSWERS=false` leaves the answers
+of `ask_docs` out (design s12-1 keeps the answer cache out; see `docs/decisions.md`). Numbers and
+the rule for turning L2 on: `docs/reports/P5-report.md`.
 
 ## Retrieval evaluation
 

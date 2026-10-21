@@ -338,13 +338,18 @@ class ServiceSettings(BaseSettings):
     # Identical requests that arrive together compute once: the one that computes holds a Redis
     # lock for at most `cache_lock_ttl_ms`; the others in other processes poll every
     # `cache_lock_poll_ms` for at most `cache_lock_wait_ms`. Shadow mode: `cache_semantic_threshold`
-    # is the largest cosine distance (1 - cosine similarity) of a stored question that counts as a
-    # candidate (chosen on the dev questions of P5-01, docs/reports/P5-report.md), entries live
+    # is how far the shadow records look: the largest cosine distance (1 - cosine similarity) of a
+    # stored question that counts as a candidate. 0.20 is wide on purpose, so real traffic can show
+    # which smaller value is safe (`shadow-report --max-distance`); 0.06 is the value chosen on the
+    # dev pairs of P5-01 (docs/reports/P5-report.md), not a default. Entries live
     # `cache_semantic_ttl_s`, the records go to `<cache_shadow_dir>/shadow.jsonl`, and the stored
     # questions live in `cache_semantic_store` (`memory` in this process, or `es`: index
-    # `cache_semantic_<kb>`). `cache_semantic_lexical_guard`: besides the entity guard of the
+    # `cache_semantic_<kb>`; it creates that index in the real Elasticsearch and deletes expired
+    # entries every 500 writes). `cache_semantic_lexical_guard`: besides the entity guard of the
     # design, reject a stored question whose content words differ from the new one's by one or
-    # two words.
+    # two words (or are the same words in another order). `cache_ask_answers`: also cache the
+    # final answers of `ask_docs` (design s12-1 leaves L3, the answer cache, out; see
+    # docs/decisions.md): off, only `search_docs` results are cached.
     cache_mode: Literal["off", "l1", "l1_shadow"] = "l1_shadow"
     cache_url: str = ""
     cache_ask_answers: bool = True
@@ -358,7 +363,7 @@ class ServiceSettings(BaseSettings):
     cache_lock_ttl_ms: int = Field(default=30_000, gt=0)
     cache_lock_wait_ms: int = Field(default=3_000, ge=0)
     cache_lock_poll_ms: int = Field(default=25, gt=0)
-    cache_semantic_threshold: float = Field(default=0.15, ge=0.0, le=1.0)
+    cache_semantic_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
     cache_semantic_ttl_s: int = Field(default=86_400, gt=0)
     cache_semantic_lexical_guard: bool = True
     cache_semantic_store: Literal["memory", "es"] = "memory"
