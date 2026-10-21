@@ -7,9 +7,11 @@ A stopped service, Elasticsearch or the gateway being down produces no trace at 
 request that never arrives; so a client outside the service asks one fixed question every
 `interval_s` seconds. A run has one of three outcomes:
 
-    ok       HTTP 200, not degraded, not a rerank timeout, and the first passage comes from the
-             expected page (`search`), or an answered question with a source from it (`ask`)
-    insane   HTTP 200 but the content is wrong: nothing found, another page first, degraded
+    ok       HTTP 200, not degraded, not a rerank timeout, and one of the returned passages comes
+             from the expected page (`search`), or an answered question with a source from it
+             (`ask`). The page may be anywhere in the list: passages tie at a rerank score of 1.0
+             and their order changes with the query text.
+    insane   HTTP 200 but the content is wrong: nothing found, the expected page missing, degraded
     error    no answer: refused connection, timeout, a non-200 status, a body that is not JSON
 
 The metrics (`rag.observe.attributes`): `rag.probe.runs{kind,outcome}`, `rag.probe.duration{kind}`,
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import threading
 import time
 from collections.abc import Callable
@@ -63,6 +66,7 @@ class ProbeConfig:
     ask_daily_cap: int
     state_path: Path
     top_k: int = 3
+    unique_query: bool = False
     ask_timeout_s: float = 45.0
 
     @classmethod
@@ -82,6 +86,7 @@ class ProbeConfig:
             ask_daily_cap=settings.probe_ask_daily_cap,
             state_path=repo_path(settings.probe_state_path),
             top_k=settings.probe_top_k,
+            unique_query=settings.probe_unique_query,
             ask_timeout_s=settings.probe_ask_timeout_s,
         )
 
@@ -144,12 +149,19 @@ class Prober:
 
     def probe_search(self) -> ProbeResult:
         cfg = self.config
-        body = {"kb": cfg.kb, "query": cfg.query, "top_k": cfg.top_k}
+        query = cfg.query
+        if cfg.unique_query:
+            # A made-up word at the end: nobody asked this exact question before, so the result
+            # cache cannot answer it and the request really reaches Elasticsearch and the gateway.
+            query = f"{query} zq{secrets.token_hex(3)}"
+        body = {"kb": cfg.kb, "query": query, "top_k": cfg.top_k}
         return self._run("search", "/v1/search_docs", body, cfg.timeout_s, self._judge_search)
 
     def probe_ask(self) -> ProbeResult:
         cfg = self.config
-        body = {"kb": cfg.kb, "question": cfg.question}
+        # A call with a session id does not read the result cache (spec P5-01): the answer is
+        # really computed. One session per run, so no run sees the history of an earlier one.
+        body = {"kb": cfg.kb, "question": cfg.question, "session_id": f"probe-{int(self.clock())}"}
         return self._run("ask", "/v1/ask_docs", body, cfg.ask_timeout_s, self._judge_ask)
 
     def _expected_in(self, chunk: Any) -> bool:
@@ -165,8 +177,8 @@ class Prober:
         chunks = body.get("chunks") or []
         if not chunks:
             return INSANE, "no passage returned"
-        if not self._expected_in(chunks[0]):
-            return INSANE, "first passage is not from the expected page"
+        if not any(self._expected_in(c) for c in chunks):
+            return INSANE, "no returned passage is from the expected page"
         return OK, ""
 
     def _judge_ask(self, body: dict[str, Any]) -> tuple[str, str]:

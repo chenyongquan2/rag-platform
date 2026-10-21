@@ -27,7 +27,7 @@ groups:
           severity: critical
         annotations:
           summary: "The search probe is failing"
-          description: "The fixed search_docs request has not returned a sane answer (error, wrong first page, or degraded). Check the service, Elasticsearch, the gateway."
+          description: "The fixed search_docs request has not returned a sane answer (error, expected page missing, or degraded). Check the service, Elasticsearch, the gateway."
 
       # The probe process itself stopped (or the service has been down so long that no run is ok):
       # the age of the last good run. 180 s is three probe intervals.

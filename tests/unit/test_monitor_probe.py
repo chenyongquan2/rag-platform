@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -152,12 +153,14 @@ def test_a_bad_search_is_not_a_success(
         assert _runs(obs) == {("search", outcome): 1}
 
 
-def test_top_one_must_be_the_expected_page(tmp_path: Path) -> None:
-    """The expected page in second place is not enough: the probe checks the first result."""
+def test_the_expected_page_may_be_anywhere_in_the_returned_list(tmp_path: Path) -> None:
+    """Several passages tie at a rerank score of 1.0 and their order changes with the query text
+    (measured on the real index: the expected page was first in 11 of 15 runs and in the list in
+    15 of 15), so the probe asks for the page in the list, not for the first place."""
     body = _search_body(chunks=[_chunk("docs/other.md"), _chunk("docs/hub/push.md")])
     with memory_observability():
         prober = _prober(tmp_path, lambda request: httpx.Response(200, json=body))
-        assert prober.probe_search().outcome == "insane"
+        assert prober.probe_search().outcome == "ok"
 
 
 def test_unreachable_service_and_timeout_are_errors_and_keep_the_last_success(
@@ -205,6 +208,57 @@ def test_run_due_searches_every_interval(tmp_path: Path) -> None:
         clock.now += 30
         assert [r.kind for r in prober.run_due()] == ["search"]
     assert calls == ["/v1/search_docs", "/v1/search_docs"]
+
+
+def test_a_unique_query_keeps_the_probe_out_of_the_result_cache(tmp_path: Path) -> None:
+    """The same question twice would be answered from Redis for an hour, and the probe would
+    never reach Elasticsearch or the gateway again: each run asks a question nobody asked before."""
+    clock = Clock()
+    queries: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        queries.append(json.loads(request.content)["query"])
+        return _ok(request)
+
+    with memory_observability():
+        prober = _prober(tmp_path, handler, clock, unique_query=True)
+        prober.probe_search()
+        clock.now += 60
+        prober.probe_search()
+    assert len(set(queries)) == 2 and all(q.startswith("how to push a model ") for q in queries)
+    assert all(len(q.split()[-1]) <= 12 for q in queries)  # one short made-up word at the end
+
+
+def test_the_query_is_left_alone_when_unique_queries_are_off(tmp_path: Path) -> None:
+    queries: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        queries.append(json.loads(request.content)["query"])
+        return _ok(request)
+
+    with memory_observability():
+        prober = _prober(tmp_path, handler, unique_query=False)
+        prober.probe_search()
+        prober.probe_search()
+    assert queries == ["how to push a model"] * 2
+
+
+def test_each_ask_run_has_its_own_session_so_the_cache_cannot_answer_it(tmp_path: Path) -> None:
+    clock = Clock()
+    sessions: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/ask_docs":
+            sessions.append(json.loads(request.content)["session_id"])
+        return _ok(request)
+
+    with memory_observability():
+        prober = _prober(tmp_path, handler, clock, ask_enabled=True, ask_daily_cap=5)
+        prober.probe_ask()
+        clock.now += 1800
+        prober.probe_ask()
+    assert len(set(sessions)) == 2
+    assert all(re.fullmatch(r"probe-[0-9]{1,20}", s) for s in sessions)  # a valid session id
 
 
 def test_ask_probe_is_off_by_default(tmp_path: Path) -> None:

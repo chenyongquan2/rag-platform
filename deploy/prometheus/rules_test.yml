@@ -54,7 +54,7 @@ tests:
               rag_probe_kind: search
             exp_annotations:
               summary: "The search probe is failing"
-              description: "The fixed search_docs request has not returned a sane answer (error, wrong first page, or degraded). Check the service, Elasticsearch, the gateway."
+              description: "The fixed search_docs request has not returned a sane answer (error, expected page missing, or degraded). Check the service, Elasticsearch, the gateway."
       - eval_time: 6m   # 105 s + 180 s = 285 s, plus 30 s
         alertname: SearchProbeNoRecentSuccess
         exp_alerts:

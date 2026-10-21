@@ -192,7 +192,7 @@ uv run python -m rag.eval.online_sample --n 20  # judge 20 random recent request
   Set `ALERT_WEBHOOK_URL` to also post each line (JSON with a `text` field) to a chat webhook; the URL is
   never logged.
 - **Probe** `SEARCH` every `PROBE_INTERVAL_S` (60) against `PROBE_URL` (default: this machine's service),
-  expecting `PROBE_EXPECTED` in the first passage's source. The `ask_docs` check costs model calls: off by
+  expecting `PROBE_EXPECTED` in one returned passage's source. The `ask_docs` check costs model calls: off by
   default (`PROBE_ASK_ENABLED=true` turns it on), once per `PROBE_ASK_INTERVAL_S` (1800) and at most
   `PROBE_ASK_DAILY_CAP` (3) a day, counted in `data/observe/probe_state.json`.
 - **Feedback** the MCP tool `feedback(request_id, useful, comment?)` and `POST /v1/feedback` write one

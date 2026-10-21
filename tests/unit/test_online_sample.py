@@ -87,6 +87,7 @@ def test_candidates_are_recent_answered_requests_with_a_question_and_chunks(tmp_
             _record("degraded", flags=["degraded"]),  # a degraded answer is still an answer
             _record("no-chunks", final=[]),
             _record("no-question", extra={}),
+            _record("blank-question", extra={"query": "   "}),
             _record("feedback", tool="feedback", extra={"useful": True}),
             _record("list", tool="list_knowledge_bases", extra={"knowledge_bases": ["a"]}),
             _record("cancelled", flags=["client_cancelled"]),

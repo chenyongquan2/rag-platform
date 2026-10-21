@@ -284,15 +284,19 @@ class ServiceSettings(BaseSettings):
     dependency_check_ttl_s: float = Field(default=10.0, gt=0)
     # Scheduled probe (spec P5-02, `python -m rag.monitor probe`): one fixed `search_docs` request
     # every `probe_interval_s` seconds to the running service (`probe_url`, empty: the service's
-    # own host and port). The answer is sane when the first passage's source (path, URL or title)
+    # own host and port). The answer is sane when a returned passage's source (path, URL or title)
     # contains `probe_expected`, and the result is not degraded. The ask check costs model calls:
     # off by default, at most one per `probe_ask_interval_s` and `probe_ask_daily_cap` per UTC
     # day (counted in `probe_state_path`, so a restart does not reset it).
     probe_url: str = ""
     probe_kb: str = "hf_docs"
     probe_query: str = "How do I upload a model to the Hugging Face Hub with push_to_hub?"
-    probe_expected: str = "push_to_hub"
-    probe_top_k: int = Field(default=3, ge=1, le=20)
+    probe_expected: str = "chapter4/3.mdx"
+    probe_top_k: int = Field(default=5, ge=1, le=20)
+    # A made-up word is added to the query of every run, so the result cache (an hour) cannot
+    # answer the probe and hide a failure of Elasticsearch or the gateway; the ask check uses a
+    # session id for the same reason.
+    probe_unique_query: bool = True
     probe_interval_s: float = Field(default=60.0, gt=0)
     probe_timeout_s: float = Field(default=20.0, gt=0)
     probe_metric_export_interval_s: float = Field(default=10.0, gt=0)
