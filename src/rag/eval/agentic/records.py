@@ -14,6 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from rag.eval.answer.record import Usage
+from rag.types import AnswerSentence, Chunk
 
 SystemName = Literal["standard", "agentic"]
 SYSTEMS: tuple[SystemName, ...] = ("standard", "agentic")
@@ -88,6 +89,11 @@ class SystemRecord(BaseModel):
     context_pages: list[str] = Field(default_factory=list)
     """Pages of the numbered fragments the answer was written from."""
     cited_pages: list[str] = Field(default_factory=list)
+    answer_sentences: list[AnswerSentence] = Field(default_factory=list)
+    """The answer's sentences with their citations (spec P1-06: citation check level 2 needs
+    which sentence cites which chunk). Empty in records written before P1-06."""
+    cited_chunks: list[Chunk] = Field(default_factory=list)
+    """The chunks the sentences cite, once each, in first-cited order (not the whole context)."""
     retrieval_not_found: bool = False
     # Time and money.
     total_ms: float = 0.0

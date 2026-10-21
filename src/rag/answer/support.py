@@ -64,6 +64,9 @@ class SupportJudgeConfig(BaseModel):
     max_tokens: int = 2048
     extra_body: dict[str, Any] = Field(default_factory=lambda: {"enable_thinking": False})
     max_pairs_per_call: int = Field(default=16, ge=1)
+    concurrency: int = Field(default=4, ge=1)
+    """Answers judged at the same time by a batch caller (the eval); one answer's calls run in
+    order."""
     metadata_keys: tuple[str, ...] = ("title_path",)
     prompt_version: str = SUPPORT_PROMPT_VERSION
 
