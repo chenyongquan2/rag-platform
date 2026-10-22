@@ -175,7 +175,12 @@ def test_reserve_counts_in_flight_spend(tmp_path: Path) -> None:
     assert other.check_budget(0.5) == 0.0
 
 
-def test_cli_summary_prints_totals(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_summary_prints_totals(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Pin the budget: environment variables win over the developer's .env.
+    monkeypatch.setenv("BUDGET_CNY", "30")
+    monkeypatch.setenv("BUDGET_STOP_CNY", "28")
     ledger = _ledger(tmp_path)
     ledger.record(kind="embedding", model="emb", prompt_tokens=1_000_000, profile="ingest")
     ledger.record(kind="embedding", model="emb", prompt_tokens=1_000_000, profile="query")
