@@ -178,3 +178,39 @@ def test_retry_errors_needs_contexts_from(tmp_path: Path) -> None:
         chat_backend="fake", otel_mode="off", business_record_path="", log_dir=""
     )
     assert cli.main(["run", "--kb", "hf_docs", "--retry-errors"], settings=settings) == 2
+
+
+def test_merge_retried_refuses_a_question_id_the_stored_run_does_not_have(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rag.eval.answer.runner import merge_retried
+
+    qfile = tmp_path / "questions.jsonl"
+    save_question_set(
+        [LabeledQuestion(qid="q1", question="How to log in?", answer="Use login.")], qfile
+    )
+    retriever = FakeRetriever(
+        {"How to log in?": RetrievalResult(request_id="r", kb="hf_docs", chunks=[_chunk("a.md")])}
+    )
+    monkeypatch.setattr(cli, "build_retriever", lambda cfg, settings, **kw: retriever)
+    monkeypatch.setattr(
+        cli, "build_answer_model", lambda s: StreamingFakeChatModel(responses=["First [1]."])
+    )
+    settings = ServiceSettings(
+        chat_backend="fake",
+        otel_mode="off",
+        business_record_path="",
+        log_dir="",
+        cost_ledger_path=str(tmp_path / "ledger.jsonl"),
+    )
+    out = tmp_path / "out"
+    args = ["run", "--kb", "hf_docs", "--questions", str(qfile), "--out-dir", str(out)]
+    assert cli.main([*args, "--label", "first"], settings=settings) == 0
+    stored = load_answer_run(next((out / "answers").iterdir()))
+    stray = stored.questions[0].model_copy(update={"qid": "q99"})
+
+    with pytest.raises(KeyError, match="q99"):
+        merge_retried(stored, [stray], label="merged")
+    # a known id is accepted and keeps the stored order
+    merged = merge_retried(stored, [stored.questions[0]], label="merged")
+    assert [q.qid for q in merged.questions] == ["q1"]
