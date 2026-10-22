@@ -34,6 +34,7 @@ table per system, with machine load recorded.
 - `rag.eval.agentic.runs.compare_runs(before, after, before_lines, after_lines, system) -> str`
   (Markdown, no model) and CLI `python -m rag.eval.agentic compare-runs --before DIR --after DIR
   [--system S] [--md FILE]`.
+- `run --kb-override SECTION.KEY=VALUE` (eval only; e.g. `agent.round2_on_not_enough=false`).
 
 ## Acceptance criteria
 - [ ] AC1 A graph record keeps answer sentences and cited chunks (ids among the answer's sources) and
@@ -41,6 +42,7 @@ table per system, with machine load recorded.
 - [ ] AC2 `compare_runs`: per type, correct counts before/after, improved/worsened and McNemar p on
   shared qids; refusal on no-answer; cost and latency median/P95 — `test_compare_runs_per_type`
 - [ ] AC3 CLI `compare-runs` writes the Markdown — `test_compare_runs_cli`
+- [ ] AC4 `--kb-override` sets only the named key on a copy, re-validates, rejects unknown keys — `test_kb_override`
 
 Also (by running, `llm`): pilot, full run, judge, citation check, report in `docs/reports/P3-report.md` section 5.
 

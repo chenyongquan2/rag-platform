@@ -181,3 +181,22 @@ def test_compare_runs_cli(tmp_path: Path) -> None:
     assert cli.main([*argv, "--system", "agentic", "--md", str(md)]) == 0
     assert "single_hop" in md.read_text(encoding="utf-8")
     assert cli.main([*argv, "--system", "standard"]) == 2  # no standard records in either
+
+
+# ---- AC4: an eval-only override of one kb config key ------------------------------------------
+
+
+def test_kb_override() -> None:
+    from rag.eval.agentic.cli import apply_kb_overrides
+    from rag.eval.retrieval.cli import UsageError
+
+    cfg = kb_config(KB)
+    assert cfg.agent.round2_on_not_enough is True
+    new = apply_kb_overrides(cfg, ["agent.round2_on_not_enough=false", "agent.multi_queries=2"])
+    assert new.agent.round2_on_not_enough is False and new.agent.multi_queries == 2
+    assert new.model_dump(exclude={"agent"}) == cfg.model_dump(exclude={"agent"})
+    assert cfg.agent.round2_on_not_enough is True  # the original is untouched
+    assert apply_kb_overrides(cfg, None) == cfg
+    for bad in ["agent.no_such_key=1", "agent.round2_on_not_enough", "agent.max_rounds=0"]:
+        with pytest.raises(UsageError):
+            apply_kb_overrides(cfg, [bad])

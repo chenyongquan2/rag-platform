@@ -3,7 +3,7 @@
 
 uv run python -m rag.eval.agentic run --kb hf_docs --out DIR [--system standard|agentic|both]
     [--types T,...] [--take TYPE=N ...] [--qids ID,...] [--deadline-ms MS] [--retry-errors]
-    [--max-cny 5.0] [--index-prefix P]
+    [--max-cny 5.0] [--index-prefix P] [--kb-override SECTION.KEY=VALUE ...]
 uv run python -m rag.eval.agentic judge --out DIR [--runs 2] [--model M] [--concurrency 4]
 uv run python -m rag.eval.agentic report --out DIR [--md FILE]
 uv run python -m rag.eval.agentic human-sheet --out DIR [--n 30] [--seed 0]
@@ -32,6 +32,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from rag.agent import AgentHooks, AgentRuntime
 from rag.config import KnowledgeBaseConfig, ServiceSettings, repo_path
@@ -141,6 +143,33 @@ def _items(args: argparse.Namespace, kb: str) -> list[EvalItem]:
     return items
 
 
+def apply_kb_overrides(
+    cfg: KnowledgeBaseConfig, overrides: Sequence[str] | None
+) -> KnowledgeBaseConfig:
+    """A copy of `cfg` with `section.key=value` set (value read as YAML), validated again; for
+    eval runs only (spec P3-07: `agent.round2_on_not_enough=false`). The kb file is unchanged."""
+    if not overrides:
+        return cfg
+    data = cfg.model_dump()
+    for text in overrides:
+        key, sep, raw = text.partition("=")
+        parts = key.strip().split(".")
+        if not sep or len(parts) < 2:
+            raise UsageError(f"--kb-override takes SECTION.KEY=VALUE, got {text!r}")
+        node = data
+        for part in parts[:-1]:
+            if not isinstance(node.get(part), dict):
+                raise UsageError(f"--kb-override: unknown section {key!r}")
+            node = node[part]
+        if parts[-1] not in node:
+            raise UsageError(f"--kb-override: unknown key {key!r}")
+        node[parts[-1]] = yaml.safe_load(raw)
+    try:
+        return KnowledgeBaseConfig.model_validate(data)
+    except ValueError as exc:
+        raise UsageError(f"--kb-override: {exc}") from exc
+
+
 def _out(args: argparse.Namespace) -> Path:
     return Path(args.out) if args.out else repo_path(REPORTS_ROOT)
 
@@ -164,6 +193,7 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
     if args.max_cny <= 0:
         raise UsageError("--max-cny must be positive")
     cfg, _public = _kb_config(settings, args.kb)
+    cfg = apply_kb_overrides(cfg, args.kb_override)
     items = _items(args, cfg.kb)
     out = _out(args)
     _ledger_check(settings)
@@ -375,6 +405,12 @@ def _parser() -> argparse.ArgumentParser:
         help="run again the questions whose record is an error",
     )
     p_run.add_argument("--max-cny", type=float, default=DEFAULT_MAX_CNY)
+    p_run.add_argument(
+        "--kb-override",
+        action="append",
+        metavar="SECTION.KEY=VALUE",
+        help="set one kb config key for this run only (YAML value)",
+    )
     p_run.add_argument("--index-prefix", default="")
     add_out(p_run)
 
