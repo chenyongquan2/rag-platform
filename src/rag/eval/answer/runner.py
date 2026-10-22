@@ -84,6 +84,32 @@ class RetrieverContexts:
         )
 
 
+class StoredContexts:
+    """The chunks an earlier answer run gave each question, in the same order (spec P7-01).
+
+    Two chat models answered from one stored run see the same fragments, so a difference between
+    them is the model's, not the retrieval's (and no reranker runs). The answer step rebuilds the
+    context from these chunks with the KB's budget, as it did for the stored run."""
+
+    def __init__(self, run: AnswerRunRecord) -> None:
+        self.run_id = run.run_id
+        self._by_qid = {q.qid: q for q in run.questions}
+
+    def __call__(self, item: AnswerItem) -> RetrievedContext:
+        record = self._by_qid.get(item.qid)
+        if record is None:
+            raise KeyError(f"{item.qid}: not in the stored answer run {self.run_id}")
+        answer = record.answer
+        return RetrievedContext(
+            chunks=list(answer.chunks) if answer is not None else [],
+            not_found=record.retrieval_not_found,
+            degraded=record.degraded,
+            rerank_timeout=record.rerank_timeout,
+            index_version=answer.index_version if answer is not None else "",
+            data_generation=answer.data_generation if answer is not None else 0,
+        )
+
+
 def items_from_question_set(question_set: QuestionSet) -> list[AnswerItem]:
     return [
         AnswerItem(

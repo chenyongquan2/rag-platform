@@ -1,7 +1,7 @@
 """Command line of the answer eval (spec P1-04).
 
 uv run python -m rag.eval.answer run --kb hf_docs [--questions P] [--limit N] [--label L]
-    [--index-prefix P] [--out-dir D]
+    [--index-prefix P] [--contexts-from RUN] [--out-dir D]
 uv run python -m rag.eval.answer security [--set DIR] [--tokenizer model|whitespace] [--label L]
 uv run python -m rag.eval.answer judge --answers RUN [--scales 1-5,1-3] [--repeat 1]
     [--model M] [--concurrency 4] [--label L]
@@ -45,7 +45,9 @@ from rag.eval.answer.judge import (
 from rag.eval.answer.record import AnswerRunRecord
 from rag.eval.answer.runner import (
     REPORTS_ROOT,
+    ContextSource,
     RetrieverContexts,
+    StoredContexts,
     items_from_question_set,
     load_answer_run,
     render_answer_summary,
@@ -133,12 +135,18 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
         items = items[: args.limit]
     chat = settings.chat_online.model or settings.chat_model
     print(_spent(settings))
-    retriever = build_retriever(cfg, settings, index_prefix=args.index_prefix)
+    retriever: Retriever | None = None
+    contexts: ContextSource
+    if args.contexts_from:
+        contexts = StoredContexts(load_answer_run(args.contexts_from))
+    else:
+        retriever = build_retriever(cfg, settings, index_prefix=args.index_prefix)
+        contexts = RetrieverContexts(retriever, kb=cfg.kb, top_k=cfg.retrieval.final_k)
     try:
         run = asyncio.run(
             run_answer_eval(
                 items,
-                RetrieverContexts(retriever, kb=cfg.kb, top_k=cfg.retrieval.final_k),
+                contexts,
                 kb_config=cfg,
                 model=build_answer_model(settings),
                 chat_model=chat,
@@ -319,6 +327,11 @@ def _parser() -> argparse.ArgumentParser:
     p_run.add_argument("--limit", type=int, help="first N questions only (a pilot)")
     p_run.add_argument("--label", help="run id suffix")
     p_run.add_argument("--index-prefix", default="")
+    p_run.add_argument(
+        "--contexts-from",
+        metavar="RUN",
+        help="answer from the chunks of this earlier answer run instead of retrieving (P7-01)",
+    )
     p_run.add_argument("--out-dir", help=f"default {REPORTS_ROOT}")
 
     p_sec = sub.add_parser("security", help="answer the security set from its planted pages")
