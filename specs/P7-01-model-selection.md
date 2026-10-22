@@ -63,8 +63,9 @@ sufficiency thresholds (no model changed that feeds them); judge comparison with
   65 questions with identical pages). Embedding: the gateway has no second embedding model; small-index in-memory
   approximation with local bge-base-en-v1.5, no reliable difference. Judge kept. Spend 1.0422 CNY (generation part
   1.0413 against its 1.0 share, mostly two minimax timeouts).
-- Open issues: glm citation check not run (about 0.2 CNY); v2-m3 threshold scores not collected; retrieval does not
-  compare the query embedding model with the index's `_meta.embed_model` (read in code, not tested); reranker
-  latency noisy on the shared machine (one MiniLM run started at 74% CPU); `tests/unit/test_cost.py` reads `.env`
+- Open issues: glm citation check not run (about 0.2 CNY); v2-m3 threshold scores not collected; the query-side embedding
+  model check exists but runs only when the retrieval pipeline is built (`hybrid_parts`, unit-tested), so a running
+  process is not re-checked after an alias switch (untested; safe order: switch the alias, then restart); reranker
+  latency noisy on the shared machine (three MiniLM runs started at 37%, 92%, 37% CPU); `tests/unit/test_cost.py` reads `.env`
   (stop line 33), so commits set `BUDGET_STOP_CNY=28` in the commit environment (P3-07 noted the same).
 - Review rounds:
