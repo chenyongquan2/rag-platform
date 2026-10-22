@@ -1882,3 +1882,6 @@ P3-01 留的问题：到 `max_rounds` 时写「没查全」。现在三轮里所
 - **回答模型超时的 4 道 A 题单独再问一遍，只当参照。** 开跑前定的指标里，超时算「没有回答」，这一条没有改；单独再问的结果放在 `p3-07-retry/`，报告里写明它只给了 A 第二次机会。
 - **`round2_on_not_enough` 只在受影响的 24 道题上关掉重跑，默认值不改。** 开关只改变第 1 轮判断是「不够」的题；这次这样的题有 24 道，全是无答案题。其余跑了第 2 轮的 22 道是「部分够」，开关不改变它们，重跑只能量运行波动，花约 0.25 元，没有跑。为此给评测命令加了 `--kb-override`（只改这一次运行的知识库设置，不改文件）。改不改默认值由主人定（报告第 5.10 节）。
 - **单元测试读 `.env` 的问题没有在这个 spec 里修。** `test_cost.py::test_cli_summary_prints_totals` 在新 `.env`（停止线 33 元）下失败。提交时在提交命令的环境里设 `BUDGET_STOP_CNY=28`，没有用 `--no-verify`，也没有改这个测试（规则不许为了通过改已有测试）。要改的是测试不读 `.env`，留给后面的 spec。
+- **留给后面的两件事（审查第 1 轮补写，这个 spec 没有改代码）。**
+  - 回答被 30 秒的总时间取消时，结果要能和「模型认为文档里没有」分开：在 `rag/agent/result.py` 的 `compose_result` 里 `answer is None` 的分支，停止原因是 `deadline` 或 `recursion_limit`、而且前面几轮有段时，`generation_error` 设成 `AGENT_DEADLINE`，`error_categories` 去重，提示改成「运行在写出回答前停止，没有回答」。现在的提示说「这个回答只用了已经查到的段」，可实际没有回答（例子 `two_hop:04`、`:14`；对照 `two_hop:08`，模型真的回答了文档里没有）。留给回答的 7 秒对长输入的两跳题不够，是另一件调参数的事。
+  - 评测工具的 `--retry-errors`（`rag/eval/agentic/runner.py` 的 `_run`）只重跑 `status == "error"` 的记录；回答模型超时的记录是 `not_found` 加 `generation_error: llm_timeout`，重跑不到。改成也重跑 `generation_error` 不为空的记录，要在新的 spec 里先定。
