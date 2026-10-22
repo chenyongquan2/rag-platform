@@ -295,3 +295,29 @@ def test_cli_selects_questions_and_passes_the_deadline(
     assert _main(env, "run", "--system", "agentic", "--qids", "n1", "--deadline-ms", "60000") == 0
     assert seen == {"qids": ["n1"], "deadline_ms": 60000}
     assert _main(env, "run", "--system", "agentic", "--qids", "nope") == 2  # unknown question id
+
+
+def test_run_applies_and_records_a_kb_override(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Spec P3-07: `--kb-override` reaches the runner and is written down with the run."""
+    import json
+
+    seen: dict[str, Any] = {}
+    real = cli.run_agentic
+
+    async def spy(items: Any, **kw: Any) -> RunStats:
+        seen["cfg"] = kw["kb_config"]
+        return await real(items, **kw)
+
+    monkeypatch.setattr(cli, "run_agentic", spy)
+    override = "agent.round2_on_not_enough=false"
+    argv = ["run", "--system", "agentic", "--kb", "hf_docs", "--kb-override", override]
+    assert _main(env, *argv) == 0
+    assert seen["cfg"].agent.round2_on_not_enough is False
+    assert override in capsys.readouterr().out
+    (line,) = [
+        json.loads(x) for x in (env["out"] / "runs.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert line["system"] == "agentic" and line["kb_overrides"] == [override]
+    assert line["questions"] == 2 and line["started"]

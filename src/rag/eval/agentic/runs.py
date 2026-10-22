@@ -143,7 +143,7 @@ def compare_runs(
 def _pb(label: str, r: PairedBinary) -> str:
     return (
         f"| {label} | {r.n} | {r.a.count} ({r.a.rate or 0:.1%}) | {r.b.count} ({r.b.rate or 0:.1%}) "
-        f"| {r.improved} | {r.worsened} | {r.p_value:.3f} | {r.verdict} |"
+        f"| {r.improved} | {r.worsened} | {r.p_value:.3f} | {r.verdict.replace('B ', 'after ')} |"
     )
 
 

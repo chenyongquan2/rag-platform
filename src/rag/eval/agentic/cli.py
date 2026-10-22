@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -170,6 +172,25 @@ def apply_kb_overrides(
         raise UsageError(f"--kb-override: {exc}") from exc
 
 
+RUNS_NAME = "runs.jsonl"
+
+
+def _note_run(out: Path, system: str, args: argparse.Namespace, questions: int) -> None:
+    """One line per `run` and system in `out/runs.jsonl`: when, which settings were changed for
+    this run only (`--kb-override`, `--deadline-ms`), how many questions were asked for."""
+    line = {
+        "started": datetime.now(UTC).isoformat(timespec="seconds"),
+        "system": system,
+        "kb": args.kb,
+        "kb_overrides": list(args.kb_override or []),
+        "deadline_ms": args.deadline_ms,
+        "questions": questions,
+    }
+    out.mkdir(parents=True, exist_ok=True)
+    with (out / RUNS_NAME).open("a", encoding="utf-8", newline="") as fh:
+        fh.write(json.dumps(line) + "\n")
+
+
 def _out(args: argparse.Namespace) -> Path:
     return Path(args.out) if args.out else repo_path(REPORTS_ROOT)
 
@@ -198,10 +219,13 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
     out = _out(args)
     _ledger_check(settings)
     systems = list(SYSTEMS) if args.system == "both" else [args.system]
+    if args.kb_override:
+        print(f"kb overrides for this run: {args.kb_override}")
     retriever = build_retriever(cfg, settings, index_prefix=args.index_prefix)
     try:
         for system in systems:
             path = system_file(out, system)
+            _note_run(out, system, args, len(items))
             before = _spent_in(out, skip=system)
             if system == "standard":
                 stats = asyncio.run(

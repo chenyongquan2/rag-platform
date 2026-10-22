@@ -129,6 +129,7 @@ def _runs() -> tuple[list[SystemRecord], list[SystemRecord], list[JudgeLine], li
         _rec("s3", "single_hop", answered=True, ms=14_000, cny=0.014),
         _rec("n1", "no_answer", answered=False, ms=20_000, cny=0.020),
         _rec("n2", "no_answer", answered=False, ms=18_000, cny=0.020, status="error"),
+        _rec("n3", "no_answer", answered=False, ms=5_000, cny=0.002),
         _rec("x9", "two_hop", answered=True, ms=1_000, cny=0.001),  # not in the new run
     ]
     after = [
@@ -137,6 +138,10 @@ def _runs() -> tuple[list[SystemRecord], list[SystemRecord], list[JudgeLine], li
         _rec("s3", "single_hop", answered=True, ms=8_000, cny=0.006),
         _rec("n1", "no_answer", answered=True, ms=9_000, cny=0.010),
         _rec("n2", "no_answer", answered=False, ms=9_000, cny=0.010),
+        # Not answered because the answer model timed out: a refusal, but not a clean one.
+        _rec(
+            "n3", "no_answer", answered=False, ms=9_000, cny=0.010, generation_error="llm_timeout"
+        ),
     ]
     before_lines = [_line("s1", 3), _line("s2", 2), _line("s3", 3), _line("x9", 3)]
     after_lines = [_line("s1", 3), _line("s2", 3), _line("s3", 1)]
@@ -152,18 +157,21 @@ def test_compare_runs_per_type() -> None:
     assert single.p_value == 1.0
     assert "two_hop" not in report.correct  # x9 is not shared
     refusal = report.refusal
-    assert (refusal.n, refusal.a.count, refusal.b.count) == (2, 2, 1)
+    assert (refusal.n, refusal.a.count, refusal.b.count) == (3, 3, 2)
     assert refusal.worsened == 1  # n1 refused before, answered now
     clean = report.clean_refusal
-    assert (clean.a.count, clean.b.count) == (1, 1)  # n2's error was no clean refusal
+    # n2 errored before and n3's answer model timed out now: neither is a clean refusal there.
+    assert (clean.a.count, clean.b.count) == (2, 1)
+    assert (clean.improved, clean.worsened) == (1, 2)
     rows = {(r.label, r.qtype): r for r in report.cost}
     assert rows[("before", "single_hop")].p50_ms == 12_000
     assert rows[("after", "single_hop")].mean_cny == pytest.approx(0.006)
     assert rows[("after", "single_hop")].mean_chat_cny == pytest.approx(0.005)
-    assert rows[("before", "all")].n == 5  # shared questions only
-    assert report.shared == 5 and report.only_before == 1 and report.only_after == 0
+    assert rows[("before", "all")].n == 6  # shared questions only
+    assert report.shared == 6 and report.only_before == 1 and report.only_after == 0
     text = render_compare_runs(report)
     assert "single_hop" in text and "McNemar" in text and "refusal" in text.lower()
+    assert "after lower" in text and "B lower" not in text  # the verdicts name the runs
 
 
 # ---- AC3: the command ---------------------------------------------------------------------------

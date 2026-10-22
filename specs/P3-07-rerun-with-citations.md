@@ -31,10 +31,11 @@ table per system, with machine load recorded.
 - `round2_on_not_enough` off: only if budget remains, on the questions whose B run reached round 2.
 
 ## Interface
-- `rag.eval.agentic.runs.compare_runs(before, after, before_lines, after_lines, system) -> str`
-  (Markdown, no model) and CLI `python -m rag.eval.agentic compare-runs --before DIR --after DIR
+- `rag.eval.agentic.runs.compare_runs(before, after, before_lines, after_lines, *, system) -> RunComparison`
+  (per-type `PairedBinary`, refusal, clean refusal, `RunCostRow`s; no model),
+  `render_compare_runs(report: RunComparison) -> str` (Markdown) and CLI `python -m rag.eval.agentic compare-runs --before DIR --after DIR
   [--system S] [--md FILE]`.
-- `run --kb-override SECTION.KEY=VALUE` (eval only; e.g. `agent.round2_on_not_enough=false`).
+- `run --kb-override SECTION.KEY=VALUE` (eval only; e.g. `agent.round2_on_not_enough=false`); every `run` appends a line to `DIR/runs.jsonl` (start time, system, kb, overrides, deadline, question count) and prints the overrides.
 
 ## Acceptance criteria
 - [x] AC1 A graph record keeps answer sentences and cited chunks (ids among the answer's sources) and
@@ -42,7 +43,7 @@ table per system, with machine load recorded.
 - [x] AC2 `compare_runs`: per type, correct counts before/after, improved/worsened and McNemar p on
   shared qids; refusal on no-answer; cost and latency median/P95 — `test_compare_runs_per_type`
 - [x] AC3 CLI `compare-runs` writes the Markdown — `test_compare_runs_cli`
-- [x] AC4 `--kb-override` sets only the named key on a copy, re-validates, rejects unknown keys — `test_kb_override`
+- [x] AC4 `--kb-override` sets only the named key on a copy, re-validates, rejects unknown keys — `test_kb_override`; `run --kb-override` passes the changed config to the runner and writes it to `runs.jsonl` — `tests/unit/test_eval_agentic_cli.py::test_run_applies_and_records_a_kb_override`
 
 Also (by running, `llm`): pilot, full run, judge, citation check, report in `docs/reports/P3-report.md` section 5.
 
@@ -54,4 +55,4 @@ Changing agent code or defaults (bugs go to findings); human scores; judge promp
 - Decisions: ES and Redis containers were stopped and were started with `docker start` (no recreate); A's cold pilot (8/10 rerank timeouts right after the start) set aside and A re-run; judge and citation check one pass each (budget); the 4 A questions lost to `llm_timeout` re-asked separately as a reference only; `round2_on_not_enough=false` only on the 24 questions it changes. AC1 passed at once: the runner already filled both fields for both systems (characterization test).
 - Results: answerable correct A 89/100, B 92/100 (p = 0.45); all 4 single-hop gains of B are A's answer-model timeouts; without the 7 questions either run broke, A 87/93, B 88/93. Refusal 50/50 both. Citation precision 89.7% vs 92.4%, recall 96.0% vs 96.4%, every sentence supported 91.3% vs 92.5% (paired p = 1.0). B 0.0092 vs A 0.0039 CNY per question; P50 9.2 vs 7.2 s, P95 25.9 vs 13.2 s. B vs P3-05 B: errors 5 -> 0, cost 0.0162 -> 0.0092, P95 20.9 -> 25.9 s, correct 93 -> 92. Round 2 off on 24 no-answer questions: refusal unchanged, median 20.0 -> 2.8 s.
 - Open issues: (1) an answer cancelled by the 30 s deadline is reported as `not_found` without an error (two_hop:04, :14); (2) `llm_timeout` answers are `not_found`, `--retry-errors` misses them; (3) warm-up needed after an ES start; (4) `test_cost.py::test_cli_summary_prints_totals` reads `.env`; (5) no-answer questions still the slow, costly class. Spend 3.04 CNY of 3.5 (ledger 26.58 -> 29.62).
-- Review rounds: none yet.
+- Review rounds: 1 (CHANGES, small): report numbers and finding wording corrected, overrides recorded in `runs.jsonl`, two test gaps closed (CLI override mutation, clean refusal on the after side), verdicts in before/after tables say "after", spec interface fixed. No paid calls.
