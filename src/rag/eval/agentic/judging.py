@@ -4,7 +4,8 @@ Same judge as P1-04, unchanged: `qwen/qwen3.6-flash`, prompt version `p1-04-hf-v
 thinking off, the 1-3 scale (HF agent_rag). Only answerable questions are judged; a question with
 no answer (not found, parse failure, error, a clarification instead of an answer) gets 1 by rule
 without a call. Every score is appended to the judge file as soon as it exists, and a line that
-is already there (same system, question and pass) is not asked again, so a crash loses nothing.
+is already there (same system, question and pass) is not asked again, so a crash loses nothing
+(except a by-rule score of a question that has been answered since: that one is judged again).
 """
 
 from __future__ import annotations
@@ -73,7 +74,14 @@ async def judge_records(
     """Judge pass `run` over the answerable `records` that have no line yet; returns the new
     lines (appended to `out_path` one by one)."""
     repair_tail(out_path)
-    have = {(x.system, x.qid) for x in read_judge_lines(out_path) if x.run == run}
+    answered = {(r.system, r.qid) for r in records if r.answered}
+    # A rule score ("no answer") of a question that has been answered since (re-run by
+    # `--retry-errors`) is stale: judge the new answer; the later line wins when scores are read.
+    have = {
+        (x.system, x.qid)
+        for x in read_judge_lines(out_path)
+        if x.run == run and not (x.by_rule == "no_answer" and (x.system, x.qid) in answered)
+    }
     todo = [r for r in records if r.answerable and (r.system, r.qid) not in have]
     bound = model.bind(extra_body=config.extra_body) if config.extra_body else model
     semaphore = asyncio.Semaphore(config.concurrency)

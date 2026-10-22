@@ -6,7 +6,10 @@ Fixed before the run (see the spec):
 - an answerable question is *correct* when the judge's 1-3 score is 3 (adequate: 2 or 3); the mean
   score is the HF percentage `(score - 1) / 2`;
 - a no-answer question is *refused* when no answer was given (`answered` false): not found, a parse
-  failure, an error, or the graph asking back (counted apart as a clarification).
+  failure, an error, or the graph asking back (counted apart as a clarification); it is *refused
+  cleanly* when, besides, the run did not fail and the answer was not cut off by the total deadline
+  (spec EVAL-0: such a record says `not_found` but the answer step never ran, so it is counted apart
+  as "truncated", not as a refusal the system chose).
 
 Paired tests over the questions both systems have: exact McNemar on the binary metrics, a
 sign-flip permutation test on the scores, Wilson intervals on every rate, and the smallest
@@ -21,7 +24,7 @@ from collections.abc import Iterable, Mapping, Sequence
 
 from pydantic import BaseModel, Field
 
-from rag.eval.agentic.records import JudgeLine, SystemName, SystemRecord
+from rag.eval.agentic.records import JudgeLine, SystemName, SystemRecord, is_deadline_truncated
 from rag.eval.agentic.sets import QTYPES
 from rag.eval.answer.record import Proportion
 from rag.eval.retrieval.runner import latency_summary
@@ -83,6 +86,12 @@ def _failed(record: SystemRecord) -> bool:
         or record.generation_error is not None
         or record.answer_parse_failed
     )
+
+
+def clean_refusal(record: SystemRecord) -> bool:
+    """No answer was given and nothing broke or ran out of time on the way: the system decided to
+    refuse. A deadline-cut answer (`is_deadline_truncated`) is not one (spec EVAL-0)."""
+    return not record.answered and not _failed(record) and not is_deadline_truncated(record)
 
 
 def _in_types(record: SystemRecord, qtype: str) -> bool:
@@ -195,12 +204,16 @@ class TypeSummary(BaseModel):
     score: PairedScores | None = None
     refusal: PairedBinary | None = None
     clean_refusal: PairedBinary | None = None
-    """Refused without a crash: the refusals of `refusal` minus the runs that ended in an error."""
+    """Refused without a crash or a deadline cut: the refusals of `refusal` minus the runs that
+    ended in an error and the answers cut off by the total deadline (`truncated`)."""
     errors: dict[str, int] = Field(default_factory=dict)
     """No-answer questions whose run ended in an error (retrieval error, gateway timeout, parse
     failure): they gave no answer, so `refusal` counts them, and `clean_refusal` does not."""
     clarifications: dict[str, int] = Field(default_factory=dict)
     """No-answer questions where the graph asked back (counted as refusals)."""
+    truncated: dict[str, int] = Field(default_factory=dict)
+    """Questions of this type (answerable or not) whose answer was cut off by the total deadline
+    (`is_deadline_truncated`), per system; listed apart, never a clean refusal (spec EVAL-0)."""
 
 
 def per_type_summary(
@@ -218,15 +231,17 @@ def per_type_summary(
         ]
         if not common:
             continue
+        truncated = {
+            s: sum(1 for q in common if is_deadline_truncated(systems[s][q]))  # type: ignore[index]
+            for s in ("standard", "agentic")
+        }
         if qtype == "no_answer":
             refused = {
                 s: {q: not systems[s][q].answered for q in common}  # type: ignore[index]
                 for s in ("standard", "agentic")
             }
             clean = {
-                s: {  # type: ignore[index]
-                    q: not systems[s][q].answered and not _failed(systems[s][q]) for q in common
-                }
+                s: {q: clean_refusal(systems[s][q]) for q in common}  # type: ignore[index]
                 for s in ("standard", "agentic")
             }
             out[qtype] = TypeSummary(
@@ -242,12 +257,15 @@ def per_type_summary(
                     s: sum(1 for q in common if systems[s][q].clarification)  # type: ignore[index]
                     for s in ("standard", "agentic")
                 },
+                truncated=truncated,
             )
             continue
         scored = [q for q in common if q in scores["standard"] and q in scores["agentic"]]
         a = {q: scores["standard"][q] for q in scored}
         b = {q: scores["agentic"][q] for q in scored}
-        summary = TypeSummary(qtype=qtype, n=len(scored), unscored=len(common) - len(scored))
+        summary = TypeSummary(
+            qtype=qtype, n=len(scored), unscored=len(common) - len(scored), truncated=truncated
+        )
         if scored:
             summary.correct = paired_binary(
                 "correct",
@@ -527,6 +545,8 @@ class LimitCase(BaseModel):
     score: int | None
     """The judge's first-pass score (answerable questions)."""
     answered: bool
+    truncated: bool = False
+    """The answer was cut off by the deadline (no answer step ran; spec EVAL-0)."""
 
 
 class LimitsReport(BaseModel):
@@ -542,6 +562,9 @@ class LimitsReport(BaseModel):
     limited_correct: int
     over_deadline_ms: int
     """Runs that took longer than the 30 s default total deadline."""
+    truncated: list[LimitCase] = Field(default_factory=list)
+    """Graph runs whose answer was cut off by the deadline (`is_deadline_truncated`), listed apart
+    from refusals (spec EVAL-0)."""
 
 
 def limits_report(
@@ -558,6 +581,7 @@ def limits_report(
             total_ms=r.total_ms,
             score=scores.get(r.qid) if r.answerable else None,
             answered=r.answered,
+            truncated=is_deadline_truncated(r),
         )
         for r in agentic
         if r.stop_reason or r.coverage_unconfirmed
@@ -574,6 +598,7 @@ def limits_report(
         limited_answerable=len(limited),
         limited_correct=sum(1 for c in limited if (c.score or 0) >= CORRECT),
         over_deadline_ms=sum(1 for r in agentic if r.total_ms > DEADLINE_MS),
+        truncated=[c for c in cases if c.truncated],
     )
 
 

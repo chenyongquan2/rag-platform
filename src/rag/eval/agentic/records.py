@@ -137,6 +137,39 @@ class JudgeLine(BaseModel):
     prompt_version: str = ""
 
 
+def is_deadline_truncated(record: SystemRecord) -> bool:
+    """The graph's answer was cut off by the total deadline (spec EVAL-0).
+
+    The graph stopped with `stop_reason == "deadline"` before the answer step ran (no `answer`
+    in `steps_ms`), yet `compose_result` stored `not_found` with no `generation_error`, which
+    looks like a refusal. A `deadline` stop *with* an answer step is a real refusal. Decided at
+    read time from the stored fields, so records written before EVAL-0 are classified too.
+    """
+    return (
+        record.system == "agentic"
+        and record.stop_reason == "deadline"
+        and record.status == "not_found"
+        and "answer" not in record.steps_ms
+    )
+
+
+def retry_reason(record: SystemRecord) -> str | None:
+    """Why `--retry-errors` runs this question again, or `None` when the record is final:
+    `error` (the run crashed), `generation_error` (the answer model failed, e.g. `llm_timeout`),
+    `deadline_truncated` (see `is_deadline_truncated`)."""
+    if record.status == "error":
+        return "error"
+    if record.generation_error:
+        return "generation_error"
+    if is_deadline_truncated(record):
+        return "deadline_truncated"
+    return None
+
+
+def is_retryable(record: SystemRecord) -> bool:
+    return retry_reason(record) is not None
+
+
 def system_file(out_dir: str | Path, system: str) -> Path:
     return Path(out_dir) / system / RECORDS_NAME
 
@@ -208,10 +241,13 @@ __all__ = [
     "SystemRecord",
     "append_line",
     "done_qids",
+    "is_deadline_truncated",
+    "is_retryable",
     "judge_file",
     "read_judge_lines",
     "read_records",
     "repair_tail",
+    "retry_reason",
     "system_file",
     "usage_by_profile",
 ]

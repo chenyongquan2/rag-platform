@@ -10,6 +10,7 @@ uv run python -m rag.eval.agentic human-sheet --out DIR [--n 30] [--seed 0]
 uv run python -m rag.eval.agentic project --out DIR [--judge-cny-per-call 0.0014]
 uv run python -m rag.eval.agentic compare --before DIR --after DIR [--md FILE]
 uv run python -m rag.eval.agentic compare-runs --before DIR --after DIR [--system S] [--md FILE]
+uv run python -m rag.eval.agentic classify --out DIR
 
 `run` answers the question sets (public single-hop, two-hop, colloquial, no-answer) by standard
 RAG and/or the real `ask_docs` graph, one question at a time, appending each result to
@@ -22,6 +23,8 @@ once this spec's spend (both systems' records and the judge's lines in DIR) has 
 graph (`--after`) beside the P3-05 records of standard RAG and of the graph (`--before`), on the
 questions the new run has, by group (what happened to the question in P3-05). `compare-runs`
 (spec P3-07) pairs one system's records in `--after` with the same system's in `--before`.
+`classify` (spec EVAL-0) lists, from the stored records alone, the questions `--retry-errors` would
+run again (errors, generation errors such as `llm_timeout`, answers cut off by the total deadline).
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ from rag.eval.agentic.records import (
     judge_file,
     read_judge_lines,
     read_records,
+    retry_reason,
     system_file,
 )
 from rag.eval.agentic.report import project_cost, render_report
@@ -381,6 +385,29 @@ def _compare_runs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _classify(args: argparse.Namespace) -> int:
+    """Read-time classification of stored records (spec EVAL-0); calls no model, runs nothing."""
+    out = _out(args)
+    found = False
+    for system in SYSTEMS:
+        records = read_records(system_file(out, system))
+        if not records:
+            continue
+        found = True
+        by_reason: dict[str, list[str]] = {}
+        for record in records:
+            if (reason := retry_reason(record)) is not None:
+                by_reason.setdefault(reason, []).append(record.qid)
+        retryable = sum(len(ids) for ids in by_reason.values())
+        print(f"{system}: {len(records)} records, retryable {retryable}")
+        for reason in ("error", "generation_error", "deadline_truncated"):
+            if reason in by_reason:
+                print(f"  {reason}: {', '.join(by_reason[reason])}")
+    if not found:
+        raise UsageError(f"no records under {out}")
+    return 0
+
+
 def _project(args: argparse.Namespace) -> int:
     out = _out(args)
     pilot = _all_records(out)
@@ -426,7 +453,8 @@ def _parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--retry-errors",
         action="store_true",
-        help="run again the questions whose record is an error",
+        help="run again the questions whose record is an error, a generation error (e.g. a "
+        "model timeout) or an answer cut off by the total deadline",
     )
     p_run.add_argument("--max-cny", type=float, default=DEFAULT_MAX_CNY)
     p_run.add_argument(
@@ -466,6 +494,11 @@ def _parser() -> argparse.ArgumentParser:
     p_runs.add_argument("--system", choices=list(SYSTEMS), default="agentic")
     p_runs.add_argument("--md", help="also write the Markdown to this file")
 
+    p_cls = sub.add_parser(
+        "classify", help="list the questions --retry-errors would run again (no model)"
+    )
+    add_out(p_cls)
+
     p_proj = sub.add_parser("project", help="project the cost of the full run from the records")
     p_proj.add_argument("--kb", default="hf_docs")
     p_proj.add_argument("--judge-cny-per-call", type=float, default=0.0014)
@@ -487,6 +520,7 @@ def main(argv: Sequence[str] | None = None, *, settings: ServiceSettings | None 
             "project": _project,
             "compare": _compare,
             "compare-runs": _compare_runs,
+            "classify": _classify,
         }
         return handler[args.command](args)
     except UsageError as exc:

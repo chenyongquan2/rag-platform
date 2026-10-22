@@ -122,6 +122,10 @@ def render_report(records: Sequence[SystemRecord], lines: Sequence[JudgeLine]) -
             "",
             f"Runs that ended in an error (counted as refusals in the first row): "
             f"standard {na.errors.get('standard', 0)}, agentic {na.errors.get('agentic', 0)}.",
+            "",
+            f"Answers cut off by the total deadline (counted as refusals in the first row, not in "
+            f"the clean row; listed below): standard {na.truncated.get('standard', 0)}, "
+            f"agentic {na.truncated.get('agentic', 0)}.",
         ]
         out += [
             "",
@@ -219,8 +223,24 @@ def render_report(records: Sequence[SystemRecord], lines: Sequence[JudgeLine]) -
     out += [
         f"  - {c.qid} ({c.qtype}): rounds {c.rounds}, stop {c.stop_reason}, {c.total_ms / 1000:.1f} s, "
         f"score {c.score}, answered {c.answered}"
+        + (" (cut by the deadline)" if c.truncated else "")
         for c in lim.cases
     ]
+
+    out += [
+        "",
+        "## Answers cut by the deadline",
+        "",
+        "The graph stopped at the total deadline before the answer step ran, and the record says "
+        "`not_found` with no error. That is not a refusal the system chose: it is left out of the "
+        "clean-refusal rows and counted here (spec EVAL-0). An answerable question here has "
+        "judge score 1 (no answer); `--retry-errors` runs these again.",
+        "",
+    ]
+    out += [
+        f"- {c.qid} ({c.qtype}): rounds {c.rounds}, {c.total_ms / 1000:.1f} s, score {c.score}"
+        for c in lim.truncated
+    ] or ["- none"]
 
     out += ["", "## Judge stability (two passes over the same answers)", ""]
     for system in ("standard", "agentic"):

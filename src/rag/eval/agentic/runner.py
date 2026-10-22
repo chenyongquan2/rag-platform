@@ -36,6 +36,7 @@ from rag.eval.agentic.records import (
     SystemName,
     SystemRecord,
     append_line,
+    is_retryable,
     read_records,
     repair_tail,
     usage_by_profile,
@@ -393,10 +394,11 @@ async def _run(
 ) -> RunStats:
     repair_tail(records_path)
     existing = read_records(records_path)
-    if retry_errors and any(r.status == "error" for r in existing):
-        # An errored question counts as done unless asked: drop those records and run them again
-        # (what they cost stays in the ledger; the file no longer counts it).
-        existing = [r for r in existing if r.status != "error"]
+    if retry_errors and any(is_retryable(r) for r in existing):
+        # A failed question counts as done unless asked: an error, a generation error (the answer
+        # model timed out) or an answer cut off by the deadline (spec EVAL-0). Drop those records
+        # and run them again (what they cost stays in the ledger; the file no longer counts it).
+        existing = [r for r in existing if not is_retryable(r)]
         records_path.write_text(
             "".join(r.model_dump_json() + "\n" for r in existing), encoding="utf-8", newline=""
         )
