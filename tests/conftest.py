@@ -38,3 +38,14 @@ def _fresh_gateway_breakers() -> Iterator[None]:
     reset_shared_breakers()
     yield
     reset_shared_breakers()
+
+
+@pytest.fixture(autouse=True)
+def _pinned_budget(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests see the code's default budget (30 CNY, stop at 28), whatever the
+    developer's .env says (the owner raised the stop line to 33 on 2026-10-22). Environment
+    variables win over .env, so pinning them here keeps the tests independent of it."""
+    if request.node.get_closest_marker("unit") is None:
+        return
+    monkeypatch.setenv("BUDGET_CNY", "30")
+    monkeypatch.setenv("BUDGET_STOP_CNY", "28")
