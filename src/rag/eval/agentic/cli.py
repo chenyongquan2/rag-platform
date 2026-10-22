@@ -3,12 +3,13 @@
 
 uv run python -m rag.eval.agentic run --kb hf_docs --out DIR [--system standard|agentic|both]
     [--types T,...] [--take TYPE=N ...] [--qids ID,...] [--deadline-ms MS] [--retry-errors]
-    [--max-cny 5.0] [--index-prefix P]
+    [--max-cny 5.0] [--index-prefix P] [--kb-override SECTION.KEY=VALUE ...]
 uv run python -m rag.eval.agentic judge --out DIR [--runs 2] [--model M] [--concurrency 4]
 uv run python -m rag.eval.agentic report --out DIR [--md FILE]
 uv run python -m rag.eval.agentic human-sheet --out DIR [--n 30] [--seed 0]
 uv run python -m rag.eval.agentic project --out DIR [--judge-cny-per-call 0.0014]
 uv run python -m rag.eval.agentic compare --before DIR --after DIR [--md FILE]
+uv run python -m rag.eval.agentic compare-runs --before DIR --after DIR [--system S] [--md FILE]
 
 `run` answers the question sets (public single-hop, two-hop, colloquial, no-answer) by standard
 RAG and/or the real `ask_docs` graph, one question at a time, appending each result to
@@ -19,17 +20,22 @@ once this spec's spend (both systems' records and the judge's lines in DIR) has 
 `judge` scores the answerable records with the P1-04 judge (1-3 scale), `--runs` passes.
 `report`, `project` and `compare` call no model. `compare` (spec P3-06) sets a new run of the
 graph (`--after`) beside the P3-05 records of standard RAG and of the graph (`--before`), on the
-questions the new run has, by group (what happened to the question in P3-05).
+questions the new run has, by group (what happened to the question in P3-05). `compare-runs`
+(spec P3-07) pairs one system's records in `--after` with the same system's in `--before`.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from rag.agent import AgentHooks, AgentRuntime
 from rag.config import KnowledgeBaseConfig, ServiceSettings, repo_path
@@ -47,6 +53,7 @@ from rag.eval.agentic.records import (
 )
 from rag.eval.agentic.report import project_cost, render_report
 from rag.eval.agentic.runner import REPORTS_ROOT, Tracer, run_agentic, run_standard
+from rag.eval.agentic.runs import compare_runs, render_compare_runs
 from rag.eval.agentic.sets import QTYPES, EvalItem, load_items
 from rag.eval.agentic.subset import compare_subset
 from rag.eval.answer.cli import build_answer_model, build_judge_model
@@ -138,6 +145,52 @@ def _items(args: argparse.Namespace, kb: str) -> list[EvalItem]:
     return items
 
 
+def apply_kb_overrides(
+    cfg: KnowledgeBaseConfig, overrides: Sequence[str] | None
+) -> KnowledgeBaseConfig:
+    """A copy of `cfg` with `section.key=value` set (value read as YAML), validated again; for
+    eval runs only (spec P3-07: `agent.round2_on_not_enough=false`). The kb file is unchanged."""
+    if not overrides:
+        return cfg
+    data = cfg.model_dump()
+    for text in overrides:
+        key, sep, raw = text.partition("=")
+        parts = key.strip().split(".")
+        if not sep or len(parts) < 2:
+            raise UsageError(f"--kb-override takes SECTION.KEY=VALUE, got {text!r}")
+        node = data
+        for part in parts[:-1]:
+            if not isinstance(node.get(part), dict):
+                raise UsageError(f"--kb-override: unknown section {key!r}")
+            node = node[part]
+        if parts[-1] not in node:
+            raise UsageError(f"--kb-override: unknown key {key!r}")
+        node[parts[-1]] = yaml.safe_load(raw)
+    try:
+        return KnowledgeBaseConfig.model_validate(data)
+    except ValueError as exc:
+        raise UsageError(f"--kb-override: {exc}") from exc
+
+
+RUNS_NAME = "runs.jsonl"
+
+
+def _note_run(out: Path, system: str, args: argparse.Namespace, questions: int) -> None:
+    """One line per `run` and system in `out/runs.jsonl`: when, which settings were changed for
+    this run only (`--kb-override`, `--deadline-ms`), how many questions were asked for."""
+    line = {
+        "started": datetime.now(UTC).isoformat(timespec="seconds"),
+        "system": system,
+        "kb": args.kb,
+        "kb_overrides": list(args.kb_override or []),
+        "deadline_ms": args.deadline_ms,
+        "questions": questions,
+    }
+    out.mkdir(parents=True, exist_ok=True)
+    with (out / RUNS_NAME).open("a", encoding="utf-8", newline="") as fh:
+        fh.write(json.dumps(line) + "\n")
+
+
 def _out(args: argparse.Namespace) -> Path:
     return Path(args.out) if args.out else repo_path(REPORTS_ROOT)
 
@@ -161,14 +214,18 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
     if args.max_cny <= 0:
         raise UsageError("--max-cny must be positive")
     cfg, _public = _kb_config(settings, args.kb)
+    cfg = apply_kb_overrides(cfg, args.kb_override)
     items = _items(args, cfg.kb)
     out = _out(args)
     _ledger_check(settings)
     systems = list(SYSTEMS) if args.system == "both" else [args.system]
+    if args.kb_override:
+        print(f"kb overrides for this run: {args.kb_override}")
     retriever = build_retriever(cfg, settings, index_prefix=args.index_prefix)
     try:
         for system in systems:
             path = system_file(out, system)
+            _note_run(out, system, args, len(items))
             before = _spent_in(out, skip=system)
             if system == "standard":
                 stats = asyncio.run(
@@ -303,6 +360,27 @@ def _compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _compare_runs(args: argparse.Namespace) -> int:
+    before, after = Path(args.before), Path(args.after)
+    old = read_records(system_file(before, args.system))
+    new = read_records(system_file(after, args.system))
+    if not old or not new:
+        raise UsageError(f"no {args.system} records under {before if not old else after}")
+    report = compare_runs(
+        old,
+        new,
+        read_judge_lines(judge_file(before)),
+        read_judge_lines(judge_file(after)),
+        system=args.system,
+    )
+    text = render_compare_runs(report)
+    if args.md:
+        Path(args.md).write_text(text, encoding="utf-8", newline="\n")
+        print(f"wrote {args.md}")
+    _echo(text)
+    return 0
+
+
 def _project(args: argparse.Namespace) -> int:
     out = _out(args)
     pilot = _all_records(out)
@@ -351,6 +429,12 @@ def _parser() -> argparse.ArgumentParser:
         help="run again the questions whose record is an error",
     )
     p_run.add_argument("--max-cny", type=float, default=DEFAULT_MAX_CNY)
+    p_run.add_argument(
+        "--kb-override",
+        action="append",
+        metavar="SECTION.KEY=VALUE",
+        help="set one kb config key for this run only (YAML value)",
+    )
     p_run.add_argument("--index-prefix", default="")
     add_out(p_run)
 
@@ -374,6 +458,14 @@ def _parser() -> argparse.ArgumentParser:
     p_cmp.add_argument("--after", required=True, help="records directory of the new graph run")
     p_cmp.add_argument("--md", help="also write the Markdown to this file")
 
+    p_runs = sub.add_parser(
+        "compare-runs", help="one system's new run against an older run (P3-07)"
+    )
+    p_runs.add_argument("--before", required=True, help="records directory of the older run")
+    p_runs.add_argument("--after", required=True, help="records directory of the new run")
+    p_runs.add_argument("--system", choices=list(SYSTEMS), default="agentic")
+    p_runs.add_argument("--md", help="also write the Markdown to this file")
+
     p_proj = sub.add_parser("project", help="project the cost of the full run from the records")
     p_proj.add_argument("--kb", default="hf_docs")
     p_proj.add_argument("--judge-cny-per-call", type=float, default=0.0014)
@@ -394,6 +486,7 @@ def main(argv: Sequence[str] | None = None, *, settings: ServiceSettings | None 
             "human-sheet": _human_sheet,
             "project": _project,
             "compare": _compare,
+            "compare-runs": _compare_runs,
         }
         return handler[args.command](args)
     except UsageError as exc:
