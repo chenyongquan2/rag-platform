@@ -8,6 +8,9 @@ uv run python -m rag.eval.answer judge --answers RUN [--scales 1-5,1-3] [--repea
 uv run python -m rag.eval.answer stability JUDGE_A JUDGE_B [--scale S] [--out FILE]
 uv run python -m rag.eval.answer human-sheet --answers RUN [--n 50] [--seed 0] [--out-dir D]
 uv run python -m rag.eval.answer human-agreement --sheet CSV --key CSV --judge RUN [--out FILE]
+uv run python -m rag.eval.answer rejudge-sheet --sheet CSV --key CSV --judge RUN [--n 15]
+    [--seed 0] [--out-dir D]
+uv run python -m rag.eval.answer rejudge-agreement --sheet CSV --key CSV --earlier CSV
 uv run python -m rag.eval.answer project --answers PILOT [--judge PILOT_JUDGE] [--questions 65]
     [--judge-calls-per-answer 4] [--security-questions 30]
 
@@ -43,6 +46,7 @@ from rag.eval.answer.judge import (
     write_judge_run,
 )
 from rag.eval.answer.record import AnswerRunRecord
+from rag.eval.answer.rejudge import export_rejudge_sheet, rejudge_agreement
 from rag.eval.answer.runner import (
     REPORTS_ROOT,
     ContextSource,
@@ -57,6 +61,7 @@ from rag.eval.answer.runner import (
     write_answer_run,
 )
 from rag.eval.answer.security import PlantedContexts, security_items, security_report
+from rag.eval.calibration import check_gate, render_calibration
 from rag.eval.questions import load_question_set
 from rag.eval.retrieval.cli import UsageError, _echo, _kb_config, _question_file, reranker_revision
 from rag.eval.retrieval.protocol import Retriever
@@ -292,8 +297,29 @@ def _human_agreement(args: argparse.Namespace) -> int:
             f"scale {s.scale}: n {s.n}, weighted kappa {kappa}, Spearman {rho}, "
             f"exact {s.exact.text()}, within one {s.within_one.text()}"
         )
+    if report.binary is not None:
+        print(render_calibration(report.binary, check_gate(report.binary), title="1-3 scale"))
     if args.out:
         Path(args.out).write_text(report.model_dump_json(indent=1) + "\n", encoding="utf-8")
+    return 0
+
+
+def _rejudge_sheet(args: argparse.Namespace) -> int:
+    out_dir = Path(args.out_dir) if args.out_dir else Path(args.sheet).parent / "rejudge"
+    sheet, key = export_rejudge_sheet(
+        args.sheet, args.key, load_judge_run(args.judge), n=args.n, seed=args.seed, out_dir=out_dir
+    )
+    print(f"wrote {sheet} (to fill, blind) and {key} (do not open before scoring)")
+    return 0
+
+
+def _rejudge_agreement(args: argparse.Namespace) -> int:
+    report = rejudge_agreement(args.sheet, args.key, args.earlier)
+    print(f"rows {report.rows}, blank {report.blank}")
+    for s in report.scales.values():
+        print(f"scale {s.scale}: n {s.n}, same {s.same}, changed {len(s.changed)}")
+        for c in s.changed:
+            print(f"  {c.earlier_sample_id}: {c.earlier} -> {c.now}")
     return 0
 
 
@@ -384,6 +410,19 @@ def _parser() -> argparse.ArgumentParser:
     p_agree.add_argument("--judge", required=True, help="judge run directory or results.json")
     p_agree.add_argument("--out", help="also write the report as JSON")
 
+    p_rs = sub.add_parser("rejudge-sheet", help="blind re-score sheet from a filled sheet")
+    p_rs.add_argument("--sheet", required=True, help="the filled sheet")
+    p_rs.add_argument("--key", required=True)
+    p_rs.add_argument("--judge", required=True, help="judge run directory or results.json")
+    p_rs.add_argument("--n", type=int, default=15)
+    p_rs.add_argument("--seed", type=int, default=0)
+    p_rs.add_argument("--out-dir")
+
+    p_ra = sub.add_parser("rejudge-agreement", help="a re-scored sheet against the earlier scores")
+    p_ra.add_argument("--sheet", required=True, help="the re-scored sheet")
+    p_ra.add_argument("--key", required=True, help="rejudge_key.csv")
+    p_ra.add_argument("--earlier", required=True, help="the earlier filled sheet")
+
     p_proj = sub.add_parser("project", help="project the full cost from a pilot")
     p_proj.add_argument("--answers", required=True, help="pilot answer run")
     p_proj.add_argument("--judge", help="pilot judge run (its CNY per call)")
@@ -406,6 +445,8 @@ def main(argv: Sequence[str] | None = None, *, settings: ServiceSettings | None 
             "stability": _stability,
             "human-sheet": _human_sheet,
             "human-agreement": _human_agreement,
+            "rejudge-sheet": _rejudge_sheet,
+            "rejudge-agreement": _rejudge_agreement,
             "project": _project,
         }[args.command]
         return command_no_settings(args)

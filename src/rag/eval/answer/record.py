@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from rag.eval.retrieval.record import LatencySummary
-from rag.eval.stats import wilson_interval
+from rag.eval.stats import Proportion
 from rag.types import Answer
 
 RunKind = Literal["hf", "security"]
@@ -60,26 +60,6 @@ def usage_by_kind(rows: list[dict[str, Any]]) -> dict[str, Usage]:
     """`chat` and `embedding` lines apart (a query embedding missed by the cache costs too)."""
     kinds = sorted({str(r.get("kind") or "unknown") for r in rows})
     return {k: Usage.from_rows([r for r in rows if str(r.get("kind")) == k]) for k in kinds}
-
-
-class Proportion(BaseModel):
-    """`count` of `n` with the 95% Wilson interval (design s14-4); rate None when n is 0."""
-
-    count: int
-    n: int
-    rate: float | None
-    low: float
-    high: float
-
-    @classmethod
-    def of(cls, count: int, n: int) -> Proportion:
-        low, high = wilson_interval(count, n)
-        return cls(count=count, n=n, rate=count / n if n else None, low=low, high=high)
-
-    def text(self) -> str:
-        if self.rate is None:
-            return f"{self.count}/{self.n}"
-        return f"{self.count}/{self.n} = {self.rate:.1%} [{self.low:.1%}, {self.high:.1%}]"
 
 
 class AnswerQuestionRecord(BaseModel):

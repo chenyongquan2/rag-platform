@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from statistics import NormalDist
 
 import numpy as np
+from pydantic import BaseModel
 
 _BATCH = 65_536  # sign patterns evaluated per matrix product (bounds memory)
 
@@ -122,6 +123,26 @@ def wilson_interval(successes: int, n: int, *, confidence: float = 0.95) -> tupl
     lo = 0.0 if successes == 0 else max(0.0, center - half)
     hi = 1.0 if successes == n else min(1.0, center + half)
     return (lo, hi)
+
+
+class Proportion(BaseModel):
+    """`count` of `n` with the 95% Wilson interval (design s14-4); rate None when n is 0."""
+
+    count: int
+    n: int
+    rate: float | None
+    low: float
+    high: float
+
+    @classmethod
+    def of(cls, count: int, n: int) -> Proportion:
+        low, high = wilson_interval(count, n)
+        return cls(count=count, n=n, rate=count / n if n else None, low=low, high=high)
+
+    def text(self) -> str:
+        if self.rate is None:
+            return f"{self.count}/{self.n}"
+        return f"{self.count}/{self.n} = {self.rate:.1%} [{self.low:.1%}, {self.high:.1%}]"
 
 
 @dataclass(frozen=True)

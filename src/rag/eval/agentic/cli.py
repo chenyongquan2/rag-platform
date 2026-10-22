@@ -6,7 +6,10 @@ uv run python -m rag.eval.agentic run --kb hf_docs --out DIR [--system standard|
     [--max-cny 5.0] [--index-prefix P] [--kb-override SECTION.KEY=VALUE ...]
 uv run python -m rag.eval.agentic judge --out DIR [--runs 2] [--model M] [--concurrency 4]
 uv run python -m rag.eval.agentic report --out DIR [--md FILE]
-uv run python -m rag.eval.agentic human-sheet --out DIR [--n 30] [--seed 0]
+uv run python -m rag.eval.agentic human-sheet --out DIR [--n 30] [--seed 0] [--min-non-full 10]
+    [--out-dir D]
+uv run python -m rag.eval.agentic human-agreement --out DIR --sheet CSV [--key CSV] [--run 1]
+    [--source human|ai-prescore] [--md FILE]
 uv run python -m rag.eval.agentic project --out DIR [--judge-cny-per-call 0.0014]
 uv run python -m rag.eval.agentic compare --before DIR --after DIR [--md FILE]
 uv run python -m rag.eval.agentic compare-runs --before DIR --after DIR [--system S] [--md FILE]
@@ -44,7 +47,13 @@ from rag.agent import AgentHooks, AgentRuntime
 from rag.config import KnowledgeBaseConfig, ServiceSettings, repo_path
 from rag.cost import CostLedger
 from rag.eval.agentic.analysis import judge_scores
-from rag.eval.agentic.human import export_human_sheet
+from rag.eval.agentic.human import (
+    agentic_agreement,
+    check_gate,
+    count_non_full,
+    export_human_sheet,
+    render_sheet_agreement,
+)
 from rag.eval.agentic.judging import judge_records
 from rag.eval.agentic.records import (
     SYSTEMS,
@@ -325,14 +334,42 @@ def _report(args: argparse.Namespace) -> int:
 
 def _human_sheet(args: argparse.Namespace) -> int:
     out = _out(args)
+    lines = read_judge_lines(judge_file(out))
     sheet, key = export_human_sheet(
         _all_records(out),
         n=args.n,
         seed=args.seed,
-        out_dir=out / "human",
-        lines=read_judge_lines(judge_file(out)),
+        out_dir=Path(args.out_dir) if args.out_dir else out / "human",
+        lines=lines,
+        min_non_full=args.min_non_full,
     )
     print(f"wrote {sheet} (to fill, blind) and {key} (do not open before scoring)")
+    low = count_non_full(key, lines)
+    print(f"non-full answers in the sheet (the judge's first pass scored 1 or 2): {low}")
+    if low < args.min_non_full:
+        print(
+            f"warning: fewer than the {args.min_non_full} wanted; no more such answers to add",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _human_agreement(args: argparse.Namespace) -> int:
+    out = _out(args)
+    sheet = Path(args.sheet)
+    key = Path(args.key) if args.key else out / "human" / "human_key.csv"
+    for path in (sheet, key):
+        if not path.is_file():
+            raise UsageError(f"no such file: {path}")
+    result = agentic_agreement(sheet, key, read_judge_lines(judge_file(out)), run=args.run)
+    gate = check_gate(result.binary)
+    text = render_sheet_agreement(
+        result, gate, source=args.source, title="Judge against the sheet's scores"
+    )
+    if args.md:
+        Path(args.md).write_text(text, encoding="utf-8", newline="\n")
+        print(f"wrote {args.md}")
+    _echo(text)
     return 0
 
 
@@ -479,7 +516,29 @@ def _parser() -> argparse.ArgumentParser:
     p_sheet = sub.add_parser("human-sheet", help="blind sheet for human scores")
     p_sheet.add_argument("--n", type=int, default=30)
     p_sheet.add_argument("--seed", type=int, default=0)
+    p_sheet.add_argument(
+        "--min-non-full",
+        type=int,
+        default=10,
+        help="add rows until the sheet holds this many answers the judge scored 1 or 2",
+    )
+    p_sheet.add_argument("--out-dir", help="write the sheet here (default: DIR/human)")
     add_out(p_sheet)
+
+    p_agree = sub.add_parser(
+        "human-agreement", help="judge against a filled sheet (TPR, TNR, kappa)"
+    )
+    p_agree.add_argument("--sheet", required=True, help="the filled sheet")
+    p_agree.add_argument("--key", help="key file (default: DIR/human/human_key.csv)")
+    p_agree.add_argument("--run", type=int, default=1, help="judge pass to compare (default 1)")
+    p_agree.add_argument(
+        "--source",
+        choices=["human", "ai-prescore"],
+        default="human",
+        help="who scored the sheet; ai-prescore is labelled as not independent",
+    )
+    p_agree.add_argument("--md", help="also write the Markdown to this file")
+    add_out(p_agree)
 
     p_cmp = sub.add_parser("compare", help="a new graph run beside the P3-05 records (P3-06)")
     p_cmp.add_argument("--before", required=True, help="P3-05 records directory")
@@ -517,6 +576,7 @@ def main(argv: Sequence[str] | None = None, *, settings: ServiceSettings | None 
         handler = {
             "report": _report,
             "human-sheet": _human_sheet,
+            "human-agreement": _human_agreement,
             "project": _project,
             "compare": _compare,
             "compare-runs": _compare_runs,

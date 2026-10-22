@@ -177,3 +177,46 @@ def test_human_agreement_from_filled_sheet(tmp_path: Path) -> None:
     other = judge.model_copy(update={"answer_run_id": "different"})
     with pytest.raises(ValueError):
         human_agreement(sheet, key, other)
+
+
+def test_human_agreement_reports_binary_rates(tmp_path: Path) -> None:
+    run = _run(12)
+    sheet, key = export_human_sheet(run, n=12, seed=0, out_dir=tmp_path)
+    rows, keys = _read(sheet), _read(key)
+    qid_of = {k["sample_id"]: k["qid"] for k in keys}
+    judge3 = {f"q{i:03d}": (1, 2, 3)[i % 3] for i in range(12)}
+    human3 = dict(judge3)
+    # One answer the judge scored 3 is 2 for the human; one the judge scored 1 is 3.
+    q_lenient = next(q for q, s in judge3.items() if s == 3)
+    q_strict = next(q for q, s in judge3.items() if s == 1)
+    human3[q_lenient], human3[q_strict] = 2, 3
+    for row in rows:
+        qid = qid_of[row["sample_id"]]
+        row["score_1_5"], row["score_1_3"] = "3", str(human3[qid])
+    with sheet.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=SHEET_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+    scores = [JudgeScore(qid=q, scale="1-5", score=3) for q in judge3]
+    scores += [JudgeScore(qid=q, scale="1-3", score=s) for q, s in judge3.items()]
+    judge = JudgeRun(
+        run_id="j",
+        created_at="t",
+        answer_run_id="answers-1",
+        kb="hf_docs",
+        judge_model="m",
+        prompt_version=JUDGE_PROMPT_VERSION,
+        config=JudgeConfig(model="m"),
+        scales=["1-5", "1-3"],
+        scores=scores,
+        summary=summarize_scores(scores, ["1-5", "1-3"]),
+    )
+    binary = human_agreement(sheet, key, judge).binary
+    assert binary is not None and binary.n == 12
+    # Human 3: four answers (3 of them judge 3, one judge 1); human 1 or 2: eight answers.
+    human_full = [q for q, s in human3.items() if s == 3]
+    assert binary.human_full == len(human_full) == 4
+    assert binary.tpr.count == sum(judge3[q] == 3 for q in human_full) == 3
+    bad = [q for q, s in human3.items() if s != 3]
+    assert binary.tnr.count == sum(judge3[q] != 3 for q in bad) == 7 and binary.tnr.n == 8
+    assert len(binary.disagreements) == 2

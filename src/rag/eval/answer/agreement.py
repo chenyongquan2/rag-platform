@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from rag.eval.answer.judge import SCALES, JudgeRun
 from rag.eval.answer.record import AnswerRunRecord, Proportion
+from rag.eval.calibration import BinaryAgreement, CalibrationItem, calibrate
 from rag.eval.stats import spearman, weighted_kappa
 
 SHEET_COLUMNS = [
@@ -56,6 +57,7 @@ score_1_3:
 Score every row on both scales, or leave both cells of a row empty to skip it.
 Do not open human_key.csv before you are done.
 """
+RUBRIC_TEXT = _RUBRIC
 
 
 def export_human_sheet(
@@ -114,6 +116,8 @@ class AgreementReport(BaseModel):
     rows: int
     blank: int
     scales: dict[str, ScaleAgreement]
+    binary: BinaryAgreement | None = None
+    """Full (3) against not full (1 or 2) on the 1-3 scale: TPR, TNR, kappa, disagreements."""
 
 
 def _read(path: Path) -> list[dict[str, str]]:
@@ -145,6 +149,7 @@ def human_agreement(sheet: str | Path, key: str | Path, judge: JudgeRun) -> Agre
             f"{judge.answer_run_id!r}"
         )
     pairs: dict[str, list[tuple[int, int]]] = {s: [] for s in judge.scales}
+    labels: dict[str, list[str]] = {s: [] for s in judge.scales}
     blank = 0
     for row in rows:
         sample_id = row["sample_id"]
@@ -162,6 +167,7 @@ def human_agreement(sheet: str | Path, key: str | Path, judge: JudgeRun) -> Agre
             )
             if machine is not None:
                 pairs[scale].append((machine, human))
+                labels[scale].append(sample_id)
         blank += not filled
     scales: dict[str, ScaleAgreement] = {}
     for scale, values in pairs.items():
@@ -176,6 +182,14 @@ def human_agreement(sheet: str | Path, key: str | Path, judge: JudgeRun) -> Agre
             exact=Proportion.of(sum(x == y for x, y in values), len(values)),
             within_one=Proportion.of(sum(abs(x - y) <= 1 for x, y in values), len(values)),
         )
+    binary = None
+    if pairs.get("1-3"):
+        binary = calibrate(
+            [
+                CalibrationItem(label=label, human=human, judge=machine)
+                for label, (machine, human) in zip(labels["1-3"], pairs["1-3"], strict=True)
+            ]
+        )
     return AgreementReport(
         answer_run_id=judge.answer_run_id,
         judge_run_id=judge.run_id,
@@ -184,4 +198,5 @@ def human_agreement(sheet: str | Path, key: str | Path, judge: JudgeRun) -> Agre
         rows=len(rows),
         blank=blank,
         scales=scales,
+        binary=binary,
     )
