@@ -32,7 +32,7 @@ Multi-knowledge-base RAG platform. The design is fixed in `docs/design/rag-platf
 
 - Gateway: OpenAI-compatible, base URLs and keys in `.env` (`LLM_BASE_URL`, `LLM_API_KEY`, `EMBED_BASE_URL`, `EMBED_API_KEY`).
 - Embedding model id is `qwen/text-embedding-v4` (plain `text-embedding-v4` returns 503). Chat model: `deepseek-v4-flash` (the cheapest; the gateway routes it to `deepseek-v4.1-flash`, a reasoning model — budget for reasoning tokens).
-- Every real model call appends a line to the cost ledger (`data/cost/ledger.jsonl`). **Budget for the current overnight run: 30 CNY total.** Before any job that calls real models, sum the ledger; if spent + estimated cost > 28 CNY, do not run it — switch to the fake models and leave the real run for the owner.
+- Every real model call appends a line to the cost ledger (`data/cost/ledger.jsonl`). **Budget: 35 CNY total; the owner raised the stop line to 33 CNY on 2026-10-22 for P7 (scaled down), the 150-question re-run and the citation comparison.** Before any job that calls real models, sum the ledger; if spent + estimated cost > 33 CNY, do not run it — switch to the fake models and leave the real run for the owner.
 - If the gateway is unreachable or errors persistently, switch that work to fakes, record it in `docs/progress.md`, and move on to specs that need no model.
 
 ## Git
