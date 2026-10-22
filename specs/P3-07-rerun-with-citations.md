@@ -1,6 +1,6 @@
 # P3-07 Full 150-question re-run with citation check
 
-Status: in progress
+Status: review
 Phase: P3
 Depends on: P3-05 (harness, questions, old records), P3-06 (graph fixes), P1-06 (citation check level 2), P1-04 (answer judge)
 Design sections: s13-5, s11-2, s14-4, s14-1, s14-3
@@ -37,20 +37,21 @@ table per system, with machine load recorded.
 - `run --kb-override SECTION.KEY=VALUE` (eval only; e.g. `agent.round2_on_not_enough=false`).
 
 ## Acceptance criteria
-- [ ] AC1 A graph record keeps answer sentences and cited chunks (ids among the answer's sources) and
+- [x] AC1 A graph record keeps answer sentences and cited chunks (ids among the answer's sources) and
   the P1-06 loader makes a judgeable item of both systems — `tests/unit/test_eval_agentic_rerun.py::test_agentic_record_keeps_sentence_citations`
-- [ ] AC2 `compare_runs`: per type, correct counts before/after, improved/worsened and McNemar p on
+- [x] AC2 `compare_runs`: per type, correct counts before/after, improved/worsened and McNemar p on
   shared qids; refusal on no-answer; cost and latency median/P95 — `test_compare_runs_per_type`
-- [ ] AC3 CLI `compare-runs` writes the Markdown — `test_compare_runs_cli`
-- [ ] AC4 `--kb-override` sets only the named key on a copy, re-validates, rejects unknown keys — `test_kb_override`
+- [x] AC3 CLI `compare-runs` writes the Markdown — `test_compare_runs_cli`
+- [x] AC4 `--kb-override` sets only the named key on a copy, re-validates, rejects unknown keys — `test_kb_override`
 
 Also (by running, `llm`): pilot, full run, judge, citation check, report in `docs/reports/P3-report.md` section 5.
 
 ## Out of scope
 Changing agent code or defaults (bugs go to findings); human scores; judge prompt changes.
 
-## Handoff (filled at the end)
-- Files:
-- Decisions:
-- Open issues:
-- Review rounds:
+## Handoff
+- Files: `src/rag/eval/agentic/runs.py` (new), `src/rag/eval/agentic/cli.py` (`compare-runs`, `--kb-override`), `tests/unit/test_eval_agentic_rerun.py` (4 tests), `docs/reports/P3-report.md` section 5, `docs/decisions.md` (P3-07). Raw records in git-ignored `data/reports/p3-07{,-retry,-round2off}/` (copy in `C:/workspace/rag-platform-data/p3-07/`).
+- Decisions: ES and Redis containers were stopped and were started with `docker start` (no recreate); A's cold pilot (8/10 rerank timeouts right after the start) set aside and A re-run; judge and citation check one pass each (budget); the 4 A questions lost to `llm_timeout` re-asked separately as a reference only; `round2_on_not_enough=false` only on the 24 questions it changes. AC1 passed at once: the runner already filled both fields for both systems (characterization test).
+- Results: answerable correct A 89/100, B 92/100 (p = 0.45); all 4 single-hop gains of B are A's answer-model timeouts; without the 7 questions either run broke, A 87/93, B 88/93. Refusal 50/50 both. Citation precision 89.7% vs 92.4%, recall 96.0% vs 96.4%, every sentence supported 91.3% vs 92.5% (paired p = 1.0). B 0.0092 vs A 0.0039 CNY per question; P50 9.2 vs 7.2 s, P95 25.9 vs 13.2 s. B vs P3-05 B: errors 5 -> 0, cost 0.0162 -> 0.0092, P95 20.9 -> 25.9 s, correct 93 -> 92. Round 2 off on 24 no-answer questions: refusal unchanged, median 20.0 -> 2.8 s.
+- Open issues: (1) an answer cancelled by the 30 s deadline is reported as `not_found` without an error (two_hop:04, :14); (2) `llm_timeout` answers are `not_found`, `--retry-errors` misses them; (3) warm-up needed after an ES start; (4) `test_cost.py::test_cli_summary_prints_totals` reads `.env`; (5) no-answer questions still the slow, costly class. Spend 3.04 CNY of 3.5 (ledger 26.58 -> 29.62).
+- Review rounds: none yet.
