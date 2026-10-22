@@ -21,7 +21,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from langchain_core.language_models import BaseChatModel
 
@@ -210,14 +210,6 @@ async def run_answer_eval(
         )
     config = kb_config.model_dump(mode="json")
     config_json = json.dumps(config, sort_keys=True, separators=(",", ":"))
-    total = Usage()
-    for r in records:
-        total = total + r.usage
-    kinds: dict[str, Usage] = {}
-    for r in records:
-        for name, usage in r.usage_by_kind.items():
-            kinds[name] = kinds.get(name, Usage()) + usage
-    answered = [r for r in records if r.error is None]
     return AnswerRunRecord(
         **provenance.model_dump(),
         run_id=make_run_id(kb_config.kb, label, now),
@@ -229,15 +221,69 @@ async def run_answer_eval(
         kb_config_sha256=hashlib.sha256(config_json.encode("utf-8")).hexdigest(),
         chat_model=chat_model,
         question_set=dict(question_set or {"count": len(items)}),
-        questions=records,
-        compliance=format_compliance(records),
-        usage=total,
-        usage_by_kind=dict(sorted(kinds.items())),
-        latency={
+        **_derived(records),
+    )
+
+
+def _derived(records: list[AnswerQuestionRecord]) -> dict[str, Any]:
+    """The run fields computed from the question records."""
+    total = Usage()
+    for r in records:
+        total = total + r.usage
+    kinds: dict[str, Usage] = {}
+    for r in records:
+        for name, usage in r.usage_by_kind.items():
+            kinds[name] = kinds.get(name, Usage()) + usage
+    answered = [r for r in records if r.error is None]
+    return {
+        "questions": records,
+        "compliance": format_compliance(records),
+        "usage": total,
+        "usage_by_kind": dict(sorted(kinds.items())),
+        "latency": {
             "retrieval": latency_summary([r.retrieval_ms for r in records]),
             "generation": latency_summary([r.generation_ms for r in answered]),
             "total": latency_summary([r.total_ms for r in records]),
         },
+    }
+
+
+def gateway_error_items(run: AnswerRunRecord) -> list[AnswerItem]:
+    """The questions of `run` whose answer call failed at the gateway (timeout, error)."""
+    return [
+        AnswerItem(
+            qid=q.qid, question=q.question, reference=q.reference, relevant_pages=q.relevant_pages
+        )
+        for q in run.questions
+        if q.generation_error is not None
+    ]
+
+
+def merge_retried(
+    original: AnswerRunRecord,
+    retried: Sequence[AnswerQuestionRecord],
+    *,
+    label: str,
+    now: datetime | None = None,
+) -> AnswerRunRecord:
+    """`original` with the records of `retried` in place of the same question ids (spec P7-01).
+
+    The question order, provenance and config stay those of `original`; the run id, label and
+    the summaries are new. The failed first attempts are not counted in the usage (the cost
+    ledger has them)."""
+    now = (now or datetime.now(UTC)).astimezone(UTC)
+    by_qid = {r.qid: r for r in retried}
+    unknown = sorted(set(by_qid) - {q.qid for q in original.questions})
+    if unknown:
+        raise KeyError(f"not in {original.run_id}: {unknown}")
+    records = [by_qid.get(q.qid, q) for q in original.questions]
+    return original.model_copy(
+        update={
+            "run_id": make_run_id(original.kb, label, now),
+            "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "label": label,
+            **_derived(records),
+        }
     )
 
 

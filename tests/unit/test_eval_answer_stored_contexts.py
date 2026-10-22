@@ -101,3 +101,80 @@ def test_cli_contexts_from_skips_the_retriever(
     second = load_answer_run(second_dir)
     assert second.questions[0].context_chunk_ids == ["hf_docs:a.md#0"]
     assert second.questions[0].found and second.questions[0].cited_chunk_ids == ["hf_docs:a.md#0"]
+
+
+def test_retry_errors_answers_only_the_failed_questions_and_merges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    qfile = tmp_path / "questions.jsonl"
+    save_question_set(
+        [
+            LabeledQuestion(qid="q1", question="How to log in?", answer="Use login."),
+            LabeledQuestion(qid="q2", question="Where are logs?", answer="In logs/."),
+        ],
+        qfile,
+    )
+    retriever = FakeRetriever(
+        {
+            "How to log in?": RetrievalResult(
+                request_id="r", kb="hf_docs", chunks=[_chunk("a.md")]
+            ),
+            "Where are logs?": RetrievalResult(
+                request_id="r", kb="hf_docs", chunks=[_chunk("b.md")]
+            ),
+        }
+    )
+    monkeypatch.setattr(cli, "build_retriever", lambda cfg, settings, **kw: retriever)
+    models: list[StreamingFakeChatModel] = []
+
+    def build_model(settings: Any) -> StreamingFakeChatModel:
+        models.append(StreamingFakeChatModel(responses=["First [1].", "Second [1]."]))
+        return models[-1]
+
+    monkeypatch.setattr(cli, "build_answer_model", build_model)
+    settings = ServiceSettings(
+        chat_backend="fake",
+        otel_mode="off",
+        business_record_path="",
+        log_dir="",
+        cost_ledger_path=str(tmp_path / "ledger.jsonl"),
+    )
+    out = tmp_path / "out"
+    common = ["run", "--kb", "hf_docs", "--questions", str(qfile), "--out-dir", str(out)]
+    assert cli.main([*common, "--label", "first"], settings=settings) == 0
+    first_dir = next((out / "answers").iterdir())
+    first = load_answer_run(first_dir)
+    # q2's answer call failed at the gateway in the stored run
+    broken = first.model_copy(
+        update={
+            "questions": [
+                first.questions[0],
+                first.questions[1].model_copy(
+                    update={"generation_error": "llm_timeout", "found": False, "text": ""}
+                ),
+            ]
+        }
+    )
+    (first_dir / "results.json").write_text(broken.model_dump_json(), encoding="utf-8")
+
+    assert (
+        cli.main(
+            [*common, "--contexts-from", str(first_dir), "--retry-errors", "--label", "fixed"],
+            settings=settings,
+        )
+        == 0
+    )
+    assert len(models[-1].calls) == 1  # only q2 was answered again
+    fixed_dir = next(p for p in (out / "answers").iterdir() if p.name.endswith("_fixed"))
+    fixed = load_answer_run(fixed_dir)
+    assert [q.qid for q in fixed.questions] == ["q1", "q2"]
+    assert fixed.questions[0] == first.questions[0]  # kept as stored
+    assert fixed.questions[1].generation_error is None and fixed.questions[1].found
+    assert fixed.compliance.generation_errors == 0
+
+
+def test_retry_errors_needs_contexts_from(tmp_path: Path) -> None:
+    settings = ServiceSettings(
+        chat_backend="fake", otel_mode="off", business_record_path="", log_dir=""
+    )
+    assert cli.main(["run", "--kb", "hf_docs", "--retry-errors"], settings=settings) == 2

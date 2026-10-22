@@ -14,7 +14,9 @@ is the owner's decision.
 ## Interface
 - `rag.eval.answer.runner.StoredContexts(run)`: a `ContextSource` that gives each question the chunks an earlier
   answer run gave it (same fragments, same order), so two chat models are compared on identical contexts.
-- CLI `python -m rag.eval.answer run ... --contexts-from RUN` uses it instead of the retriever.
+- CLI `python -m rag.eval.answer run ... --contexts-from RUN` uses it instead of the retriever; with
+  `--retry-errors` only RUN's gateway errors are answered again (`gateway_error_items`) and merged into a new run
+  (`merge_retried`): the gateway timed out on connect for some calls, which says nothing about a model.
 - `rag.eval.answer.pairing`: `PairedOutcome` (one question of one system: judge score, found, fully cited, citation
   recall, latency, CNY), `paired_answer_table(base, candidate)` (McNemar on score 3 and on fully cited, permutation
   on judge score and citation recall, medians and means) and `render_paired_answers(...)`.
@@ -26,6 +28,8 @@ Code (unit tests):
 - [ ] AC1 `StoredContexts` returns the stored chunks in order and the stored not-found flag; an unknown question id
   raises — `tests/unit/test_eval_answer_stored_contexts.py::test_stored_contexts_replay_chunks_and_not_found`, `::test_unknown_qid_raises`
 - [ ] AC2 `answer run --contexts-from` answers from the stored run and never builds a retriever — `tests/unit/test_eval_answer_stored_contexts.py::test_cli_contexts_from_skips_the_retriever`
+- [ ] AC2b `answer run --contexts-from RUN --retry-errors` answers again only RUN's gateway errors and writes the
+  merged run; without `--contexts-from` it is a usage error — `tests/unit/test_eval_answer_stored_contexts.py::test_retry_errors_answers_only_the_failed_questions_and_merges`, `::test_retry_errors_needs_contexts_from`
 - [ ] AC3 The paired table counts better and worse per binary metric with the exact McNemar p and runs the permutation
   test on the continuous ones, on the common question ids only — `tests/unit/test_eval_answer_pairing.py::test_paired_table_counts_and_tests`
 - [ ] AC4 The rendered table names both systems, n, every metric with its p, latency and CNY per question — `tests/unit/test_eval_answer_pairing.py::test_render_has_metrics_p_latency_cost`

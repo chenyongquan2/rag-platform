@@ -1,7 +1,7 @@
 """Command line of the answer eval (spec P1-04).
 
 uv run python -m rag.eval.answer run --kb hf_docs [--questions P] [--limit N] [--label L]
-    [--index-prefix P] [--contexts-from RUN] [--out-dir D]
+    [--index-prefix P] [--contexts-from RUN [--retry-errors]] [--out-dir D]
 uv run python -m rag.eval.answer security [--set DIR] [--tokenizer model|whitespace] [--label L]
 uv run python -m rag.eval.answer judge --answers RUN [--scales 1-5,1-3] [--repeat 1]
     [--model M] [--concurrency 4] [--label L]
@@ -48,8 +48,10 @@ from rag.eval.answer.runner import (
     ContextSource,
     RetrieverContexts,
     StoredContexts,
+    gateway_error_items,
     items_from_question_set,
     load_answer_run,
+    merge_retried,
     render_answer_summary,
     run_answer_eval,
     write_answer_run,
@@ -137,8 +139,14 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
     print(_spent(settings))
     retriever: Retriever | None = None
     contexts: ContextSource
-    if args.contexts_from:
-        contexts = StoredContexts(load_answer_run(args.contexts_from))
+    stored = load_answer_run(args.contexts_from) if args.contexts_from else None
+    if args.retry_errors:
+        if stored is None:
+            raise UsageError("--retry-errors needs --contexts-from RUN (the run to repair)")
+        items = gateway_error_items(stored)
+        print(f"retrying {len(items)} gateway errors of {stored.run_id}")
+    if stored is not None:
+        contexts = StoredContexts(stored)
     else:
         retriever = build_retriever(cfg, settings, index_prefix=args.index_prefix)
         contexts = RetrieverContexts(retriever, kb=cfg.kb, top_k=cfg.retrieval.final_k)
@@ -165,6 +173,8 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
         close = getattr(retriever, "close", None)
         if callable(close):
             close()
+    if args.retry_errors and stored is not None:
+        run = merge_retried(stored, run.questions, label=args.label or f"{stored.label}-retried")
     out = write_answer_run(run, _out_root(args))
     _print_run(run, out)
     print(_spent(settings))
@@ -331,6 +341,11 @@ def _parser() -> argparse.ArgumentParser:
         "--contexts-from",
         metavar="RUN",
         help="answer from the chunks of this earlier answer run instead of retrieving (P7-01)",
+    )
+    p_run.add_argument(
+        "--retry-errors",
+        action="store_true",
+        help="with --contexts-from: answer again only its gateway errors, write the merged run",
     )
     p_run.add_argument("--out-dir", help=f"default {REPORTS_ROOT}")
 
