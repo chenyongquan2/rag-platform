@@ -9,6 +9,7 @@ uv run python -m rag.eval.agentic report --out DIR [--md FILE]
 uv run python -m rag.eval.agentic human-sheet --out DIR [--n 30] [--seed 0]
 uv run python -m rag.eval.agentic project --out DIR [--judge-cny-per-call 0.0014]
 uv run python -m rag.eval.agentic compare --before DIR --after DIR [--md FILE]
+uv run python -m rag.eval.agentic compare-runs --before DIR --after DIR [--system S] [--md FILE]
 
 `run` answers the question sets (public single-hop, two-hop, colloquial, no-answer) by standard
 RAG and/or the real `ask_docs` graph, one question at a time, appending each result to
@@ -19,7 +20,8 @@ once this spec's spend (both systems' records and the judge's lines in DIR) has 
 `judge` scores the answerable records with the P1-04 judge (1-3 scale), `--runs` passes.
 `report`, `project` and `compare` call no model. `compare` (spec P3-06) sets a new run of the
 graph (`--after`) beside the P3-05 records of standard RAG and of the graph (`--before`), on the
-questions the new run has, by group (what happened to the question in P3-05).
+questions the new run has, by group (what happened to the question in P3-05). `compare-runs`
+(spec P3-07) pairs one system's records in `--after` with the same system's in `--before`.
 """
 
 from __future__ import annotations
@@ -47,6 +49,7 @@ from rag.eval.agentic.records import (
 )
 from rag.eval.agentic.report import project_cost, render_report
 from rag.eval.agentic.runner import REPORTS_ROOT, Tracer, run_agentic, run_standard
+from rag.eval.agentic.runs import compare_runs, render_compare_runs
 from rag.eval.agentic.sets import QTYPES, EvalItem, load_items
 from rag.eval.agentic.subset import compare_subset
 from rag.eval.answer.cli import build_answer_model, build_judge_model
@@ -303,6 +306,27 @@ def _compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _compare_runs(args: argparse.Namespace) -> int:
+    before, after = Path(args.before), Path(args.after)
+    old = read_records(system_file(before, args.system))
+    new = read_records(system_file(after, args.system))
+    if not old or not new:
+        raise UsageError(f"no {args.system} records under {before if not old else after}")
+    report = compare_runs(
+        old,
+        new,
+        read_judge_lines(judge_file(before)),
+        read_judge_lines(judge_file(after)),
+        system=args.system,
+    )
+    text = render_compare_runs(report)
+    if args.md:
+        Path(args.md).write_text(text, encoding="utf-8", newline="\n")
+        print(f"wrote {args.md}")
+    _echo(text)
+    return 0
+
+
 def _project(args: argparse.Namespace) -> int:
     out = _out(args)
     pilot = _all_records(out)
@@ -374,6 +398,14 @@ def _parser() -> argparse.ArgumentParser:
     p_cmp.add_argument("--after", required=True, help="records directory of the new graph run")
     p_cmp.add_argument("--md", help="also write the Markdown to this file")
 
+    p_runs = sub.add_parser(
+        "compare-runs", help="one system's new run against an older run (P3-07)"
+    )
+    p_runs.add_argument("--before", required=True, help="records directory of the older run")
+    p_runs.add_argument("--after", required=True, help="records directory of the new run")
+    p_runs.add_argument("--system", choices=list(SYSTEMS), default="agentic")
+    p_runs.add_argument("--md", help="also write the Markdown to this file")
+
     p_proj = sub.add_parser("project", help="project the cost of the full run from the records")
     p_proj.add_argument("--kb", default="hf_docs")
     p_proj.add_argument("--judge-cny-per-call", type=float, default=0.0014)
@@ -394,6 +426,7 @@ def main(argv: Sequence[str] | None = None, *, settings: ServiceSettings | None 
             "human-sheet": _human_sheet,
             "project": _project,
             "compare": _compare,
+            "compare-runs": _compare_runs,
         }
         return handler[args.command](args)
     except UsageError as exc:
