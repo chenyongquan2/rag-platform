@@ -1,6 +1,6 @@
 # EVAL-0 Deadline-truncated answers and retry of failed questions (evaluation tool only)
 
-Status: review
+Status: done
 Phase: P3 (evaluation upgrade, step 0)
 Depends on: P3-05 (harness), P3-07 (records that show both defects)
 Design sections: s13-5, s14-4
@@ -60,7 +60,7 @@ Option B (make `compose_result` set `generation_error` itself) is a product fix 
   `test_retry_errors_reruns_deadline_truncated`
 - [x] AC8 the judge re-judges a rule-scored line of a record that was answered by the re-run —
   `test_judge_rejudges_stale_rule_line`
-- [x] AC9 `classify` command output — `tests/unit/test_eval_agentic_cli.py::test_classify_lists_retryable_by_reason`
+- [x] AC9 `classify` command output — `tests/unit/test_eval_agentic_truncation.py::test_classify_lists_retryable_by_reason`
 - [x] AC10 acceptance on the stored P3-07 records (git-ignored, read-only; not a unit test): `two_hop:04`,
   `two_hop:14` truncated, 6 questions retryable for `llm_timeout` — numbers in the handoff note.
 
@@ -68,8 +68,9 @@ Option B (make `compose_result` set `generation_error` itself) is a product fix 
 - `compose_result` / any agent code (option B; separate spec). Re-running the P3-07 questions (steps 3 and
   later of `docs/…/rag-platform-eval-upgrade-plan`). Retrying `answer_parse_failed` records.
 
-## Handoff (filled at the end)
-- Files:
-- Decisions:
-- Open issues:
-- Review rounds:
+## Handoff
+- Files: `src/rag/eval/agentic/{records,analysis,runs,report,runner,judging,cli}.py`; new `tests/unit/test_eval_agentic_truncation.py` (10 tests); this spec; `docs/progress.md`.
+- Decisions: option A of the plan (evaluation tool only, rule applied at read time, old records need no re-run); a truncated record is still a refusal in the "no answer given" row, not in the clean-refusal row, and a truncated answerable question keeps judge score 1; `--retry-errors` drops and re-runs error, `generation_error` and truncated records; the judge re-judges a by-rule `no_answer` line when the question has been answered since (the later line wins in `judge_scores`); extra `classify` command to show the read-time result without a model.
+- P3-07 records (read-only, `C:/workspace/rag-platform-data/p3-07/p3-07`): `two_hop:04` and `two_hop:14` are `deadline_truncated`; 6 `generation_error` (standard 4: huggingface_doc_qa_eval 010, 012, 017, 018; agentic 2: colloquial:05, no_answer_hard:12), so 8 retryable in all. The 30 other `deadline` + `not_found` records (29 no-answer, `two_hop:08`) have an `answer` step and stay real refusals.
+- Open issues: a judge call that fails on a re-judged stale line leaves a score-less line, so `judge_scores` falls back to the old 1 and `judge_records` treats it as done; `subset.py` (P3-06 table) still counts truncated records as refused; the product fix in `compose_result` (option B) is a separate spec.
+- Review rounds: 1 (APPROVE).
