@@ -35,7 +35,7 @@ class QuestionFinding:
     """Per gold page: how many corpus pages the key pattern matches (itself and its copies)."""
     loose_pages: dict[str, int] = field(default_factory=dict)
     co_mentions: list[str] = field(default_factory=list)
-    """Non-gold pages that contain every term of every fact (anywhere on the page)."""
+    """Pages (gold pages included) that contain every term, or every subject word, of all facts."""
 
     @property
     def ok(self) -> bool:
@@ -71,13 +71,13 @@ def corpus_report(
     """One finding per question; `problems` is empty when every check passes."""
     docs = dict(corpus)
     squeezed: dict[str, str] = {}
-    wordsets: dict[str, set[str]] = {}
     low = lowered(docs)
+    cache = PageCache(low)
     out: list[QuestionFinding] = []
     for q in questions:
         finding = QuestionFinding(qid=q.qid, searched_pages=len(docs))
         if q.meta.get("type") == "hard":
-            _check_hard(q, docs, low, squeezed, wordsets, finding)
+            _check_hard(q, docs, low, squeezed, cache, finding)
         else:
             _check_ambiguous(q, docs, squeezed, finding)
         out.append(finding)
@@ -126,43 +126,78 @@ _STOP = frozenset(
 )
 
 
+def _words_of(phrases: list[str]) -> set[str]:
+    out: set[str] = set()
+    for phrase in phrases:
+        for w in _TOKEN.findall(phrase.lower()):
+            if w not in _STOP and (len(w) >= 3 or (w.isdigit() and len(w) >= 2)):
+                out.add(w)
+    return out
+
+
 def fact_terms(fact: Fact) -> set[str]:
     """The words that name a fact: those of its loose anchor and fact phrases and its `subjects`
     (lower case, at least three letters or a number of two digits or more; common words left
     out)."""
-    words: set[str] = set()
-    phrases = [str(x) for pair in fact.loose for x in pair[:2]] + list(fact.subjects)
-    for phrase in phrases:
-        for w in _TOKEN.findall(phrase.lower()):
-            if w not in _STOP and (len(w) >= 3 or (w.isdigit() and len(w) >= 2)):
-                words.add(w)
-    return words
+    return _words_of([str(x) for pair in fact.loose for x in pair[:2]] + list(fact.subjects))
 
 
-def co_mentions(
-    meta: HardMeta,
-    low: Mapping[str, str],
-    gold: set[str],
-    wordsets: dict[str, set[str]] | None = None,
-) -> list[str]:
-    """Pages (not gold, not declared copies) that contain every term of every fact, anywhere.
+def subject_phrases(fact: Fact) -> list[str]:
+    """What the fact is about, as phrases (an entity such as Mask2Former or a distinctive value
+    such as 25,000), normalised like page text. A fact without `subjects` is left out of that
+    search."""
+    return [_normalised(x) for x in fact.subjects]
 
-    A table row "Falcon | 40B | ... | 1,000B" is caught here although no phrase search finds
-    "Falcon-40B ... 1 trillion tokens" in it. The author reads each page found and either rewrites
-    the question or lists it in `read_and_cleared` with the reason it does not answer."""
+
+def _normalised(text: str) -> str:
+    return " ".join(re.sub(r"[-_]+", " ", text.lower()).split())
+
+
+class PageCache:
+    """Word sets and normalised texts of the pages, each made once for a whole report."""
+
+    def __init__(self, low: Mapping[str, str]) -> None:
+        self._low = low
+        self._words: dict[str, set[str]] = {}
+        self._norm: dict[str, str] = {}
+
+    def words(self, doc: str) -> set[str]:
+        if doc not in self._words:
+            self._words[doc] = set(_TOKEN.findall(self._low[doc]))
+        return self._words[doc]
+
+    def norm(self, doc: str) -> str:
+        if doc not in self._norm:
+            self._norm[doc] = _normalised(self._low[doc])
+        return self._norm[doc]
+
+
+def co_mentions(meta: HardMeta, cache: PageCache) -> list[str]:
+    """Pages that may state several facts at once, found without looking at the wording.
+
+    Two searches, over every page including the gold pages (a gold page that holds the other
+    facts as well is a single-page answer):
+
+    - all terms: the page contains every term of every fact, anywhere on the page (a table row
+      "Falcon | 40B | ... | 1,000B" is caught although no phrase search finds "Falcon-40B ...
+      1 trillion tokens" in it);
+    - all subjects: the page contains every `subjects` phrase of every fact (a blog post that
+      names Mask2Former and MaskFormer and explains both, in words no listed phrase uses).
+
+    The author reads each page found and either rewrites the question or lists the page in
+    `read_and_cleared` with the reason it does not answer."""
     terms = set().union(*(fact_terms(f) for f in meta.facts))
+    phrases = [p for f in meta.facts for p in subject_phrases(f)]
     if not terms:
         return []
     out = []
-    for doc, text in low.items():
-        if doc in gold:
-            continue
-        if wordsets is None:
-            words = set(_TOKEN.findall(text))
-        else:
-            words = wordsets.get(doc) or wordsets.setdefault(doc, set(_TOKEN.findall(text)))
-        if terms <= words:
+    for doc in cache._low:
+        if terms <= cache.words(doc):
             out.append(doc)
+        elif phrases:
+            norm = cache.norm(doc)
+            if all(p in norm for p in phrases):
+                out.append(doc)
     return sorted(out)
 
 
@@ -191,7 +226,7 @@ def _check_hard(
     docs: Mapping[str, str],
     low: Mapping[str, str],
     squeezed: dict[str, str],
-    wordsets: dict[str, set[str]],
+    cache: PageCache,
     finding: QuestionFinding,
 ) -> None:
     meta = HardMeta.model_validate(q.meta)
@@ -203,13 +238,13 @@ def _check_hard(
         finding.problems.append(
             f"a single page matches the loose patterns of every fact: {sorted(joint)}"
         )
-    gold = {f.page for f in meta.facts} | {c for f in meta.facts for c in f.also_on}
-    found = co_mentions(meta, low, gold, wordsets)
+    found = co_mentions(meta, cache)
     finding.co_mentions = found
     unread = sorted(set(found) - set(meta.read_and_cleared))
     if unread:
         finding.problems.append(
-            f"pages mention every term of every fact and are not in read_and_cleared: {unread}"
+            "pages may state several facts at once (all terms or all subjects of every fact) "
+            f"and are not in read_and_cleared: {unread}"
         )
     stale = sorted(set(meta.read_and_cleared) - set(found))
     if stale:

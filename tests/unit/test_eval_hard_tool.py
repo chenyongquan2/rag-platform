@@ -512,3 +512,26 @@ def test_run_comparison_counts_only_no_answer_questions_as_refusals() -> None:
 
     report = compare_runs(run(), run(), [], [], system="agentic")
     assert report.refusal is not None and report.refusal.n == 1
+
+
+def test_a_gold_page_that_holds_the_other_facts_is_a_co_mention() -> None:
+    both = "hf_docs:org/repo/blob/main/b.md"
+    corpus = {**CORPUS, both: "Alpha and Beta are related. Beta was pre-trained in two stages."}
+    [finding] = corpus_report([hard_question()], corpus)
+    assert both in finding.co_mentions
+    assert any("read_and_cleared" in p and both in p for p in finding.problems)
+
+
+def test_a_page_that_names_every_subject_is_a_co_mention_even_in_other_words() -> None:
+    e = "hf_docs:org/repo/blob/main/e.md"
+    corpus = {
+        **CORPUS,
+        e: "Alpha is explained here. The querying transformer is explained here too.",
+    }
+    q = hard_question()
+    q.meta["facts"][0]["subjects"] = ["Alpha"]
+    q.meta["facts"][1]["subjects"] = ["querying transformer"]
+    [finding] = corpus_report([q], corpus)
+    assert e in finding.co_mentions
+    plain = hard_question()
+    assert e not in corpus_report([plain], corpus)[0].co_mentions  # without subjects: terms only
