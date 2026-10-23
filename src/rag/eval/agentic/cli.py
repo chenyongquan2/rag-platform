@@ -16,6 +16,8 @@ uv run python -m rag.eval.agentic compare-runs --before DIR --after DIR [--syste
 uv run python -m rag.eval.agentic classify --out DIR
 uv run python -m rag.eval.agentic repeat-sample | repeat-run | repeat-analyze   (spec EVAL-3, see
     `rag.eval.agentic.repeat.cli`: question list, one repeated pass, pass^k and the report section)
+uv run python -m rag.eval.agentic regress-build | regress   (spec EVAL-4, see
+    `rag.eval.agentic.regress.cli`: the regression set, and the one command that runs and compares it)
 
 `run` answers the question sets (public single-hop, two-hop, colloquial, no-answer) by standard
 RAG and/or the real `ask_docs` graph, one question at a time, appending each result to
@@ -66,6 +68,7 @@ from rag.eval.agentic.records import (
     retry_reason,
     system_file,
 )
+from rag.eval.agentic.regress import cli as regress_cli
 from rag.eval.agentic.repeat import cli as repeat_cli
 from rag.eval.agentic.report import project_cost, render_report
 from rag.eval.agentic.runner import REPORTS_ROOT, Tracer, run_agentic, run_standard
@@ -572,6 +575,7 @@ def _parser() -> argparse.ArgumentParser:
     p_proj.add_argument("--judge-passes", type=int, default=2)
     add_out(p_proj)
     repeat_cli.add_parsers(sub)
+    regress_cli.add_parsers(sub)
     return parser
 
 
@@ -581,6 +585,8 @@ def main(argv: Sequence[str] | None = None, *, settings: ServiceSettings | None 
     try:
         if args.command.startswith("repeat-"):
             return repeat_cli.handle(args.command, args, settings)
+        if args.command.startswith("regress"):
+            return regress_cli.handle(args.command, args, settings)
         if args.command in ("run", "judge"):
             settings = settings if settings is not None else ServiceSettings()
             return (_run if args.command == "run" else _judge)(args, settings)

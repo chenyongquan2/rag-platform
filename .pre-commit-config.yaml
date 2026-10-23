@@ -40,6 +40,16 @@ repos:
         types_or: [python, pyi]
         require_serial: true
 
+      # A reminder, not a check (spec EVAL-4): it prints one message when a commit touches the agent,
+      # the answer step or the retrieval configuration, never fails and never calls a model.
+      - id: regression-reminder
+        name: remind to run the regression command
+        entry: uv run --frozen python scripts/regression_reminder.py
+        language: system
+        files: '^(src/rag/(agent|answer|retrieve|config)/|kb/.*\.ya?ml$)'
+        pass_filenames: false
+        verbose: true
+
       - id: pytest-unit
         name: unit tests (pytest, unit marker only)
         # Only the tests that touch changed code (pytest-testmon). `-m` would switch testmon off,
