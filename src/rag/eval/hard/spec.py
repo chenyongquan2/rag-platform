@@ -132,6 +132,8 @@ def _check_hard(q: LabeledQuestion, problems: list[str]) -> None:
         problems.append(f"{q.qid}: a chain3 question needs three facts")
     for fact in meta.facts:
         _compile(q.qid, fact.key, problems)
+        if not fact.subjects:
+            problems.append(f"{q.qid}: the fact on {fact.page} needs at least one subject phrase")
 
 
 def _compile(qid: str, pattern: str, problems: list[str]) -> None:

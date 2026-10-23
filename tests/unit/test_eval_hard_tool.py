@@ -37,7 +37,13 @@ CORPUS = {
 
 
 def fact(page: str, evidence: str, key: str, loose: list[list[Any]]) -> dict[str, Any]:
-    return {"page": page, "evidence": evidence, "key": key, "loose": loose}
+    return {
+        "page": page,
+        "evidence": evidence,
+        "key": key,
+        "loose": loose,
+        "subjects": [str(loose[0][0])],
+    }
 
 
 def hard_question(**changes: Any) -> LabeledQuestion:
@@ -204,9 +210,11 @@ def test_validate_questions_flags_malformed_ones() -> None:
     one_page = hard_question(relevant_pages=[A], meta={"facts": [hard_question().meta["facts"][0]]})
     no_key = hard_question()
     no_key.meta["facts"][0]["key"] = ""
+    no_subject = hard_question()
+    no_subject.meta["facts"][0]["subjects"] = []
     wrong_requires = hard_question(meta={"requires": "any"})
     unknown_shape = hard_question(meta={"shape": "puzzle"})
-    for bad in (one_page, no_key, wrong_requires, unknown_shape):
+    for bad in (one_page, no_key, no_subject, wrong_requires, unknown_shape):
         assert validate_questions([bad]), bad.meta
     assert validate_questions([hard_question(), hard_question()])  # duplicate qid
 

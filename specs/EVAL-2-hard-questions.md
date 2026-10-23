@@ -1,6 +1,6 @@
 # EVAL-2 Hard answerable questions and ambiguous questions for the Agentic RAG comparison
 
-Status: review
+Status: done
 Phase: eval upgrade (step 2 of `rag-platform-eval-upgrade-plan.md`, section 8)
 Depends on: P3-05 (question sets, runner, report), P3-03 (`rag.eval.absence`, two-hop checks), P3-02 (clarification)
 Design sections: s14-2, s13-5
@@ -56,4 +56,4 @@ answer turns out to be ambiguous, and every drop is recorded in the manifest (`d
 - Files: `evals/datasets/hf_docs/{hard.jsonl,hard_manifest.json,NOTICE.md}`; new package `src/rag/eval/hard/` (`spec`, `corpus`, `clarify`, `selfcheck`, `cli`); `src/rag/eval/agentic/{sets,analysis,report,runs,cli}.py` (types `hard` and `ambiguous`, `DEFAULT_TYPES`, `NOT_ANSWERABLE`, the ambiguous report section, projection and refusal pool fixes); `tests/unit/test_eval_hard_{data,tool}.py`, one line changed in `test_eval_agentic_sets.py` (iterate `DEFAULT_TYPES`; `QTYPES` gained two types).
 - Decisions: both types live in one file and are told apart by `meta.type`; the default selection stays the 150 questions, the new types are selected with `--types hard,ambiguous`; the single-page proof is the key pattern unique to its page, loose patterns, and a co-mention search (every term of every fact, or every subject phrase, on one page; gold pages included) whose hits were read and listed in `read_and_cleared`; ambiguous questions are scored by the rule `asked_back` (graph clarification, or a short plain reply that ends in a question and has no concrete value before it), no judge; questions replaced in review round 1 are listed in the manifest (`dropped`), version stays 1 because no system ran on the file.
 - Open issues: the three data-proof tests and the `check` command need the downloaded corpus (skipped without it); the owner's blind self-check (10 questions, sheet in `C:/workspace/rag-platform-data/human/hard_self_check/`) is not answered yet, so its agreement is not in the manifest; a word search cannot show that a page never says a fact in other words; the questions are AI-written on the model of known failures, so results only show behaviour on this kind of question.
-- Review rounds: see the progress row.
+- Review rounds: 3 (round 1 CHANGES: two hard questions answerable from one page, three weak ambiguous ones, projection and refusal-pool bugs; round 2 CHANGES: the co-mention search missed gold pages and entity-only pages; round 3 APPROVE). Questions replaced along the way are in `hard_manifest.json` (`dropped`).
