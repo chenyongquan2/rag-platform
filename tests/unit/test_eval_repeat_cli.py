@@ -163,6 +163,7 @@ def test_run_prints_estimate_first_and_refuses_over_the_stop_line(
     out = capsys.readouterr()
     assert code == 2
     assert "estimated cost of this pass" in out.out  # the estimate comes first
+    assert out.out.index("estimated cost") < out.out.index("ledger: spent")
     assert "stop line" in out.err
     assert events == []  # no warm-up, no run
     assert not (env["base"] / "pass2").exists()
@@ -321,3 +322,89 @@ def test_run_reports_an_incomplete_pass_and_does_not_judge(
     assert cli.main(_argv(env, 2), settings=env["settings"]) == 1
     assert "not complete" in capsys.readouterr().err
     assert not (env["base"] / "pass2" / "judge.jsonl").exists()
+
+
+def test_max_cny_cannot_take_the_pass_past_the_stop_line(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    events: list[str] = []
+    _spy(monkeypatch, events)
+    assert cli.main(_argv(env, 2, "--max-cny", "100"), settings=env["settings"]) == 2
+    assert "stop line" in capsys.readouterr().err
+    assert cli.main(_argv(env, 2, "--max-cny", "-1"), settings=env["settings"]) == 2
+    assert cli.main(_argv(env, 2, "--max-cny", "0"), settings=env["settings"]) == 2
+    assert events == []  # refused before the warm-up
+
+
+def test_a_failing_warm_up_refuses_the_pass_before_any_run(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from types import SimpleNamespace
+
+    timed_out = SimpleNamespace(
+        chunks=[],
+        not_found=False,
+        degraded=False,
+        rerank_timeout=True,
+        index_version="",
+        data_generation=0,
+        timings_ms={},
+    )
+    monkeypatch.setattr(
+        cli,
+        "build_retriever",
+        lambda cfg, settings, **kw: SimpleNamespace(retrieve=lambda *a, **k: timed_out),
+    )
+    events: list[str] = []
+    _spy(monkeypatch, events)
+    assert cli.main(_argv(env, 2), settings=env["settings"]) == 2
+    assert "rerank" in capsys.readouterr().err
+    assert events == ["warm"] and not (env["base"] / "pass2" / "standard").exists()
+
+
+def test_no_judge_and_resume_of_a_half_done_pass(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pass2 = env["base"] / "pass2"
+    half = passes_from({"standard": {q: "c" for q in QIDS[:2]}, "agentic": {}})[0]
+    write_pass(pass2, half)  # two standard answers are already there
+    before = [r.total_ms for r in read_records(system_file(pass2, "standard"))]
+    assert cli.main(_argv(env, 2, "--no-judge"), settings=env["settings"]) == 0
+    out = capsys.readouterr().out
+    assert "hard 1, ambiguous 1" in out  # the estimate counts only what is left for standard RAG
+    assert len(read_judge_lines(pass2 / "judge.jsonl")) == 2  # no new judge lines
+    records = read_records(system_file(pass2, "standard"))
+    assert [r.qid for r in records] == QIDS and [r.total_ms for r in records[:2]] == before
+
+
+def test_retry_errors_runs_a_failed_record_again_only_when_asked(env: dict[str, Any]) -> None:
+    pass2 = env["base"] / "pass2"
+    failed = passes_from({"standard": {QIDS[0]: "t"}, "agentic": {}})[0]
+    write_pass(pass2, failed)
+    path = system_file(pass2, "standard")
+    assert cli.main(_argv(env, 2, "--no-judge"), settings=env["settings"]) == 0
+    first = [r for r in read_records(path) if r.qid == QIDS[0]]
+    assert len(first) == 1 and first[0].generation_error == "llm_timeout"  # left as it was
+    assert cli.main(_argv(env, 2, "--no-judge", "--retry-errors"), settings=env["settings"]) == 0
+    again = [r for r in read_records(path) if r.qid == QIDS[0]]
+    assert len(again) == 1 and again[0].generation_error is None  # run again, record replaced
+
+
+def test_analyze_refuses_when_nothing_is_complete(env: dict[str, Any]) -> None:
+    base = env["base"]
+    data = passes_from({"standard": {QIDS[0]: "cc"}, "agentic": {QIDS[0]: "cc"}})
+    write_pass(base / "pass2", data[1])
+    write_pass(base / "pass3", data[1])
+    # No --pass1-old and no manifest: pass 1 is empty, every question is incomplete.
+    argv = ["repeat-analyze", "--base", str(base), "--list", str(env["list"])]
+    assert cli.main(argv) == 2
+
+
+def test_sample_does_not_overwrite_a_different_list_without_force(tmp_path: Path) -> None:
+    out = tmp_path / "list.json"
+    assert cli.main(["repeat-sample", "--out", str(out)]) == 0
+    assert cli.main(["repeat-sample", "--out", str(out)]) == 0  # the same draw: fine
+    assert cli.main(["repeat-sample", "--out", str(out), "--seed", "5"]) == 2
+    assert read_question_list(out).seed == 20261023
+    assert cli.main(["repeat-sample", "--out", str(out), "--seed", "5", "--force"]) == 0
+    assert read_question_list(out).seed == 5

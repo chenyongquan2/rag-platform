@@ -1,4 +1,3 @@
-# ruff: noqa: E501 (long lines are console messages)
 """Commands of the repeated runs (spec EVAL-3, plan step 3), part of `python -m rag.eval.agentic`.
 
     repeat-sample  [--kb hf_docs] [--seed N] [--date D] [--out FILE] [--check]
@@ -94,12 +93,17 @@ def _sample(args: argparse.Namespace) -> int:
             raise UsageError(f"no question list at {target}")
         if read_question_list(target) != fresh:
             raise UsageError(
-                f"{target} is not what seed {args.seed} and date {args.date} draw from the question sets"
+                f"{target} is not what seed {args.seed} and date {args.date} draw "
+                "from the question sets"
             )
-        print(
-            f"{target}: matches a fresh draw (seed {args.seed}, {sum(fresh.counts.values())} questions)"
-        )
+        total = sum(fresh.counts.values())
+        print(f"{target}: matches a fresh draw (seed {args.seed}, {total} questions)")
         return 0
+    if target.is_file() and read_question_list(target) != fresh and not args.force:
+        raise UsageError(
+            f"{target} exists and differs from this draw; the list is not changed once a repeated "
+            "pass has run. Use --force only before the first pass"
+        )
     write_question_list(target, fresh)
     print(f"wrote {target}: {fresh.counts} (seed {args.seed}, {args.date})")
     return 0
@@ -176,10 +180,13 @@ def _judge_calls(items: Sequence[EvalItem], directory: Path) -> int:
 def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
     if args.pass_no < 2:
         raise UsageError("--pass must be 2 or more: pass 1 is the stored run, it is not run again")
+    if args.max_cny is not None and args.max_cny <= 0:
+        raise UsageError("--max-cny must be positive")
     manifest = _sources(args)
     if not manifest.pass1_old:
         raise UsageError(
-            "pass 1 is not known: give --pass1-old DIR (the P3-07 run; repeat it for a retry directory)"
+            "pass 1 is not known: give --pass1-old DIR "
+            "(the P3-07 run; repeat the option for a retry directory)"
         )
     ql = _question_list(manifest)
     items = _items(ql, args.kb)
@@ -195,7 +202,13 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
         print(line)
     spent = CostLedger.from_settings(settings).total_spent()
     print(f"ledger: spent {spent:.4f} CNY, stop at {settings.budget_stop_cny:.2f} CNY")
-    check_budget(est, spent=spent, stop=settings.budget_stop_cny)
+    directory_spend = base_cli._spent_in(directory)
+    check_budget(
+        est,
+        spent=spent,
+        stop=settings.budget_stop_cny,
+        run_cap=None if args.max_cny is None else args.max_cny - directory_spend,
+    )
     order = system_order(args.pass_no)
     print(f"pass {args.pass_no}: {order[0]} first, then {order[1]}; records in {directory}")
     if args.estimate_only:
@@ -218,7 +231,7 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
             close = getattr(retriever, "close", None)
             if callable(close):
                 close()
-    max_cny = args.max_cny if args.max_cny else base_cli._spent_in(directory) + est.total
+    max_cny = args.max_cny if args.max_cny is not None else directory_spend + est.run_total
     qids = ",".join(i.qid for i in items)
     for system in order:
         if not todo[system]:
@@ -282,6 +295,12 @@ def _analyze(args: argparse.Namespace) -> int:
             raise UsageError(f"no records in {directory}; run repeat-run --pass {number} first")
         passes.append(data)
     result = analyze(passes, ql)
+    if result.questions == 0:
+        raise UsageError(
+            "no question has a result in every pass for both systems "
+            f"({len(result.incomplete)} incomplete); check --pass1-old and --pass1-new "
+            "and that the passes are judged"
+        )
     stable_path = Path(args.stable_out) if args.stable_out else Path(args.base) / STABLE_NAME
     stable_path.parent.mkdir(parents=True, exist_ok=True)
     stable_path.write_text(
@@ -326,6 +345,9 @@ def add_parsers(sub: Any) -> None:
     p.add_argument("--out", help=f"default {LIST_PATH}")
     p.add_argument(
         "--check", action="store_true", help="only check that the file is what the seed draws"
+    )
+    p.add_argument(
+        "--force", action="store_true", help="overwrite a list that differs (before the first pass)"
     )
 
     def sources(q: argparse.ArgumentParser) -> None:

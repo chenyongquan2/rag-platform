@@ -206,6 +206,15 @@ class Estimate:
     total: float = 0.0
     """Subtotal with the margin: the number checked against the stop line."""
 
+    @property
+    def run_total(self) -> float:
+        """What the two systems may cost, with the margin (the default spend limit of a pass)."""
+        return sum(self.by_system.values()) * (1 + self.margin)
+
+    @property
+    def judge_total(self) -> float:
+        return self.judge * (1 + self.margin)
+
     def lines(self) -> list[str]:
         out = ["estimated cost of this pass (CNY):"]
         for system, cny in self.by_system.items():
@@ -215,6 +224,7 @@ class Estimate:
         out.append(
             f"  subtotal {self.subtotal:.4f}; with {self.margin:.0%} margin {self.total:.4f}"
         )
+        out.append("  (the retrieval-only warm-up calls the embedding service only; not counted)")
         return out
 
 
@@ -258,10 +268,16 @@ def estimate_pass(
     return est
 
 
-def check_budget(est: Estimate, *, spent: float, stop: float) -> None:
-    """Refuse a pass that would take the ledger past the stop line (CLAUDE.md, models and money)."""
-    if spent + est.total > stop + 1e-9:
+def check_budget(est: Estimate, *, spent: float, stop: float, run_cap: float | None = None) -> None:
+    """Refuse a pass that could take the ledger past the stop line (CLAUDE.md, models and money).
+
+    The most the pass can spend is what the systems may spend (`run_cap`, the explicit limit left
+    for them, else the estimate with margin) plus the judge's estimate with margin."""
+    run = est.run_total if run_cap is None else run_cap
+    worst = run + est.judge_total
+    if spent + worst > stop + 1e-9:
         raise UsageError(
-            f"spent {spent:.4f} + estimated {est.total:.4f} CNY (with margin) would pass the stop "
-            f"line {stop:.2f} CNY; not started. Raise the line (owner) or run fewer questions"
+            f"spent {spent:.4f} + up to {worst:.4f} CNY (estimate with margin, or the spend limit "
+            f"given) would pass the stop line {stop:.2f} CNY; not started. Raise the line (owner) "
+            "or run fewer questions"
         )

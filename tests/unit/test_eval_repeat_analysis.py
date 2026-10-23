@@ -188,3 +188,18 @@ def test_needs_two_passes() -> None:
             passes_from({"standard": {"single_hop:00": "c"}, "agentic": {"single_hop:00": "c"}}),
             qlist_for(["single_hop:00"]),
         )
+
+
+def test_clean_flips_leave_out_questions_with_a_cut_record() -> None:
+    qids = _q(2)
+    spec = {
+        "standard": dict(zip(qids, ["ccc", "ccc"], strict=True)),
+        "agentic": dict(zip(qids, ["cxc", "ccw"], strict=True)),
+    }
+    flips = {
+        (f.system, f.from_pass): f
+        for f in analyze(passes_from(spec), qlist_for(qids)).groups["single_hop"].flips
+    }
+    assert (flips[("agentic", 1)].changed, flips[("agentic", 1)].changed_clean) == (1, 0)
+    assert (flips[("agentic", 2)].changed, flips[("agentic", 2)].changed_clean) == (2, 1)
+    assert flips[("standard", 1)].changed == 0

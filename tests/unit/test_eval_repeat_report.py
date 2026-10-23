@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from rag.eval.agentic.repeat.analysis import analyze
@@ -39,7 +40,8 @@ def test_section_content() -> None:
     for needle in (
         "20261023",  # the seed
         "P3-07",  # pass 1 is the stored run
-        "缓存是冷的",
+        "缓存里还没有这些题的检索结果",
+        "p 值",
         "第 2 遍先跑标准 RAG",
         "第 3 遍先跑 ask_docs",
         "只检索、不调用模型",
@@ -55,7 +57,7 @@ def test_section_content() -> None:
     ):
         assert needle in text, needle
     # The numbers: standard 2 of 6 (pass^3), graph 3 of 6; a gap of 1 against at most 2 changes.
-    assert "2/6" in text and "3/6" in text
+    assert "6 题里 2 题" in text and "6 题里 3 题" in text
     assert "多 1 题" in text
     assert "没有超过" in text  # the gap is not larger than the noise
     # The deadline cut is listed and called not a refusal.
@@ -66,8 +68,9 @@ def test_section_content() -> None:
 
 def test_section_has_no_arrows_or_slash_codes() -> None:
     text = _section().replace("-->", "")  # the marker comments close with it
-    for banned in ("->", "→", "pass^3/", "w/o"):
+    for banned in ("->", "→", "w/o"):
         assert banned not in text, banned
+    assert not re.search(r"\d/\d", text)  # no "12/20": write "20 题里 12 题"
 
 
 def test_section_without_stable_file_and_with_incomplete_questions() -> None:
@@ -114,3 +117,16 @@ def test_section_is_appended_replaced_and_created(tmp_path: Path) -> None:
     assert replaced.count("<!-- eval-upgrade:step3:begin -->") == 1
     assert "（改过）" in replaced and other in replaced
     assert replaced.replace(newer, first) == appended  # nothing else moved
+
+
+def test_section_keeps_the_line_endings_of_a_crlf_report(tmp_path: Path) -> None:
+    path = tmp_path / "report.md"
+    path.write_bytes("# 报告\r\n\r\n## 第 2 步\r\n\r\n内容\r\n".encode())
+    first = _section()
+    write_section(path, first)
+    write_section(path, first)  # replaced in place the second time
+    data = path.read_bytes()
+    assert data.count(b"\n") == data.count(b"\r\n")  # every line ends with CRLF
+    assert data.count(b"eval-upgrade:step3:begin") == 1
+    assert "## 第 2 步".encode() in data
+    assert not (tmp_path / "report.md.tmp").exists()

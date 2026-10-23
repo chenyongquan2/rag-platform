@@ -10,6 +10,7 @@ never touches the sections other steps wrote. A missing file is created with a t
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,11 +67,11 @@ def _kz(k: int) -> str:
 def _p(p: Proportion) -> str:
     if p.rate is None:
         return "0 题"
-    return f"{p.count}/{p.n} = {p.rate:.1%}，区间 {p.low:.1%} 到 {p.high:.1%}"
+    return f"{p.n} 题里 {p.count} 题（{p.rate:.1%}），区间 {p.low:.1%} 到 {p.high:.1%}"
 
 
 def _count(p: Proportion) -> str:
-    return f"{p.count}/{p.n}"
+    return f"{p.n} 题里 {p.count} 题"
 
 
 def _row(cells: Sequence[object]) -> str:
@@ -123,8 +124,11 @@ def _gap_sentence(g: GroupResult, k: int) -> str:
     else:
         gap = f"两个系统{kz}遍都全对的题一样多"
     noise = f"同一个系统相邻两遍之间结果变了的题，最多 {g.max_flips} 题，平均 {g.mean_flips:.1f} 题"
-    if g.gap_larger_than_noise:
-        end = "两个系统的差别超过了各自的波动，这个差别不能只当作运气。"
+    p_text = f"配对检验的 p 值是 {g.paired.p_value:.3f}"
+    if g.gap_larger_than_noise and g.paired.p_value <= 0.05:
+        end = f"两个系统的差别超过了各自的波动，{p_text}，不超过 0.05，可以认为不只是运气。"
+    elif g.gap_larger_than_noise:
+        end = f"两个系统的差别超过了各自的波动，但{p_text}，大于 0.05，还不能排除是运气。"
     elif g.gap == 0 and g.max_flips == 0:
         end = "两个系统没有差别，各自两遍之间也没有变化。"
     else:
@@ -169,11 +173,11 @@ def render_section(
         f"固定种子 {ql.seed}，{ql.date} 抽出。旧题 {len(ql.old_qids())} 道"
         f"（单跳 {ql.counts.get('single_hop', 0)}、两跳 {ql.counts.get('two_hop', 0)}、"
         f"口语化 {ql.counts.get('colloquial', 0)}），难题 {ql.counts.get('hard', 0)} 道，"
-        f"含糊题 {ql.counts.get('ambiguous', 0)} 道。无答案题没有重复，"
-        "因为两个系统每次都把它们全部拒答。",
+        f"含糊题 {ql.counts.get('ambiguous', 0)} 道。无答案题没有重复：评测改造计划的理由是 "
+        "P3-07 里两个系统对 50 道无答案题都全部拒答，重复不增加信息。",
         "- **第 1 遍不是这次重跑的，是已有的记录：** 旧题用 P3-07 的记录（目录 "
         + ("、".join(f"`{d}`" for d in ctx.pass1_old) or "没有提供")
-        + "），那一遍开始时缓存是冷的；难题和含糊题用第 2 步的第一遍记录（目录 "
+        + "），那一遍开始时缓存里还没有这些题的检索结果；难题和含糊题用第 2 步的第一遍记录（目录 "
         + ("、".join(f"`{d}`" for d in ctx.pass1_new) or "没有提供，所以这两类题缺第 1 遍")
         + "）。",
     ]
@@ -185,13 +189,14 @@ def render_section(
             f"记录在 `{ctx.base}` 下的 `pass{number}` 目录。"
         )
     out += [
-        "- **顺序为什么交替：** 先跑的系统遇到的缓存更冷，交替以后冷热的影响两个系统各占一半。",
+        "- **顺序为什么交替：** 先跑的系统遇到的缓存里结果更少，运行更慢，"
+        "交替以后这个影响在两个系统上各占一半。",
         "- **怎么算对：** 有答案的题，裁判给 3 分算全对；含糊题用规则判断，系统反问算对。"
         "「旧题合计」是单跳、两跳、口语化三类的合计。"
         "回答被总时限截断、回答模型出错、运行出错，都不算全对，另外列在后面，也不当作拒答。",
         f"- **{kz}遍都全对（pass^{k}，读作 pass 的 {k} 次方）：** 同一道题{kz}遍都全对，衡量稳不稳。"
         f"**至少一遍全对（pass@{k}）：** {kz}遍里有一遍全对，衡量有没有能力做到。",
-        f"- **进入数字的题：** {result.questions} 道，每道题两个系统都有 {k} 遍的结果。"
+        f"- **算进数字的题：** {result.questions} 道，每道题两个系统都有 {k} 遍的结果。"
         f"另有 {len(result.incomplete)} 道缺记录或没判分，没有计入（见「没有计入的题」）。",
         "",
         f"### 每个系统{kz}遍都全对和至少一遍全对（pass^{k} 和 pass@{k}）",
@@ -236,6 +241,7 @@ def render_section(
     out += ["", f"### 两个系统 pass^{k} 的配对检验（McNemar）", ""]
     out += [
         f"只看两个系统结果不同的题：一边{kz}遍都全对，另一边没有。检验的是这两种题的个数是否差得比运气大。",
+        "p 值越小，越不像是运气；一般小于 0.05 才认为差别不只是运气。",
         "",
     ]
     out += _table(
@@ -278,7 +284,7 @@ def render_section(
     out += ["", "### 两个系统的差别比自己的波动大吗", ""]
     out += [
         f"做法：把「ask_docs {kz}遍都全对的题数减去标准 RAG 的」，和「同一个系统相邻两遍之间变了的题数」"
-        "的最大值比。这个尺子偏严：一道题变对、另一道题变错，在波动里算两道，在差别里互相抵消。",
+        "的最大值比。这个比法偏严：一道题变对、另一道题变错，在波动里算两道，在差别里互相抵消。",
         "",
     ]
     out += [_gap_sentence(g, k) for g in groups]
@@ -322,7 +328,8 @@ def render_section(
     )
     out += ["", f"### 稳定题：{kz}遍都全对的题", ""]
     out += [
-        "第 4 步的回归题集从这里选。题数按题型和系统列出；清单文件："
+        "第 4 步要建一份固定的回归题集（改了代码以后，用它检查原来答对的题有没有变成答错），"
+        "题从这里选。题数按题型和系统列出；清单文件："
         + (f"`{stable_path}`" if stable_path else "这次没有写文件")
         + "。",
         "",
@@ -349,11 +356,16 @@ def render_section(
     if total is not None:
         out += [
             f"- **能说：** 在这 {total.n} 道抽样题上，每题运行了 {k} 遍。"
-            f"ask_docs 有 {_count(total.systems['agentic'].pass_all)} 道{kz}遍都全对，"
-            f"标准 RAG 有 {_count(total.systems['standard'].pass_all)} 道；"
+            f"{kz}遍都全对的题，ask_docs 是{_count(total.systems['agentic'].pass_all)}，"
+            f"标准 RAG 是{_count(total.systems['standard'].pass_all)}；"
             f"同一个系统相邻两遍之间最多有 {total.max_flips} 道题结果变了。"
             + (
-                "两个系统的差别超过了这个波动。"
+                "两个系统的差别超过了这个波动"
+                + (
+                    "，配对检验也支持差别不只是运气。"
+                    if total.paired.p_value <= 0.05
+                    else f"，但配对检验的 p 值是 {total.paired.p_value:.3f}，还不能排除是运气。"
+                )
                 if total.gap_larger_than_noise
                 else f"所以两个系统相差 {total.max_flips} 道以内，只能算波动。"
             ),
@@ -361,7 +373,7 @@ def render_section(
     out += [
         "- **不能说：** 150 道题全部跑了三遍；无答案题的稳定性（这次没有重复）；"
         "难题和含糊题代表真实用户的问题（它们是照已有失败的样子写的，只能说「在这类题上」）。",
-        "- **条件不完全一样：** 第 1 遍是另一天跑的旧记录，缓存是冷的，后面的遍有预热，"
+        "- **条件不完全一样：** 第 1 遍是以前跑的旧记录，当时没有做预热，后面的遍有预热，"
         "网关忙闲也不同；这些差别都包含在上面的波动里，分不开。",
         "- **样本小：** 每个题型只有几道到几十道题，区间很宽；差别「没有超过波动」"
         "不等于「两个系统没有差别」，只是这批题测不出来。",
@@ -380,13 +392,17 @@ def write_section(path: str | Path, section: str) -> None:
         file.write_text(TITLE + "\n" + section, encoding="utf-8", newline="\n")
         return
     text = file.read_bytes().decode("utf-8")
+    eol = "\r\n" if "\r\n" in text else "\n"  # keep the file's own line endings
+    section = section.replace("\r\n", "\n").replace("\n", eol)
     start = text.find(BEGIN)
     end = text.find(END, start) if start >= 0 else -1
     if start >= 0 and end >= 0:
         tail = end + len(END)
-        if text[tail : tail + 1] == "\n":
-            tail += 1
+        if text[tail : tail + len(eol)] == eol:
+            tail += len(eol)
         new = text[:start] + section + text[tail:]
     else:
-        new = text.rstrip("\n") + "\n\n" + section
-    file.write_bytes(new.encode("utf-8"))
+        new = text.rstrip("\r\n") + eol + eol + section
+    temp = file.with_name(file.name + ".tmp")
+    temp.write_bytes(new.encode("utf-8"))
+    os.replace(temp, file)  # a crash leaves the old report, not half of the new one
