@@ -57,6 +57,8 @@ the other two passes, 6 (4.1%) were not correct in the held-out pass, i.e. a str
    command as inconclusive: the environment is broken, trying again would only repeat it. Before anything runs the
    command also refuses (exit 2) a baseline that is not the set's, a knowledge base other than the set's, fewer than
    3 `--max-attempts`, and an `--out` directory that already holds records (the runner would reuse them).
+   Known gap: when the spend limit stops a stage between its two systems, that stage is not judged and its cost
+   is missing from the printed cost; its questions end as run problems.
 6. Before anything runs it prints the estimate (baseline CNY per question, 20% margin, and the upper bound if
    everything is rerun) and the ledger, and refuses (exit 2) when spent + the first pass would pass the stop line;
    every rerun stage checks the line again and stops as inconclusive instead of spending past it. A retrieval-only

@@ -350,7 +350,11 @@ def _regress(args: argparse.Namespace, settings: ServiceSettings) -> int:
         check_baseline(rs, baseline, with_standard=args.with_standard)
     except ValueError as exc:
         raise UsageError(str(exc)) from exc
-    stale = sorted(p for p in Path(args.out).glob("attempt*/*/records.jsonl")) if args.out else []
+    stale = (
+        sorted(Path(args.out).glob("attempt*/*/records.jsonl"))
+        if args.out and not args.estimate_only
+        else []
+    )
     if stale:
         raise UsageError(
             f"{stale[0].parent.parent} already holds records of an earlier run; the runner would "
