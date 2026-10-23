@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from rag.config import ServiceSettings, repo_path
-from rag.eval.agentic.sets import QTYPES, SET_FILES, load_items
+from rag.eval.agentic.sets import DEFAULT_TYPES, QTYPES, SET_FILES, load_items
 from rag.eval.questions import load_question_set
 
 SETS = "evals/datasets/hf_docs"
@@ -65,7 +65,7 @@ def test_colloquial_gold_pages_exist_in_corpus() -> None:
 
 def test_load_items_types_and_counts() -> None:
     items = load_items("hf_docs")
-    by_type = {t: [i for i in items if i.qtype == t] for t in QTYPES}
+    by_type = {t: [i for i in items if i.qtype == t] for t in DEFAULT_TYPES}
     assert {t: len(v) for t, v in by_type.items()} == {
         "single_hop": 65,
         "two_hop": 20,

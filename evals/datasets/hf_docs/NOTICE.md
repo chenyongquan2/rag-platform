@@ -46,3 +46,17 @@ written by hand (lower case, pronouns inside the question, typos, abbreviations,
 Chinese/English); `meta.source_qid` names the source question. `answer` and `relevant_pages` are copied
 unchanged from it, so no fact is new. The file is distributed under the same Apache License 2.0 as the
 source questions.
+
+# NOTICE: hard.jsonl, hard_manifest.json
+
+Thirty-five hand-written questions (spec EVAL-2, version 1, 2026-10-23): 25 answerable questions that need
+two or three pages (`meta.type` hard) and 10 ambiguous questions whose right reply is a clarifying question
+(`meta.type` ambiguous). They were written by an AI by hand, modelled on the failure types of the eight
+questions where round 1 missed the right page (not copied from them); they are not drawn from user traffic,
+so results show behaviour on this kind of question only. Every hard question quotes verbatim evidence from
+each gold page of the Hugging Face documentation (`m-ric/huggingface_doc`, MIT licence) and carries
+patterns that `uv run python -m rag.eval.hard check` searches over the whole corpus to show that no single
+page states all its facts. The ambiguous questions list at least two readings with quoted evidence and are
+scored by the rule `rag.eval.hard.asked_back`, not by the judge. The owner's blind self-check of 10 hard
+questions is exported by `uv run python -m rag.eval.hard self-check`; its agreement is written into
+`hard_manifest.json` when done. The file is distributed under the same MIT licence as the corpus.

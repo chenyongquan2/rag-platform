@@ -10,6 +10,13 @@ Four types, each from fixed files of the KB's eval directory:
     colloquial   15 hand-written casual rewrites of public questions (P3-05)
     no_answer    10 + 20 + 20 questions not answered by the documentation (P1-04, P2-02, P3-03)
 
+Two more types are selected by name and are not part of the default 150 (spec EVAL-2); both come
+from `hard.jsonl` and are told apart by `meta.type`:
+
+    hard         25 hand-written answerable questions that need two or three pages
+    ambiguous    10 hand-written questions whose right reply is a clarifying question (rule check,
+                 no judge: `rag.eval.hard.asked_back`)
+
 Every item carries what both systems and the report need: the reference answer and gold pages of
 an answerable question, and `requires` ("all" for a two-hop question: both pages are needed).
 """
@@ -24,15 +31,23 @@ from pydantic import BaseModel, Field
 from rag.config import repo_path
 from rag.eval.questions import load_question_set
 
-QType = Literal["single_hop", "two_hop", "colloquial", "no_answer"]
+QType = Literal["single_hop", "two_hop", "colloquial", "no_answer", "hard", "ambiguous"]
 
 SET_FILES: dict[str, list[str]] = {
     "single_hop": ["huggingface_doc_qa_eval.jsonl"],
     "two_hop": ["two_hop.jsonl"],
     "colloquial": ["colloquial.jsonl"],
     "no_answer": ["no_answer.jsonl", "no_answer_extra.jsonl", "no_answer_hard.jsonl"],
+    "hard": ["hard.jsonl"],
+    "ambiguous": ["hard.jsonl"],
 }
-QTYPES: tuple[str, ...] = tuple(SET_FILES)
+DEFAULT_TYPES: tuple[str, ...] = ("single_hop", "two_hop", "colloquial", "no_answer")
+"""What `load_items` loads without `types`: the 150 questions of the P3-05 comparison."""
+HARD_TYPES: tuple[str, ...] = ("hard", "ambiguous")
+"""Selected by name only (spec EVAL-2); the two types share one file."""
+QTYPES: tuple[str, ...] = (*DEFAULT_TYPES, *HARD_TYPES)
+NOT_ANSWERABLE: frozenset[str] = frozenset({"no_answer", "ambiguous"})
+"""Types with no reference answer to score: refusals and clarifications are judged by rule."""
 
 
 class EvalItem(BaseModel):
@@ -58,13 +73,14 @@ def load_items(
     take: Mapping[str, int] | None = None,
     eval_dir: str | None = None,
 ) -> list[EvalItem]:
-    """The questions of `types` (default all four), in the order of `QTYPES` and of the files.
+    """The questions of `types` (default the four of `DEFAULT_TYPES`), in the order of `QTYPES`
+    and of the files.
 
     `take` keeps only the first N questions of a type (a pilot); without `types` only the types
     named in `take` are loaded. Unknown type names raise
     `ValueError`; so does a question file whose gold pages belong to another knowledge base.
     """
-    chosen = list(types) if types is not None else list(take) if take else list(QTYPES)
+    chosen = list(types) if types is not None else list(take) if take else list(DEFAULT_TYPES)
     for name in [*chosen, *(take or {})]:
         if name not in SET_FILES:
             raise ValueError(f"unknown question type {name!r}; choose from {list(QTYPES)}")
@@ -77,7 +93,9 @@ def load_items(
         for filename in SET_FILES[qtype]:
             questions = load_question_set(directory / filename, kb=kb).questions
             for q in questions:
-                answerable = qtype != "no_answer"
+                if filename == "hard.jsonl" and q.meta.get("type") != qtype:
+                    continue  # one file, two types
+                answerable = qtype not in NOT_ANSWERABLE
                 if answerable and not q.relevant_pages:
                     raise ValueError(f"{filename}: {q.qid} is answerable but has no gold page")
                 of_type.append(

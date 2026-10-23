@@ -25,7 +25,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pydantic import BaseModel, Field
 
 from rag.eval.agentic.records import JudgeLine, SystemName, SystemRecord, is_deadline_truncated
-from rag.eval.agentic.sets import QTYPES
+from rag.eval.agentic.sets import NOT_ANSWERABLE, QTYPES
 from rag.eval.answer.record import Proportion
 from rag.eval.retrieval.runner import latency_summary
 from rag.eval.stats import (
@@ -41,8 +41,8 @@ ALPHA = 0.05
 DEADLINE_MS = 30_000
 TARGET_P95_MS = 15_000
 ANSWERABLE = "answerable"
-"""Key of the three answerable types pooled."""
-ANSWERABLE_TYPES = tuple(t for t in QTYPES if t != "no_answer")
+"""Key of the answerable types pooled (the three of P3-05, plus `hard` when it was run)."""
+ANSWERABLE_TYPES = tuple(t for t in QTYPES if t not in NOT_ANSWERABLE)
 
 
 # ---- helpers ------------------------------------------------------------------------------------
@@ -210,7 +210,7 @@ class TypeSummary(BaseModel):
     """No-answer questions whose run ended in an error (retrieval error, gateway timeout, parse
     failure): they gave no answer, so `refusal` counts them, and `clean_refusal` does not."""
     clarifications: dict[str, int] = Field(default_factory=dict)
-    """No-answer questions where the graph asked back (counted as refusals)."""
+    """No-answer or ambiguous questions where the graph asked back (counted as refusals)."""
     truncated: dict[str, int] = Field(default_factory=dict)
     """Questions of this type (answerable or not) whose answer was cut off by the total deadline
     (`is_deadline_truncated`), per system; listed apart, never a clean refusal (spec EVAL-0)."""
@@ -253,6 +253,17 @@ def per_type_summary(
                     s: sum(1 for q in common if _failed(systems[s][q]))  # type: ignore[index]
                     for s in ("standard", "agentic")
                 },
+                clarifications={
+                    s: sum(1 for q in common if systems[s][q].clarification)  # type: ignore[index]
+                    for s in ("standard", "agentic")
+                },
+                truncated=truncated,
+            )
+            continue
+        if qtype == "ambiguous":  # no reference answer, no judge: the rule check counts asking back
+            out[qtype] = TypeSummary(
+                qtype=qtype,
+                n=len(common),
                 clarifications={
                     s: sum(1 for q in common if systems[s][q].clarification)  # type: ignore[index]
                     for s in ("standard", "agentic")

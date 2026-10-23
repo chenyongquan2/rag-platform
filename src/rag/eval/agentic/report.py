@@ -29,7 +29,8 @@ from rag.eval.agentic.analysis import (
     rewrite_effect,
 )
 from rag.eval.agentic.records import JudgeLine, SystemRecord
-from rag.eval.agentic.sets import QTYPES
+from rag.eval.agentic.sets import NOT_ANSWERABLE, QTYPES
+from rag.eval.hard.clarify import clarification_section
 
 LEGEND = (
     "A = standard RAG, B = the ask_docs graph. Paired on the same questions. Rates carry the 95% "
@@ -141,6 +142,8 @@ def render_report(records: Sequence[SystemRecord], lines: Sequence[JudgeLine]) -
             out.append(
                 f"- {name}: standard refused {a_n}/{len(ids)}, agentic refused {b_n}/{len(ids)}"
             )
+
+    out += clarification_section(records)
 
     loop = loop_report(records)
     out += [
@@ -299,7 +302,7 @@ def project_cost(
             total += size * mean
             left += max(0, size - len(group)) * mean
         by_system_cost[system], remaining[system] = total, left
-    answerable = sum(n for t, n in sizes.items() if t != "no_answer")
+    answerable = sum(n for t, n in sizes.items() if t not in NOT_ANSWERABLE)
     judge = answerable * 2 * judge_passes * judge_cny_per_call
     return CostProjection(
         by_system=by_system_cost,
