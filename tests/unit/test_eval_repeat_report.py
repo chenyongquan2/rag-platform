@@ -36,7 +36,8 @@ def test_section_content() -> None:
     # What is shown and how it was run.
     assert text.startswith("<!-- eval-upgrade:step3:begin -->")
     assert text.rstrip().endswith("<!-- eval-upgrade:step3:end -->")
-    assert "## 第 3 步" in text
+    assert "## 3. 第 3 步" in text
+    assert "### 3.1 这一节回答什么" in text and "### 3.2 怎么跑的" in text
     for needle in (
         "20261023",  # the seed
         "P3-07",  # pass 1 is the stored run
@@ -130,3 +131,52 @@ def test_section_keeps_the_line_endings_of_a_crlf_report(tmp_path: Path) -> None
     assert data.count(b"eval-upgrade:step3:begin") == 1
     assert "## 第 2 步".encode() in data
     assert not (tmp_path / "report.md.tmp").exists()
+
+
+STUB = """# 评测改造报告
+
+| 节 | 内容 | 状态 |
+|---|---|---|
+| 2 | 第 2 步：难题和含糊题的结果 | 本次已写 |
+| 3 | 第 3 步：重复跑，量噪声 | 还没做 |
+| 4 | 第 4 步：回归题集和自动对比 | 还没做 |
+
+## 2. 第 2 步：难题和含糊题的结果
+
+第 2 步的内容。
+
+## 3. 第 3 步：重复跑，量噪声
+
+还没做。要先提高停止线才能做。
+
+## 4. 第 4 步：回归题集和自动对比
+
+还没做。
+"""
+
+
+def test_section_replaces_the_placeholder_left_for_step_3(tmp_path: Path) -> None:
+    path = tmp_path / "report.md"
+    path.write_text(STUB, encoding="utf-8", newline="\n")
+    section = _section()
+    write_section(path, section)
+    text = path.read_text(encoding="utf-8")
+    assert text.count("## 3. 第 3 步") == 1  # the placeholder is gone, not repeated
+    assert "还没做。要先提高停止线才能做。" not in text
+    assert "| 3 | 第 3 步：重复跑，量噪声 | 已写（`repeat-analyze` 生成） |" in text
+    assert "| 4 | 第 4 步：回归题集和自动对比 | 还没做 |" in text  # step 4 untouched
+    assert text.index("## 2. 第 2 步") < text.index("## 3. 第 3 步") < text.index("## 4. 第 4 步")
+    assert "第 2 步的内容。" in text
+    assert text.endswith("## 4. 第 4 步：回归题集和自动对比\n\n还没做。\n")
+    # The second run finds the markers and replaces only the section.
+    write_section(path, section)
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_a_written_step_3_section_without_markers_is_not_replaced(tmp_path: Path) -> None:
+    path = tmp_path / "report.md"
+    own = "## 3. 第 3 步：手写的\n\n这一节已经写好了。\n"
+    path.write_text("# 报告\n\n" + own, encoding="utf-8", newline="\n")
+    write_section(path, _section())
+    text = path.read_text(encoding="utf-8")
+    assert own in text and text.count("## 3. 第 3 步") == 2  # appended instead

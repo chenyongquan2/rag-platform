@@ -273,6 +273,8 @@ def check_budget(est: Estimate, *, spent: float, stop: float, run_cap: float | N
 
     The most the pass can spend is what the systems may spend (`run_cap`, the explicit limit left
     for them, else the estimate with margin) plus the judge's estimate with margin."""
+    if run_cap is not None and run_cap <= 0:
+        raise UsageError("the spend limit is already used up by the records of this pass")
     run = est.run_total if run_cap is None else run_cap
     worst = run + est.judge_total
     if spent + worst > stop + 1e-9:

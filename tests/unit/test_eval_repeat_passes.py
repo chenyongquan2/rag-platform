@@ -197,3 +197,14 @@ def test_warm_up_counts_a_failed_search() -> None:
 
     with pytest.raises(UsageError, match=r"rerank|search"):
         warm_up(broken, [_item("single_hop:00")], say=lambda t: None)
+
+
+def test_check_budget_refuses_a_spend_limit_that_is_already_used_up() -> None:
+    est = estimate_pass(
+        {"standard": [_item("single_hop:00")], "agentic": []},
+        {"standard": {"single_hop": 0.01}, "agentic": {}},
+        judge_calls=0,
+    )
+    with pytest.raises(UsageError, match="used up"):
+        check_budget(est, spent=1.0, stop=37.0, run_cap=0.0)
+    check_budget(est, spent=1.0, stop=37.0, run_cap=0.05)

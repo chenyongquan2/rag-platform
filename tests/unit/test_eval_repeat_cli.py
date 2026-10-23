@@ -271,7 +271,7 @@ def test_analyze_writes_report_and_stable_file(env: dict[str, Any], tmp_path: Pa
     ]
     assert cli.main(argv) == 0
     text = report.read_text(encoding="utf-8")
-    assert "## 第 3 步" in text and "hard:00" in text  # the cut record is listed
+    assert "## 3. 第 3 步" in text and "hard:00" in text  # the cut record is listed
     payload = json.loads(stable.read_text(encoding="utf-8"))
     assert payload["agentic"]["single_hop"] == ["single_hop:00", "single_hop:01"]
     assert payload["standard"]["single_hop"] == ["single_hop:00"]

@@ -11,6 +11,7 @@ never touches the sections other steps wrote. A missing file is created with a t
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,7 @@ from rag.eval.agentic.repeat.passes import system_order
 from rag.eval.agentic.repeat.sample import QuestionList
 from rag.eval.answer.record import Proportion
 
+SECTION_NUMBER = 3
 BEGIN = "<!-- eval-upgrade:step3:begin -->"
 END = "<!-- eval-upgrade:step3:end -->"
 TITLE = "# RAG 平台评测改造报告\n"
@@ -57,6 +59,18 @@ class ReportContext:
     pass1_old: Sequence[str] = field(default_factory=list)
     pass1_new: Sequence[str] = field(default_factory=list)
     generated: str = ""
+
+
+def _number_subheadings(text: str) -> str:
+    """`### title` -> `### 3.N title`, in the numbering style of the other sections of the report."""
+    count = 0
+
+    def number(match: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return f"### {SECTION_NUMBER}.{count} "
+
+    return re.sub(r"(?m)^### ", number, text)
 
 
 def _kz(k: int) -> str:
@@ -156,7 +170,7 @@ def render_section(
     kz = _kz(k)
     ql = ctx.qlist
     groups = _groups(result)
-    out: list[str] = [BEGIN, "", f"## 第 3 步：每题重复运行 {k} 遍，量运行之间的波动", ""]
+    out: list[str] = [BEGIN, "", f"## 3. 第 3 步：重复跑，量噪声（每题运行 {k} 遍）", ""]
     out += [
         f"这一节由 `python -m rag.eval.agentic repeat-analyze` 在 {ctx.generated} 生成。"
         "重新运行命令会替换这一节，报告里其他的节不会被改动。",
@@ -373,19 +387,41 @@ def render_section(
     out += [
         "- **不能说：** 150 道题全部跑了三遍；无答案题的稳定性（这次没有重复）；"
         "难题和含糊题代表真实用户的问题（它们是照已有失败的样子写的，只能说「在这类题上」）。",
-        "- **条件不完全一样：** 第 1 遍是以前跑的旧记录，当时没有做预热，后面的遍有预热，"
+        "- **条件不完全一样：** 第 1 遍是以前跑的旧记录，没有按这次的预热步骤跑，后面的遍有预热，"
         "网关忙闲也不同；这些差别都包含在上面的波动里，分不开。",
         "- **样本小：** 每个题型只有几道到几十道题，区间很宽；差别「没有超过波动」"
         "不等于「两个系统没有差别」，只是这批题测不出来。",
         "",
         END,
     ]
-    return "\n".join(out) + "\n"
+    return _number_subheadings("\n".join(out) + "\n")
+
+
+_STUB_HEAD = re.compile(r"(?m)^## 3\. 第 3 步[^\n]*$")
+_NEXT_HEAD = re.compile(r"(?m)^## ")
+_STUB_ROW = re.compile(r"(?m)^(\| 3 \| 第 3 步[^\n|]*\| )还没做( \|)$")
+
+
+def _find_stub(text: str) -> tuple[int, int] | None:
+    """The span of the placeholder section the step-2 author left for step 3 (a heading
+    `## 3. 第 3 步...` whose body says 还没做), so it is replaced and not repeated."""
+    head = _STUB_HEAD.search(text)
+    if head is None:
+        return None
+    nxt = _NEXT_HEAD.search(text, head.end())
+    stop = nxt.start() if nxt else len(text)
+    return (head.start(), stop) if "还没做" in text[head.end() : stop] else None
+
+
+def _mark_row_written(text: str) -> str:
+    """The status cell of the report's overview table for step 3: 还没做 -> 已写."""
+    return _STUB_ROW.sub(r"\1已写（`repeat-analyze` 生成）\2", text, count=1)
 
 
 def write_section(path: str | Path, section: str) -> None:
-    """Put `section` into the report: replace the previous copy between the markers, else append
-    after the existing text; create the file (with a title) when it does not exist."""
+    """Put `section` into the report: replace the previous copy between the markers; else replace
+    the placeholder section for step 3 ("还没做") if there is one; else append after the existing
+    text. A missing file is created with a title."""
     file = Path(path)
     file.parent.mkdir(parents=True, exist_ok=True)
     if not file.is_file():
@@ -401,6 +437,9 @@ def write_section(path: str | Path, section: str) -> None:
         if text[tail : tail + len(eol)] == eol:
             tail += len(eol)
         new = text[:start] + section + text[tail:]
+    elif (stub := _find_stub(text)) is not None:
+        new = text[: stub[0]] + section + eol + text[stub[1] :]
+        new = _mark_row_written(new)
     else:
         new = text.rstrip("\r\n") + eol + eol + section
     temp = file.with_name(file.name + ".tmp")
