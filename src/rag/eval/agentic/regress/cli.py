@@ -175,7 +175,7 @@ class Estimate:
             )
         out.append(
             f"  with {self.margin:.0%} margin {self.total:.4f}; "
-            f"upper bound if every question is run twice more {self.upper_bound:.4f}"
+            f"worst case if every question is run twice more {self.upper_bound:.4f} (not the limit)"
         )
         out.append("  (the retrieval-only warm-up embeds each question once; not counted)")
         return out
@@ -579,7 +579,10 @@ def add_parsers(sub: Any) -> None:
     r.add_argument("--estimate-only", action="store_true", help="print the estimate, run nothing")
     r.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS)
     r.add_argument(
-        "--max-cny", type=float, help="spend limit of the whole run (default: upper bound)"
+        "--max-cny",
+        type=float,
+        help="spend limit of the whole run in CNY "
+        "(default: three times the estimate with margin, but at least 0.2)",
     )
     r.add_argument(
         "--allow-warmup-failures",

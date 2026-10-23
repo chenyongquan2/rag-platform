@@ -44,8 +44,12 @@ the other two passes, 6 (4.1%) were not correct in the held-out pass, i.e. a str
    `generation_error` (`llm_timeout`, `llm_error`, `budget_exceeded`), a deadline cut as classified by EVAL-0, a rerank
    timeout, a gateway or helper-model timeout/error in a record that is not correct, a retrieval route that failed,
    no record (spend limit), an answered record without a judge score. A record that is not correct and was stopped by the total deadline after the answer step ran is also a run
-   problem (latency, set after the first real check: unchanged code reported `hard:01`, which takes 22 to 24 s of the
-   30 s, as a regression because of two deadline stops). **Not** run problems, so wrong: a reply that does not
+   problem (latency; set after the first real check, see below). On unchanged code the first version of the rule
+   reported `hard:01` (22 to 24 s of the 30 s in the baseline) as a regression: attempt 1 was a refusal with a deadline
+   stop (28.5 s), attempt 2 was answered correctly with a deadline stop (29.1 s), attempt 3 was a plain refusal
+   without any deadline stop (24.5 s). Under the final rule the three are problem, correct, and the question
+   passes, but only because attempt 1 stopped counting; `hard:01` is also flaky on unchanged code without a deadline
+   stop (the held-out figure above, 4.1%, says such misses happen). **Not** run problems, so wrong: a reply that does not
    parse (`structured_output_failed`, `answer_parse_failed`) and `internal_error`. Limit: a change that only makes the agent slower shows up as deadline
    cuts, i.e. as run problems (exit 3, never a pass), not as a regression; the acceptance check therefore uses the
    retrieval threshold, not the answer reserve time.
@@ -60,8 +64,8 @@ the other two passes, 6 (4.1%) were not correct in the held-out pass, i.e. a str
    3 `--max-attempts`, and an `--out` directory that already holds records (the runner would reuse them).
    Known gap: when the spend limit stops a stage between its two systems, that stage is not judged and its cost
    is missing from the printed cost; its questions end as run problems.
-6. Before anything runs it prints the estimate (baseline CNY per question, 20% margin, and the upper bound if
-   everything is rerun) and the ledger, and refuses (exit 2) when spent + the first pass would pass the stop line;
+6. Before anything runs it prints the estimate (baseline CNY per question, 20% margin, and the worst case if
+   everything is rerun, which is not the limit) and the ledger, and refuses (exit 2) when spent + the first pass would pass the stop line;
    every rerun stage checks the line again and stops as inconclusive instead of spending past it. A retrieval-only
    warm-up runs first; persistent search failures stop the command (Docker or Elasticsearch not ready is not a
    regression).
@@ -115,9 +119,10 @@ Tests in `tests/unit/test_eval_regress_{suite,verdict,cli}.py` and `tests/unit/t
   its message — `verdict::test_code_failures_are_wrong_not_run_problems`
 - [ ] AC15 Refused before anything runs: fewer than 3 attempts, another knowledge base, a baseline of another set or with
   missing passes, an `--out` with earlier records — `cli::test_refusals_before_anything_runs`
-- [ ] AC16 `--max-cny` refuses an estimate above it and stops a rerun stage that would pass it; a warm-up that keeps
+- [ ] AC16 `--max-cny` (default: three times the estimate with margin, but at least 0.2 CNY) refuses an estimate above it
+  and stops a rerun stage that would pass it, and the default has the floor; a warm-up that keeps
   failing stops the run as not decided (exit 2) — `cli::test_spend_limit_of_the_run`,
-  `::test_warm_up_failure_stops_the_run_as_not_decided`
+  `::test_warm_up_failure_stops_the_run_as_not_decided`, `::test_default_spend_limit_has_a_floor`
 - [ ] AC17 `regress-build` writes the set and baseline from passes on disk, leaves out a question with a miss, and does
   not rewrite existing files without `--force`; the cap draw takes the smallest hash ranks —
   `cli::test_regress_build_writes_the_files_once`, `suite::test_cap_draw_takes_the_smallest_hash_ranks`
