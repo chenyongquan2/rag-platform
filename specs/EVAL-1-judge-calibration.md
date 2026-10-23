@@ -1,6 +1,6 @@
 # EVAL-1 Judge calibration against human scores
 
-Status: review
+Status: done
 Phase: EVAL (eval upgrade plan, step 1)
 Depends on: P1-04 (answer judge, 50-row sheet), P3-05 (ask_docs comparison, 30-row sheet)
 Design sections: s14-3, s14-4
@@ -49,4 +49,4 @@ any real-model call.
 - Files: `src/rag/eval/calibration.py` (new), `src/rag/eval/agentic/human.py`, `src/rag/eval/agentic/cli.py`, `src/rag/eval/answer/{agreement,rejudge,cli,record}.py`, `src/rag/eval/stats.py`; tests `test_eval_calibration.py`, `test_eval_agentic_human.py`, `test_eval_answer_rejudge.py`, `test_eval_answer_agreement.py`; report `docs/reports/human-agreement.md` section 5.
 - Decisions: the sheet is the P3-05 one (judge pass 1), topped up to 13 judge-scored 1/2 answers (all that P3-05 had); selection by the judge's own scores biases TNR upward, so the report also splits by `origin` (only `random` rows are free of it); gate needs at least 10 answers per class, else "not estimable"; the pre-score is an AI's, never counted as passed.
 - Open issues: owner has not scored the 32-row sheet; no 100-row version; the 40-row citation sheet has no TPR/TNR.
-- Review rounds:
+- Review rounds: 1 (APPROVE with small issues; fixed: short CSV row crash, key error messages, caveat line, extra gate and warning tests)
