@@ -5,10 +5,11 @@ An *attempt* is one run of one question by one system, read from its record and 
 - `correct`: judge score 3 (an ambiguous question: the system asked back);
 - `wrong`: a clean answer or refusal that is not correct (the system decided it);
 - `problem`: the run itself failed, so the attempt says nothing about the code: a record the run
-  broke (`status` error, `generation_error`, an answer cut off by the total deadline, EVAL-0), a
-  rerank timeout, a gateway or helper-model timeout or error in a record that is not correct, a
-  retrieval route that failed, no record at all, an answered record without a judge score. A
-  correct record is correct whatever else happened on the way.
+  broke (`status` error, with its message kept; a gateway `generation_error` such as `llm_timeout`;
+  an answer cut off by the total deadline, EVAL-0), a rerank timeout, a gateway or helper-model
+  timeout or error in a record that is not correct, a retrieval route that failed, no record at all,
+  an answered record without a judge score. A correct record is correct whatever else happened on
+  the way.
 
 `decide` applies the plan's lenient rule (section 10) to the attempts of one question, problems left
 out: the first clean attempt correct passes; otherwise two of the first three clean attempts
@@ -22,7 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from rag.eval.agentic.records import SystemRecord, retry_reason
+from rag.eval.agentic.records import SystemRecord, is_deadline_truncated
 from rag.eval.agentic.repeat.analysis import is_correct
 from rag.eval.agentic.repeat.passes import Cell
 
@@ -34,14 +35,17 @@ GATEWAY_REASONS = frozenset(
         "timeout",
         "llm_timeout",
         "llm_error",
+        "budget_exceeded",
         "retrieval_failed",
         "retrieval_timeout",
         "rerank_timeout",
         "not_ready",
-        "internal_error",
     }
 )
-"""Reasons (a fallback `step:reason`, an error category) that come from the environment."""
+"""Reasons (a generation error, a fallback `step:reason`, an error category) that come from the
+environment: the gateway, the search services, the reranker, the money limit. Not in it, so a
+wrong answer: `structured_output_failed`, `answer_parse_failed` and `internal_error`, which a
+change to the prompt or the code can cause."""
 FIRST_CLEAN = 3
 """Clean attempts the rule looks at: 2 of these 3 must be correct."""
 
@@ -53,8 +57,13 @@ class Attempt:
 
 
 def _record_problem(record: SystemRecord) -> str | None:
-    if (reason := retry_reason(record)) is not None:
-        return reason
+    if record.status == "error":
+        # The run crashed; the message is kept so that a bug in the code is not mistaken for noise.
+        return f"run error: {(record.error or 'unknown')[:100]}"
+    if record.generation_error in GATEWAY_REASONS:
+        return f"generation error {record.generation_error}"
+    if is_deadline_truncated(record):  # the answer was cut off by the total deadline (EVAL-0)
+        return "deadline_truncated"
     if record.rerank_timeout:
         return "rerank_timeout"
     for category in record.error_categories:
@@ -79,6 +88,10 @@ def classify_attempt(qtype: str, found: Cell | None) -> Attempt:
         return Attempt("problem", reason)
     if correct is None:
         return Attempt("problem", "answer not judged")
+    if found.record.generation_error or found.record.answer_parse_failed:
+        return Attempt("wrong", f"generation error {found.record.generation_error or 'parse'}")
+    if found.record.stop_reason == "deadline":
+        return Attempt("wrong", "stopped by the total deadline after the answer step ran")
     return Attempt("wrong")
 
 

@@ -48,6 +48,7 @@ from rag.eval.agentic.regress.suite import (
     Baseline,
     RegressionSet,
     build_suite,
+    check_baseline,
     check_items,
     read_baseline,
     read_suite,
@@ -173,6 +174,7 @@ class Estimate:
             f"  with {self.margin:.0%} margin {self.total:.4f}; "
             f"upper bound if every question is run twice more {self.upper_bound:.4f}"
         )
+        out.append("  (the retrieval-only warm-up embeds each question once; not counted)")
         return out
 
 
@@ -329,8 +331,10 @@ def _stage_namespace(
 
 
 def _regress(args: argparse.Namespace, settings: ServiceSettings) -> int:
-    if args.max_attempts < 1:
-        raise UsageError("--max-attempts must be at least 1")
+    if args.max_attempts < 3:
+        raise UsageError(
+            "--max-attempts must be at least 3 (the rule looks at three clean attempts)"
+        )
     if args.max_cny is not None and args.max_cny <= 0:
         raise UsageError("--max-cny must be positive")
     base_cli = _base()
@@ -338,11 +342,20 @@ def _regress(args: argparse.Namespace, settings: ServiceSettings) -> int:
     if not set_path.is_file() or not baseline_path.is_file():
         raise UsageError(f"no set or baseline at {set_path} and {baseline_path}")
     rs, baseline = read_suite(set_path), read_baseline(baseline_path)
-    items = [i for i in load_items(args.kb, types=list(rs.counts))]
+    if args.kb != rs.kb:
+        raise UsageError(f"the set {rs.name} is for the knowledge base {rs.kb}, not {args.kb}")
+    items = load_items(args.kb, types=list(rs.counts))
     try:
         check_items(rs, items)
+        check_baseline(rs, baseline, with_standard=args.with_standard)
     except ValueError as exc:
         raise UsageError(str(exc)) from exc
+    stale = sorted(p for p in Path(args.out).glob("attempt*/*/records.jsonl")) if args.out else []
+    if stale:
+        raise UsageError(
+            f"{stale[0].parent.parent} already holds records of an earlier run; the runner would "
+            "reuse them and the result would describe old code. Use a new --out directory"
+        )
     cfg, _public = _kb_config(settings, args.kb)
     cfg = base_cli.apply_kb_overrides(cfg, args.kb_override)
 
@@ -414,7 +427,7 @@ def _regress(args: argparse.Namespace, settings: ServiceSettings) -> int:
         if number > 1:
             stage = estimate(todo, baseline)
             now = ledger.total_spent()
-            if now + stage.total > stop + 1e-9:
+            if now + stage.total >= stop - 1e-9:
                 notes.append(
                     f"attempt {number} was not run: ledger {now:.4f} + {stage.total:.4f} CNY "
                     f"would pass the stop line {stop:.2f}; the questions still undecided stay "
@@ -431,12 +444,18 @@ def _regress(args: argparse.Namespace, settings: ServiceSettings) -> int:
             f"attempt {number}: "
             + ", ".join(f"{s} {len(q)} questions" for s, q in todo.items() if q)
         )
-        for system in GUARD_ORDER:
-            qids = todo.get(system) or []
-            if not qids:
-                continue
-            cap = base_cli._spent_in(directory) + max(run_cap - run_spent, 0.0)
-            base_cli._run(_stage_namespace(args, rs, system, qids, directory, cap), settings)
+        try:
+            for system in GUARD_ORDER:
+                qids = todo.get(system) or []
+                if not qids:
+                    continue
+                cap = base_cli._spent_in(directory) + max(run_cap - run_spent, 0.0)
+                base_cli._run(_stage_namespace(args, rs, system, qids, directory, cap), settings)
+        except UsageError as exc:
+            if number == 1:
+                raise
+            notes.append(f"attempt {number} was not run: {exc}")
+            break
         if any(read_records(system_file(directory, s)) for s in SYSTEMS):
             base_cli._judge(
                 argparse.Namespace(

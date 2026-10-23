@@ -84,7 +84,9 @@ class Fake:
             if outcome == "n":
                 continue
             self._outcome[(str(out), args.system, qid)] = outcome
-            append_line(system_file(out, args.system), record(args.system, qid, outcome))
+            append_line(
+                system_file(out, args.system), record(args.system, qid, outcome, cny=self.step)
+            )
             with self.ledger.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"kind": "chat", "cny": self.step}) + "\n")
         return 0
@@ -328,3 +330,98 @@ def test_unknown_override_and_changed_dataset_are_refused(
     monkeypatch.setattr(regress_cli, "load_items", lambda kb, **kw: changed)
     assert _go(env, "--estimate-only") == 2
     assert env["fake"].events == []
+
+
+def test_refusals_before_anything_runs(env: dict[str, Any], tmp_path: Path) -> None:
+    fake: Fake = env["fake"]
+    assert _go(env, "--max-attempts", "2") == 2  # the rule looks at three clean attempts
+    assert _go(env, "--kb", "mt5") == 2  # the set is for another knowledge base
+    wrong = env["baseline"].model_copy(update={"set_name": "regression_v0"})
+    write_baseline(env["tmp"] / "set.baseline.json", wrong)
+    assert _go(env) == 2  # a baseline of another set
+    write_baseline(env["tmp"] / "set.baseline.json", env["baseline"])
+    del env["baseline"].entries[QIDS[0]]["agentic"]
+    write_baseline(env["tmp"] / "set.baseline.json", env["baseline"])
+    assert _go(env) == 2  # a question without its passes: stopped before any money is spent
+    assert fake.events == []
+    # An output directory that already holds records would be reused by the runner.
+    stale = tmp_path / "old"
+    append_line(system_file(stale / "attempt1", "agentic"), record("agentic", QIDS[0], "c"))
+    assert _go(env, "--out", str(stale)) == 2
+    assert fake.events == []
+
+
+def test_spend_limit_of_the_run(env: dict[str, Any], capsys: pytest.CaptureFixture[str]) -> None:
+    fake: Fake = env["fake"]
+    for rows in env["baseline"].entries.values():
+        for passes in rows.values():
+            for p in passes:
+                p.cny = 0.1
+    write_baseline(env["tmp"] / "set.baseline.json", env["baseline"])
+    assert _go(env, "--max-cny", "0.5") == 2  # the first attempt alone is estimated at 1.08
+    assert fake.events == []
+    fake.step = 0.12  # the first attempt really costs 1.08; the second one would pass the limit
+    fake.script[("agentic", "hard:00")] = "w"
+    assert _go(env, "--max-cny", "1.1") == 3
+    assert [c[0] for c in fake.calls] == [1]
+    assert "spend limit" in capsys.readouterr().out
+
+
+def test_warm_up_failure_stops_the_run_as_not_decided(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def broken(*a: Any, **kw: Any) -> None:
+        raise regress_cli.UsageError("2 searches still fail")
+
+    monkeypatch.setattr(regress_cli, "warm_up", broken)
+    assert _go(env) == 2
+    assert "run problem, not a regression" in capsys.readouterr().err
+    assert env["fake"].calls == []
+
+
+def test_regress_build_writes_the_files_once(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rag.eval.agentic.regress.suite import read_baseline, read_suite
+    from rag.eval.agentic.repeat.passes import RepeatManifest, save_manifest
+    from rag.eval.agentic.repeat.sample import write_question_list
+    from rag.testing.repeat import write_pass
+
+    tmp: Path = env["tmp"]
+    base = tmp / "step3"
+    spec = {
+        "agentic": {q: "ccc" if q != "hard:01" else "cwc" for q in QIDS},
+        "standard": {q: "ccc" for q in QIDS},
+    }
+    passes = passes_from(spec)
+    write_pass(tmp / "p1-old", passes[0], only=set(QIDS[:5]))
+    write_pass(tmp / "p1-new", passes[0], only=set(QIDS[5:]))
+    write_pass(base / "pass2", passes[1])
+    write_pass(base / "pass3", passes[2])
+    write_question_list(tmp / "list.json", qlist_for(QIDS))
+    save_manifest(
+        base,
+        RepeatManifest(
+            question_list=str(tmp / "list.json"),
+            pass1_old=[str(tmp / "p1-old")],
+            pass1_new=[str(tmp / "p1-new")],
+        ),
+    )
+    monkeypatch.setattr(regress_cli.repeat_cli, "load_items", lambda kb, **kw: ITEMS)
+    out, base_out = tmp / "built" / "set.json", tmp / "built" / "set.baseline.json"
+    argv = [
+        "regress-build",
+        "--base",
+        str(base),
+        "--out",
+        str(out),
+        "--baseline-out",
+        str(base_out),
+    ]
+    assert cli.main([*argv, "--max-single-hop", "2", "--seed", "9"]) == 0
+    rs = read_suite(out)
+    assert rs.counts["single_hop"] == 2 and "hard:01" not in rs.qids()  # not stable: one miss
+    assert rs.seed == 9 and rs.qids_for("standard") == rs.qids()
+    assert set(read_baseline(base_out).entries) == set(rs.qids())
+    assert cli.main(argv) == 2  # a set is not rewritten once written
+    assert cli.main([*argv, "--force"]) == 0

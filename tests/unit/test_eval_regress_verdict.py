@@ -59,6 +59,28 @@ def test_run_problems_are_not_wrong() -> None:
     assert classify_attempt("ambiguous", cell("agentic", "ambiguous:00", "w")).outcome == "wrong"
 
 
+def test_code_failures_are_wrong_not_run_problems() -> None:
+    # A prompt or code change can make the model's reply unparsable or raise inside our code: that
+    # is what the set guards, so it must not hide behind "run problem".
+    for field, value in [
+        ("generation_error", "structured_output_failed"),
+        ("generation_error", "internal_error"),
+        ("answer_parse_failed", True),
+        ("error_categories", ["internal_error"]),
+    ]:
+        found = _with("agentic", "hard:00", "w", **{field: value})
+        assert classify_attempt("hard", found).outcome == "wrong", (field, value)
+    gateway = _with("agentic", "hard:00", "w", generation_error="llm_error")
+    assert classify_attempt("hard", gateway).outcome == "problem"
+    # The message of a crashed run is kept for the reader.
+    crashed = classify_attempt("hard", cell("agentic", "hard:00", "e"))
+    assert "boom" in crashed.reason
+    # A deadline stop after the answer step is wrong, with a reason that says so.
+    late = _with("agentic", "hard:00", "w", stop_reason="deadline")
+    attempt = classify_attempt("hard", late)
+    assert attempt.outcome == "wrong" and "deadline" in attempt.reason
+
+
 def test_correct_with_timeouts_is_correct() -> None:
     noisy = _with(
         "agentic",

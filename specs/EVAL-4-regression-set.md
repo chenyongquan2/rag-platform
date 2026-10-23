@@ -39,16 +39,25 @@ the other two passes, 6 (4.1%) were not correct in the held-out pass, i.e. a str
 
 ## The comparison rule (per question, per guarded system)
 1. Run the set once (attempt 1). Correct (judge 3 / asked back) = *pass*.
-2. Attempts that are **run problems** carry no information and are run again, never counted as wrong: a record the
-   run itself broke (`status` error, `generation_error`, deadline cut as classified by EVAL-0), a rerank timeout,
-   a gateway or helper-model timeout/error in a record that is not correct, a retrieval route that failed, no record
-   (spend limit), an answered record without a judge score.
+2. Attempts that are **run problems** carry no information and are run again, never counted as wrong: a run that
+   crashed (`status` error; its message is printed, because a bug in the code looks the same), a gateway
+   `generation_error` (`llm_timeout`, `llm_error`, `budget_exceeded`), a deadline cut as classified by EVAL-0, a rerank
+   timeout, a gateway or helper-model timeout/error in a record that is not correct, a retrieval route that failed,
+   no record (spend limit), an answered record without a judge score. **Not** run problems, so wrong: a reply that
+   does not parse (`structured_output_failed`, `answer_parse_failed`), `internal_error`, and a deadline stop after the
+   answer step ran (printed with that reason). Limit: a change that only makes the agent slower shows up as deadline
+   cuts, i.e. as run problems (exit 3, never a pass), not as a regression; the acceptance check therefore uses the
+   retrieval threshold, not the answer reserve time.
 3. The first clean attempt wrong: run again (at most 5 attempts per question). Among the first three clean attempts,
    2 correct = *recovered* (passes, listed as flaky); 2 wrong = *regression* (decided at once, no third attempt).
 4. A question still undecided after the attempts is a *run problem*. The command prints PASS only when every question
    is decided and none is a regression; exit codes 0 pass, 1 regression, 2 refused or usage error (nothing
    decided), 3 inconclusive (run problems left).
-5. Before anything runs it prints the estimate (baseline CNY per question, 20% margin, and the upper bound if
+5. A stage (one attempt of the questions still undecided) of 3 or more questions that are all run problems stops the
+   command as inconclusive: the environment is broken, trying again would only repeat it. Before anything runs the
+   command also refuses (exit 2) a baseline that is not the set's, a knowledge base other than the set's, fewer than
+   3 `--max-attempts`, and an `--out` directory that already holds records (the runner would reuse them).
+6. Before anything runs it prints the estimate (baseline CNY per question, 20% margin, and the upper bound if
    everything is rerun) and the ledger, and refuses (exit 2) when spent + the first pass would pass the stop line;
    every rerun stage checks the line again and stops as inconclusive instead of spending past it. A retrieval-only
    warm-up runs first; persistent search failures stop the command (Docker or Elasticsearch not ready is not a
@@ -99,7 +108,17 @@ Tests in `tests/unit/test_eval_regress_{suite,verdict,cli}.py` and `tests/unit/t
   `cli::test_with_standard_guards_the_stable_standard_questions`
 - [ ] AC13 `result.json` and `result.md` are written with the set version, the code revision, the overrides (labelled)
   and the cost — `cli::test_result_files_label_overrides`
-- [ ] AC14 The reminder prints "please run the regression command" with the command, exits 0 for any input; the hook
+- [ ] AC14 Code failures (unparsable reply, `internal_error`) are wrong, gateway errors are problems, a crashed run keeps
+  its message — `verdict::test_code_failures_are_wrong_not_run_problems`
+- [ ] AC15 Refused before anything runs: fewer than 3 attempts, another knowledge base, a baseline of another set or with
+  missing passes, an `--out` with earlier records — `cli::test_refusals_before_anything_runs`
+- [ ] AC16 `--max-cny` refuses an estimate above it and stops a rerun stage that would pass it; a warm-up that keeps
+  failing stops the run as not decided (exit 2) — `cli::test_spend_limit_of_the_run`,
+  `::test_warm_up_failure_stops_the_run_as_not_decided`
+- [ ] AC17 `regress-build` writes the set and baseline from passes on disk, leaves out a question with a miss, and does
+  not rewrite existing files without `--force`; the cap draw takes the smallest hash ranks —
+  `cli::test_regress_build_writes_the_files_once`, `suite::test_cap_draw_takes_the_smallest_hash_ranks`
+- [ ] AC18 The reminder prints "please run the regression command" with the command, exits 0 for any input; the hook
   pattern matches the guarded paths and not tests or docs; the hook is verbose and takes no file arguments —
   `reminder::test_reminder_text_and_exit_code`, `::test_hook_definition_matches_guarded_paths`
 

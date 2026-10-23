@@ -120,6 +120,17 @@ def test_cap_draw_is_deterministic() -> None:
     assert DEFAULT_MAX_PER_TYPE == {"single_hop": 12}
 
 
+def test_cap_draw_takes_the_smallest_hash_ranks() -> None:
+    """The draw rule written out again: the 12 smallest sha256('seed:qid') of the stable ones."""
+    import hashlib
+
+    rs, _ = _build()
+    stable = SINGLE[:20]
+    ranked = sorted(stable, key=lambda q: hashlib.sha256(f"5:{q}".encode()).hexdigest())
+    expected = sorted(ranked[:12])
+    assert [q for q in rs.qids() if q.startswith("single_hop")] == expected
+
+
 def test_stable_for_marks_standard() -> None:
     rs, _ = _build(max_per_type={})
     marks = {q.qid: q.stable_for for q in rs.questions}
@@ -179,6 +190,13 @@ def test_round_trip(tmp_path: Path) -> None:
 def test_shipped_set_is_consistent() -> None:
     rs = read_suite(SET_PATH)
     base = read_baseline(BASELINE_PATH)
+    assert rs.counts == {
+        "single_hop": 12,
+        "two_hop": 8,
+        "colloquial": 6,
+        "hard": 12,
+        "ambiguous": 2,
+    }
     assert len(rs.questions) == 40 and sum(rs.counts.values()) == 40
     assert rs.counts == {t: len([q for q in rs.questions if q.qtype == t]) for t in rs.counts}
     assert rs.system == "agentic" and rs.passes == 3 and rs.seed == 20261023

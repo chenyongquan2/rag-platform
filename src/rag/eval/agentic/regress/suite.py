@@ -209,6 +209,18 @@ def check_items(rs: RegressionSet, items: Sequence[EvalItem]) -> None:
         )
 
 
+def check_baseline(rs: RegressionSet, baseline: Baseline, *, with_standard: bool = False) -> None:
+    """Raise `ValueError` when the baseline is not the one of the set: another name, or a question
+    without its passes for a system that will be guarded."""
+    if baseline.set_name != rs.name:
+        raise ValueError(f"baseline of {baseline.set_name} given for the set {rs.name}")
+    systems = ["agentic", *(["standard"] if with_standard else [])]
+    for system in systems:
+        for qid in rs.qids_for(system):
+            if not baseline.entries.get(qid, {}).get(system):
+                raise ValueError(f"the baseline has no {system} passes of {qid}")
+
+
 def _path(path: str | Path) -> Path:
     return repo_path(path)
 
