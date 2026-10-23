@@ -6,7 +6,8 @@ An *attempt* is one run of one question by one system, read from its record and 
 - `wrong`: a clean answer or refusal that is not correct (the system decided it);
 - `problem`: the run itself failed, so the attempt says nothing about the code: a record the run
   broke (`status` error, with its message kept; a gateway `generation_error` such as `llm_timeout`;
-  an answer cut off by the total deadline, EVAL-0), a rerank timeout, a gateway or helper-model
+  an answer cut off by the total deadline, EVAL-0; any other record that is not correct and
+  was stopped by the deadline), a rerank timeout, a gateway or helper-model
   timeout or error in a record that is not correct, a retrieval route that failed, no record at all,
   an answered record without a judge score. A correct record is correct whatever else happened on
   the way.
@@ -64,6 +65,11 @@ def _record_problem(record: SystemRecord) -> str | None:
         return f"generation error {record.generation_error}"
     if is_deadline_truncated(record):  # the answer was cut off by the total deadline (EVAL-0)
         return "deadline_truncated"
+    if record.stop_reason == "deadline":
+        # The total deadline stopped the graph after the answer step ran. Whether a slow question
+        # makes it depends on the gateway and the machine (some questions take 22 to 25 s of the
+        # 30 s), so a record that is not correct says nothing sure about the code.
+        return "stopped by the total deadline (latency, not decidable)"
     if record.rerank_timeout:
         return "rerank_timeout"
     for category in record.error_categories:
@@ -90,8 +96,6 @@ def classify_attempt(qtype: str, found: Cell | None) -> Attempt:
         return Attempt("problem", "answer not judged")
     if found.record.generation_error or found.record.answer_parse_failed:
         return Attempt("wrong", f"generation error {found.record.generation_error or 'parse'}")
-    if found.record.stop_reason == "deadline":
-        return Attempt("wrong", "stopped by the total deadline after the answer step ran")
     return Attempt("wrong")
 
 

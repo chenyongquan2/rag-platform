@@ -75,10 +75,12 @@ def test_code_failures_are_wrong_not_run_problems() -> None:
     # The message of a crashed run is kept for the reader.
     crashed = classify_attempt("hard", cell("agentic", "hard:00", "e"))
     assert "boom" in crashed.reason
-    # A deadline stop after the answer step is wrong, with a reason that says so.
+    # A deadline stop after the answer step ran is latency: a run problem if not correct ...
     late = _with("agentic", "hard:00", "w", stop_reason="deadline")
     attempt = classify_attempt("hard", late)
-    assert attempt.outcome == "wrong" and "deadline" in attempt.reason
+    assert attempt.outcome == "problem" and "deadline" in attempt.reason
+    # ... and still correct if the answer was right.
+    assert classify_attempt("hard", _with("agentic", "hard:00", "c", stop_reason="deadline")) == C
 
 
 def test_correct_with_timeouts_is_correct() -> None:

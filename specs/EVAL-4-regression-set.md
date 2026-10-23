@@ -43,9 +43,10 @@ the other two passes, 6 (4.1%) were not correct in the held-out pass, i.e. a str
    crashed (`status` error; its message is printed, because a bug in the code looks the same), a gateway
    `generation_error` (`llm_timeout`, `llm_error`, `budget_exceeded`), a deadline cut as classified by EVAL-0, a rerank
    timeout, a gateway or helper-model timeout/error in a record that is not correct, a retrieval route that failed,
-   no record (spend limit), an answered record without a judge score. **Not** run problems, so wrong: a reply that
-   does not parse (`structured_output_failed`, `answer_parse_failed`), `internal_error`, and a deadline stop after the
-   answer step ran (printed with that reason). Limit: a change that only makes the agent slower shows up as deadline
+   no record (spend limit), an answered record without a judge score. A record that is not correct and was stopped by the total deadline after the answer step ran is also a run
+   problem (latency, set after the first real check: unchanged code reported `hard:01`, which takes 22 to 24 s of the
+   30 s, as a regression because of two deadline stops). **Not** run problems, so wrong: a reply that does not
+   parse (`structured_output_failed`, `answer_parse_failed`) and `internal_error`. Limit: a change that only makes the agent slower shows up as deadline
    cuts, i.e. as run problems (exit 3, never a pass), not as a regression; the acceptance check therefore uses the
    retrieval threshold, not the answer reserve time.
 3. The first clean attempt wrong: run again (at most 5 attempts per question). Among the first three clean attempts,
