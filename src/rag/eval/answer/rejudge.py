@@ -52,6 +52,9 @@ def export_rejudge_sheet(
         raise ValueError("n must be at least 1")
     rows = _read(Path(sheet))
     keys = {k["sample_id"]: k for k in _read(Path(key))}
+    for row in rows:
+        if row["sample_id"] not in keys:
+            raise ValueError(f"{row['sample_id']}: not in the key file")
     machine = {(s.qid, s.scale): s.score for s in judge.scores}
 
     def differs(row: dict[str, str]) -> bool:
@@ -103,7 +106,9 @@ def export_rejudge_sheet(
                     "earlier_sample_id": row["sample_id"],
                 }
             )
-    (out / RUBRIC_NAME).write_text(RUBRIC_TEXT, encoding="utf-8", newline="\n")
+    (out / RUBRIC_NAME).write_text(
+        RUBRIC_TEXT.replace("human_key.csv", KEY_NAME), encoding="utf-8", newline="\n"
+    )
     return out_sheet, out_key
 
 
@@ -139,7 +144,11 @@ def rejudge_agreement(
     changes: dict[str, list[ScoreChange]] = {scale: [] for scale in _SCALE_COLUMN}
     compared = dict.fromkeys(_SCALE_COLUMN, 0)
     for row in rows:
+        if row["sample_id"] not in keys:
+            raise ValueError(f"{row['sample_id']}: not in the key file")
         old_id = keys[row["sample_id"]]["earlier_sample_id"]
+        if old_id not in earlier:
+            raise ValueError(f"{old_id}: not in the earlier sheet")
         filled = False
         for scale, column in _SCALE_COLUMN.items():
             now = _int(row.get(column))

@@ -282,7 +282,7 @@ def agentic_agreement(
             items.append(item)
             by_origin.setdefault(k.get("origin", ""), []).append(item)
     confirmed = (
-        sum(r["confirmed"].strip().lower() in ("yes", "y") for r in rows)
+        sum((r.get("confirmed") or "").strip().lower() in ("yes", "y") for r in rows)
         if rows and "confirmed" in rows[0]
         else None
     )
@@ -312,8 +312,8 @@ def render_sheet_agreement(
     if result.by_origin:
         notes += [
             "",
-            "By how the row was chosen (only `random` rows were not picked by the judge's own "
-            "score):",
+            "By how the row was chosen. `differ` and `top_up` rows were picked by the judge's own "
+            "scores, which pushes TNR up and TPR down; only `random` rows are free of that:",
             "",
         ]
         for name, r in result.by_origin.items():

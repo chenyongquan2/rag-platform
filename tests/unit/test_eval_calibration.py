@@ -89,3 +89,29 @@ def test_render_labels_the_source_and_does_not_claim_a_pass_for_an_ai_pre_score(
     for text in (ai, human):
         assert "TPR" in text and "TNR" in text and "kappa" in text
         assert "0.85" in text and "0.7" in text
+
+
+def test_gate_kappa_alone_can_fail_and_the_ten_answer_line_is_exact() -> None:
+    # 90 human 3 (TPR 0.85) and 10 human bad (TNR 0.9): TPR and TNR pass, kappa is about 0.5.
+    pairs = [(3, 3)] * 77 + [(3, 2)] * 13 + [(1, 1)] * 9 + [(1, 3)]
+    report = calibrate(_items(pairs))
+    gate = check_gate(report)
+    assert report.tpr.rate == pytest.approx(77 / 90) and report.tnr.rate == pytest.approx(0.9)
+    assert gate.tpr == "pass" and gate.tnr == "pass"
+    assert report.kappa is not None and report.kappa < 0.7
+    assert gate.kappa == "fail" and gate.verdict == "fail"
+    # Nine non-full human answers: not estimable; ten: estimable.
+    nine = calibrate(_items([(3, 3)] * 30 + [(1, 1)] * 9))
+    ten = calibrate(_items([(3, 3)] * 30 + [(1, 1)] * 10))
+    assert check_gate(nine).tnr == "not_estimable"
+    assert check_gate(ten).tnr == "pass" and check_gate(ten).verdict == "pass"
+    # Fewer than ten human-3 answers: TPR is not estimable.
+    few_full = calibrate(_items([(3, 3)] * 9 + [(1, 1)] * 12))
+    assert check_gate(few_full).tpr == "not_estimable"
+
+
+def test_empty_input_is_not_estimable() -> None:
+    report = calibrate([])
+    gate = check_gate(report)
+    assert report.n == 0 and gate.verdict == "not_estimable"
+    assert "not estimable" in render_calibration(report, gate)

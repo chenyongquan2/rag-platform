@@ -94,6 +94,7 @@ def test_rejudge_export_is_blind_and_keeps_the_disagreements(tmp_path: Path) -> 
         assert by_new[k["sample_id"]]["answer"] == f"answer {int(k['qid'][1:])}"
     again, _ = export_rejudge_sheet(sheet, key, judge, n=15, seed=0, out_dir=tmp_path / "again")
     assert _read(again) == rows
+    assert "rejudge_key.csv" in (tmp_path / "o" / "rejudge_rubric.txt").read_text(encoding="utf-8")
     with pytest.raises(ValueError):
         export_rejudge_sheet(sheet, key, judge, n=0, seed=0, out_dir=tmp_path / "zero")
 
@@ -156,3 +157,14 @@ def test_cli_rejudge_and_binary_agreement(
                      "--judge", str(judge_dir)]) == 0  # fmt: skip
     printed = capsys.readouterr().out
     assert "TPR" in printed and "TNR" in printed and "gate" in printed.lower()
+
+
+def test_rejudge_agreement_names_a_missing_id(tmp_path: Path) -> None:
+    sheet, key, judge = _fixture(tmp_path)
+    out_sheet, out_key = export_rejudge_sheet(
+        sheet, key, judge, n=15, seed=0, out_dir=tmp_path / "o"
+    )
+    keys = _read(out_key)[1:]  # the first re-score row has no key line
+    _write(out_key, keys)
+    with pytest.raises(ValueError, match="not in the key file"):
+        rejudge_agreement(out_sheet, out_key, sheet)

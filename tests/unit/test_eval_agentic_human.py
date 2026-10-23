@@ -98,9 +98,10 @@ def test_human_sheet_tops_up_non_full_answers(tmp_path: Path) -> None:
     plain, plain_key = export_human_sheet(
         records, n=30, seed=0, out_dir=tmp_path / "d", lines=lines, min_non_full=0
     )
-    assert len(_rows(plain_key)) == 30 and plain.read_text(encoding="utf-8-sig") == base.read_text(
-        encoding="utf-8-sig"
-    )
+    # Plain export: 30 rows, the 3 types in the 12/10/8 split, no top_up row, same sheet as default.
+    plain_keys = _rows(plain_key)
+    assert len(plain_keys) == 30 and "top_up" not in {k["origin"] for k in plain_keys}
+    assert plain.read_text(encoding="utf-8-sig") == base.read_text(encoding="utf-8-sig")
     # All the judge's scores are 3: the number cannot be reached and the sheet stays at 30.
     _s, k3 = export_human_sheet(
         records, n=30, seed=0, out_dir=tmp_path / "e", lines=_lines(records, set()), min_non_full=10
@@ -240,7 +241,9 @@ def test_cli_human_agreement(tmp_path: Path, capsys: pytest.CaptureFixture[str])
     assert cli.main(["human-sheet", "--out", str(out), "--out-dir", str(elsewhere)]) == 0
     assert (elsewhere / "human_sheet.csv").is_file() and (elsewhere / "human_key.csv").is_file()
     sheet, key = out / "human" / "human_sheet.csv", out / "human" / "human_key.csv"
-    assert "non-full answers in the sheet" in capsys.readouterr().out
+    printed = capsys.readouterr()
+    assert "non-full answers in the sheet" in printed.out
+    assert "warning" not in printed.err  # 24 low answers exist: the 10 wanted are reached
     keys = _rows(key)
     human = {
         (s, k["qid"]): 1 for k in keys for s in ("standard", "agentic") if (s, k["qid"]) in low
@@ -260,3 +263,29 @@ def test_cli_human_agreement(tmp_path: Path, capsys: pytest.CaptureFixture[str])
     assert "AI pre-score" in text and "TPR" in text and "1.000" in text
     # Missing key: refused with a usage error.
     assert cli.main(["human-agreement", "--out", str(out), "--sheet", str(tmp_path / "x.csv")]) == 2
+
+
+def test_human_sheet_warns_when_the_wanted_number_cannot_be_reached(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    records = _records()
+    out = tmp_path / "run"
+    for r in records:
+        append_line(system_file(out, r.system), r)
+    for line in _lines(records, _low_answers(records, 2)):  # only 4 low answers exist
+        append_line(judge_file(out), line)
+    assert cli.main(["human-sheet", "--out", str(out), "--min-non-full", "10"]) == 0
+    printed = capsys.readouterr()
+    assert "non-full answers in the sheet (the judge's first pass scored 1 or 2): 4" in printed.out
+    assert "warning" in printed.err
+
+
+def test_agreement_tolerates_a_short_csv_row(tmp_path: Path) -> None:
+    records = _records()
+    lines = _lines(records, set())
+    sheet, key = export_human_sheet(records, n=30, seed=0, out_dir=tmp_path, lines=lines)
+    text = sheet.read_text(encoding="utf-8-sig").splitlines()
+    header = text[0] + ",confirmed"
+    # Every data row stays one cell short of the header: no confirmed cell at all.
+    sheet.write_text("\n".join([header, *text[1:]]) + "\n", encoding="utf-8-sig")
+    assert agentic_agreement(sheet, key, lines).confirmed_rows == 0
