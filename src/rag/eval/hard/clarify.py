@@ -3,7 +3,8 @@
 No judge is used. The graph reports a clarification itself (`clarification` or status
 `need_clarification`). Standard RAG has no clarification path, so for it a plain-text reply counts
 only when it is mostly a question: its last sentence ends with a question mark and the whole reply
-is short (at most `MAX_SENTENCES` sentences and `MAX_CHARS` characters). A reply that answers one
+is short (at most `MAX_SENTENCES` sentences and `MAX_CHARS` characters) and the sentences before
+the question contain no digit or code span (a concrete value is an answer). A reply that answers one
 reading, or every reading, does not count as asking back.
 """
 
@@ -31,7 +32,10 @@ def asked_back(record: SystemRecord) -> bool:
     sentences = [s for s in _SENTENCE_END.split(text) if s.strip()]
     if not sentences or len(sentences) > MAX_SENTENCES:
         return False
-    return sentences[-1].rstrip(" \"')]»”").endswith(("?", "？"))  # noqa: RUF001
+    if not sentences[-1].rstrip(" \"')]»”").endswith(("?", "？")):  # noqa: RUF001
+        return False
+    # Earlier sentences may frame the question, but a concrete value or code means it answered.
+    return not any(re.search(r"\d|`", s) for s in sentences[:-1])
 
 
 def clarification_summary(records: Sequence[SystemRecord]) -> dict[str, Proportion]:

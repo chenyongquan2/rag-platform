@@ -128,7 +128,7 @@ def compare_runs(
                 {q: s_old[q] >= CORRECT for q in qids},
                 {q: s_new[q] >= CORRECT for q in qids},
             )
-    refuse = [q for q in shared if not old[q].answerable]
+    refuse = [q for q in shared if old[q].qtype == "no_answer"]
     if refuse:
         report.refusal = paired_binary(
             "refusal",

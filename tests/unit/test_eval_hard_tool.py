@@ -289,6 +289,12 @@ def test_asked_back_rule() -> None:
     long_answer = "The default is 10 seconds. " * 12 + "Does that help?"
     assert not asked_back(rec("standard", "h", text=long_answer))
     assert not asked_back(rec("standard", "i", text="It is 10 seconds. Nothing else applies."))
+    # A reply that gives one reading's value and then asks does not count; a framing sentence does.
+    assert not asked_back(rec("standard", "k", text="The default is 10 seconds. Does that help?"))
+    assert not asked_back(rec("standard", "k2", text="Use `HF_HOME`. Is that what you need?"))
+    assert asked_back(
+        rec("standard", "l", text="That depends on the library. Which one do you mean?")
+    )
     # An empty reply is not a question.
     assert not asked_back(rec("standard", "j", text="", answered=False))
 
@@ -451,3 +457,58 @@ def test_clarify_report_command(tmp_path: Path, capsys: pytest.CaptureFixture[st
     out = capsys.readouterr().out
     assert "agentic" in out and "1/2" in out
     assert hard_cli.main(["clarify-report", "--out", str(tmp_path / "missing")]) == 2
+
+
+# ---- review round 1: co-mention search, projection, run comparison ----------------
+
+
+def test_pages_that_mention_every_term_must_be_read_and_cleared() -> None:
+    d = "hf_docs:org/repo/blob/main/d.md"
+    corpus = {**CORPUS, d: "Alpha " + "filler " * 40 + "Beta, two stages, pre of trained."}
+    [finding] = corpus_report([hard_question()], corpus)
+    assert finding.co_mentions == [d]
+    assert any("read_and_cleared" in p and d in p for p in finding.problems)
+    cleared = hard_question(meta={"read_and_cleared": {d: "only lists the words, states no fact"}})
+    assert corpus_report([cleared], corpus)[0].problems == []
+    stale = hard_question(meta={"read_and_cleared": {C: "not a co-mention"}})
+    assert any("not co-mentions" in p for p in corpus_report([stale], CORPUS)[0].problems)
+
+
+def test_subjects_narrow_the_co_mention_search() -> None:
+    d = "hf_docs:org/repo/blob/main/d.md"
+    corpus = {**CORPUS, d: "Alpha " + "filler " * 40 + "Beta, two stages, pre of trained."}
+    q = hard_question()
+    q.meta["facts"][0]["subjects"] = ["Omega"]
+    assert corpus_report([q], corpus)[0].co_mentions == []
+
+
+def test_projection_prices_hard_types_only_when_the_records_have_them(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from rag.eval.agentic import cli as agentic_cli
+    from rag.eval.agentic.records import append_line, system_file
+
+    def write(records: list[SystemRecord]) -> None:
+        for r in records:
+            append_line(system_file(tmp_path, r.system), r)
+
+    write([rec("standard", "s1", "single_hop"), rec("agentic", "s1", "single_hop")])
+    assert agentic_cli.main(["project", "--out", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "single_hop" in out and "hard" not in out and "ambiguous" not in out
+    write([rec("standard", "h1", "hard"), rec("agentic", "h1", "hard")])
+    assert agentic_cli.main(["project", "--out", str(tmp_path)]) == 0
+    assert "hard" in capsys.readouterr().out
+
+
+def test_run_comparison_counts_only_no_answer_questions_as_refusals() -> None:
+    from rag.eval.agentic.runs import compare_runs
+
+    def run() -> list[SystemRecord]:
+        return [
+            rec("agentic", "n1", "no_answer", answered=False, text="", found=False),
+            rec("agentic", "a1", "ambiguous"),  # answered instead of asking back
+        ]
+
+    report = compare_runs(run(), run(), [], [], system="agentic")
+    assert report.refusal is not None and report.refusal.n == 1

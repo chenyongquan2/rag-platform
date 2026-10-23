@@ -3,7 +3,7 @@
  "version": 1,
  "created_at": "2026-10-23",
  "spec": "EVAL-2",
- "sha256": "d04dac7177c4e5b347dcd5841be99c2f400cc09c1d9bc6439ae62a06f377b3b7",
+ "sha256": "775696b54cbc15298a0a324f6ae89c0b0c4374c3fe0ba4eb59a80da23037bcbb",
  "counts": {
   "hard": 25,
   "ambiguous": 10
@@ -13,11 +13,25 @@
  "corpus": "data/manifests/hf_docs.json (m-ric/huggingface_doc, 2,647 pages)",
  "single_page_proof": "python -m rag.eval.hard check (evidence verbatim in page, key pattern unique to the page, no page matches the loose patterns of all facts)",
  "rules": "questions are not changed after a system has seen them; a question may be dropped only for an ambiguous reference answer and the drop is listed here",
- "dropped": [],
+ "dropped": [
+  {
+   "qid": "hf_docs_hard:02 (first draft)",
+   "reason": "Falcon-180B against Falcon-40B token counts: the Falcon 180B post has a table with both rows, so one page answers; replaced by the BERT and BLOOM training-time comparison (review round 1)"
+  },
+  {
+   "qid": "hf_docs_hard:20 (first draft)",
+   "reason": "Mask2Former and MaskFormer: the Mask2Former blog post says both facts on one page; replaced by DeBERTa to RoBERTa (review round 1)"
+  },
+  {
+   "qid": "hf_docs_ambiguous:04, :06, :09 (first draft)",
+   "reason": "cache location, biggest file and Space sleep time each had one natural default answer (HF_HOME, 50GB, 48 hours), so a careful assistant could answer without asking; replaced by the Space port, parameter count and model count questions (review round 1)"
+  }
+ ],
  "owner_self_check": {
   "status": "not done yet",
   "command": "uv run python -m rag.eval.hard self-check --n 10 --seed 0 --out C:/workspace/rag-platform-data/human/hard_self_check",
   "agreement": null
  },
- "limits": "AI-written on the model of known failures; results show behaviour on this kind of question only, not on real user questions"
+ "limits": "AI-written on the model of known failures; results show behaviour on this kind of question only, not on real user questions",
+ "revisions_before_first_use": "All changes above were made before any system ran on the file, so the version stays 1. Also changed in review round 1: hard:13 now says 'according to each library's own installation guide' (HF_HUB_OFFLINE also works for Transformers), ambiguous:01 and :02 use readings that no longer repeat two_hop 13 and 15, hard:22 says 'according to the Hub's integration pages'."
 }

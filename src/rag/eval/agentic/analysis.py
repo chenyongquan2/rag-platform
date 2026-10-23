@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from rag.eval.agentic.records import JudgeLine, SystemName, SystemRecord, is_deadline_truncated
 from rag.eval.agentic.sets import NOT_ANSWERABLE, QTYPES
 from rag.eval.answer.record import Proportion
+from rag.eval.hard.clarify import asked_back
 from rag.eval.retrieval.runner import latency_summary
 from rag.eval.stats import (
     mcnemar_exact,
@@ -265,7 +266,7 @@ def per_type_summary(
                 qtype=qtype,
                 n=len(common),
                 clarifications={
-                    s: sum(1 for q in common if systems[s][q].clarification)  # type: ignore[index]
+                    s: sum(1 for q in common if asked_back(systems[s][q]))  # type: ignore[index]
                     for s in ("standard", "agentic")
                 },
                 truncated=truncated,

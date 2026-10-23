@@ -33,6 +33,9 @@ class Fact(BaseModel):
     other page of the corpus except the declared copies."""
     also_on: list[str] = Field(default_factory=list)
     """Other pages that repeat the statement word for word."""
+    subjects: list[str] = Field(default_factory=list)
+    """Extra words that name what the fact is about (a model, a library); used only by the
+    co-mention search."""
     loose: list[list[str | int]] = Field(min_length=1)
     """Anchor and fact phrases (optional window in characters) searched with the inflection-aware
     rules of `rag.eval.absence`: another way of writing the statement."""
@@ -62,6 +65,10 @@ class HardMeta(BaseModel):
     avoided_terms: list[str] = Field(default_factory=list)
     facts: list[Fact] = Field(min_length=2, max_length=3)
     reasoning: str = Field(min_length=1)
+    read_and_cleared: dict[str, str] = Field(default_factory=dict)
+    """Pages other than the gold pages that mention every term of every fact (found by the
+    co-mention search of `rag.eval.hard.corpus`), each read by the author, with the reason it does
+    not answer the question."""
     checked_single_page: str = Field(min_length=1)
 
 

@@ -67,7 +67,7 @@ from rag.eval.agentic.records import (
 from rag.eval.agentic.report import project_cost, render_report
 from rag.eval.agentic.runner import REPORTS_ROOT, Tracer, run_agentic, run_standard
 from rag.eval.agentic.runs import compare_runs, render_compare_runs
-from rag.eval.agentic.sets import QTYPES, EvalItem, load_items
+from rag.eval.agentic.sets import DEFAULT_TYPES, QTYPES, EvalItem, load_items
 from rag.eval.agentic.subset import compare_subset
 from rag.eval.answer.cli import build_answer_model, build_judge_model
 from rag.eval.answer.judge import JudgeConfig
@@ -450,7 +450,10 @@ def _project(args: argparse.Namespace) -> int:
     pilot = _all_records(out)
     if not pilot:
         raise UsageError(f"no records under {out}")
-    sizes = {t: len(load_items(args.kb, types=[t])) for t in QTYPES}
+    # The four default types always count (the pilot may not have reached all of them); hard and
+    # ambiguous count only when the records have them.
+    wanted = [t for t in QTYPES if t in DEFAULT_TYPES or any(r.qtype == t for r in pilot)]
+    sizes = {t: len(load_items(args.kb, types=[t])) for t in wanted}
     p = project_cost(
         pilot, sizes, judge_cny_per_call=args.judge_cny_per_call, judge_passes=args.judge_passes
     )
