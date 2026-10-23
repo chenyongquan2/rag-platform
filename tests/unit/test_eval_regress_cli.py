@@ -425,3 +425,19 @@ def test_regress_build_writes_the_files_once(
     assert set(read_baseline(base_out).entries) == set(rs.qids())
     assert cli.main(argv) == 2  # a set is not rewritten once written
     assert cli.main([*argv, "--force"]) == 0
+
+
+def test_default_spend_limit_has_a_floor(env: dict[str, Any]) -> None:
+    """A set of one question is estimated at a fraction of a fen; its reruns still get the floor."""
+    fake: Fake = env["fake"]
+    fake.step = 0.01  # the estimate of the whole set is 0.001; three times that is far below this
+    fake.script[("agentic", "hard:00")] = "w"
+    for rows in env["baseline"].entries.values():
+        for passes in rows.values():
+            for p in passes:
+                p.cny = 0.0001
+    write_baseline(env["tmp"] / "set.baseline.json", env["baseline"])
+    assert (
+        _go(env) == 1
+    )  # without the floor the limit (about 0.003) would stop the run after attempt 1
+    assert [c[0] for c in fake.calls] == [1, 2]

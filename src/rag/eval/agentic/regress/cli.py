@@ -77,6 +77,9 @@ BROKEN_STAGE_MIN = 3
 """A stage of at least this many questions that is all run problems means the environment is
 broken: it is not tried again."""
 GUARD_ORDER: tuple[str, ...] = ("agentic", "standard")
+MIN_RUN_CAP_CNY = 0.2
+"""Floor of the default spend limit of a run: three times the estimate is far too little for a set
+of one or two questions (a slow question costs several times its baseline mean)."""
 
 
 def _base() -> Any:
@@ -375,7 +378,7 @@ def _regress(args: argparse.Namespace, settings: ServiceSettings) -> int:
     stop = settings.budget_stop_cny
     spent = ledger.total_spent()
     print(f"ledger: spent {spent:.4f} CNY, stop at {stop:.2f} CNY")
-    run_cap = args.max_cny if args.max_cny is not None else est.upper_bound
+    run_cap = args.max_cny if args.max_cny is not None else max(est.upper_bound, MIN_RUN_CAP_CNY)
     if spent + est.total > stop + 1e-9:
         raise UsageError(
             f"spent {spent:.4f} + estimate with margin {est.total:.4f} CNY would pass the stop "
