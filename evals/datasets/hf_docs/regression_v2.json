@@ -1,0 +1,403 @@
+{
+  "version": 2,
+  "name": "regression_v2",
+  "kb": "hf_docs",
+  "system": "agentic",
+  "seed": 20261023,
+  "date": "2026-10-23",
+  "method": "questions correct in every pass for the graph (judge score 3; ambiguous: asked back); a type with more of them than its cap is drawn by sha256('seed:qid') rank, the others are taken whole",
+  "passes": 3,
+  "sources": {
+    "question_list": "evals/datasets/hf_docs/repeat_step3.json",
+    "pass1_old": [
+      "C:/workspace/rag-platform-data/p3-07/p3-07",
+      "C:/workspace/rag-platform-data/p3-07/p3-07-retry"
+    ],
+    "pass1_new": [
+      "C:/workspace/rag-platform-data/eval-upgrade/step2-run1"
+    ],
+    "later_passes": [
+      "C:/workspace/rag-platform-data/eval-upgrade/step3/pass2",
+      "C:/workspace/rag-platform-data/eval-upgrade/step3/pass3"
+    ],
+    "stable_file": "C:/workspace/rag-platform-data/eval-upgrade/step3/stable_questions.json"
+  },
+  "stable_available": {
+    "standard": {
+      "single_hop": 19,
+      "two_hop": 9,
+      "colloquial": 7,
+      "hard": 10
+    },
+    "agentic": {
+      "single_hop": 19,
+      "two_hop": 8,
+      "colloquial": 6,
+      "hard": 12,
+      "ambiguous": 2
+    }
+  },
+  "counts": {
+    "single_hop": 12,
+    "two_hop": 8,
+    "colloquial": 6,
+    "hard": 11,
+    "ambiguous": 2
+  },
+  "questions": [
+    {
+      "qid": "huggingface_doc_qa_eval:008",
+      "qtype": "single_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "86c9f1f841fa1646"
+    },
+    {
+      "qid": "huggingface_doc_qa_eval:009",
+      "qtype": "single_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "39958d1940d7a32a"
+    },
+    {
+      "qid": "huggingface_doc_qa_eval:013",
+      "qtype": "single_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "a5011cbe494c3cd7"
+    },
+    {
+      "qid": "huggingface_doc_qa_eval:019",
+      "qtype": "single_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "44fce85bb3c98bad"
+    },
+    {
+      "qid": "huggingface_doc_qa_eval:024",
+      "qtype": "single_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "27c164040d258315"
+    },
+    {
+      "qid": "huggingface_doc_qa_eval:028",
+      "qtype": "single_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "d3b488561a9597f3"
+    },
+    {
+      "qid": "huggingface_doc_qa_eval:030",
+      "qtype": "single_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "cbece96ca6c8cffe"
+    },
+    {
+      "qid": "huggingface_doc_qa_eval:034",
+      "qtype": "single_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "4dcb866e9e0c7063"
+    },
+    {
+      "qid": "huggingface_doc_qa_eval:057",
+      "qtype": "single_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "96319613507507b4"
+    },
+    {
+      "qid": "huggingface_doc_qa_eval:061",
+      "qtype": "single_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "5b996771265cfd09"
+    },
+    {
+      "qid": "huggingface_doc_qa_eval:062",
+      "qtype": "single_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "0c8d1abb92e1f9fa"
+    },
+    {
+      "qid": "huggingface_doc_qa_eval:063",
+      "qtype": "single_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "412cadd787af8676"
+    },
+    {
+      "qid": "hf_docs_two_hop:01",
+      "qtype": "two_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "643765dfa7bfdb2d"
+    },
+    {
+      "qid": "hf_docs_two_hop:03",
+      "qtype": "two_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "7c71a2f27e67aff4"
+    },
+    {
+      "qid": "hf_docs_two_hop:09",
+      "qtype": "two_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "983042d19ba7a691"
+    },
+    {
+      "qid": "hf_docs_two_hop:10",
+      "qtype": "two_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "6a7d059f0482886d"
+    },
+    {
+      "qid": "hf_docs_two_hop:13",
+      "qtype": "two_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "1a60ec26fee91a2e"
+    },
+    {
+      "qid": "hf_docs_two_hop:15",
+      "qtype": "two_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "d4db43823aa31fd7"
+    },
+    {
+      "qid": "hf_docs_two_hop:16",
+      "qtype": "two_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "a7a2df4d3330e474"
+    },
+    {
+      "qid": "hf_docs_two_hop:17",
+      "qtype": "two_hop",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "52c8acfc856b93c5"
+    },
+    {
+      "qid": "hf_docs_colloquial:08",
+      "qtype": "colloquial",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "f01ab09027b10a3d"
+    },
+    {
+      "qid": "hf_docs_colloquial:09",
+      "qtype": "colloquial",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "af683d38df52d2f1"
+    },
+    {
+      "qid": "hf_docs_colloquial:10",
+      "qtype": "colloquial",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "a9b83fbf79ce236a"
+    },
+    {
+      "qid": "hf_docs_colloquial:12",
+      "qtype": "colloquial",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "58738f2f425eb114"
+    },
+    {
+      "qid": "hf_docs_colloquial:14",
+      "qtype": "colloquial",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "f068ec94642d1bbc"
+    },
+    {
+      "qid": "hf_docs_colloquial:15",
+      "qtype": "colloquial",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "44ad63072b9f64db"
+    },
+    {
+      "qid": "hf_docs_hard:01",
+      "qtype": "hard",
+      "stable_for": [
+        "agentic"
+      ],
+      "fingerprint": "74b898f524650a92"
+    },
+    {
+      "qid": "hf_docs_hard:04",
+      "qtype": "hard",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "eedfc1f0de9ab9bf"
+    },
+    {
+      "qid": "hf_docs_hard:05",
+      "qtype": "hard",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "057fc735e3ddf5a7"
+    },
+    {
+      "qid": "hf_docs_hard:07",
+      "qtype": "hard",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "c7c7ff3514e6fb2b"
+    },
+    {
+      "qid": "hf_docs_hard:08",
+      "qtype": "hard",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "799070b3ee6a20b2"
+    },
+    {
+      "qid": "hf_docs_hard:10",
+      "qtype": "hard",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "db2ea5cb6973af32"
+    },
+    {
+      "qid": "hf_docs_hard:11",
+      "qtype": "hard",
+      "stable_for": [
+        "agentic"
+      ],
+      "fingerprint": "f19e0fc6e6de18ef"
+    },
+    {
+      "qid": "hf_docs_hard:14",
+      "qtype": "hard",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "04e918b0053f0290"
+    },
+    {
+      "qid": "hf_docs_hard:17",
+      "qtype": "hard",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "ce7a7c66f9bae536"
+    },
+    {
+      "qid": "hf_docs_hard:18",
+      "qtype": "hard",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "7d85f8bed1138e81"
+    },
+    {
+      "qid": "hf_docs_hard:20",
+      "qtype": "hard",
+      "stable_for": [
+        "agentic",
+        "standard"
+      ],
+      "fingerprint": "a401db071e4d70fb"
+    },
+    {
+      "qid": "hf_docs_ambiguous:06",
+      "qtype": "ambiguous",
+      "stable_for": [
+        "agentic"
+      ],
+      "fingerprint": "ed2b76fe4042e18b"
+    },
+    {
+      "qid": "hf_docs_ambiguous:08",
+      "qtype": "ambiguous",
+      "stable_for": [
+        "agentic"
+      ],
+      "fingerprint": "3e32083bffbb1d37"
+    }
+  ],
+  "v2_date": "2026-10-26",
+  "dropped": [
+    {
+      "qid": "hf_docs_hard:09",
+      "reason": "The reference answer rests on a typo in the source page (the sentence-transformers integration page says \"over 500 hundred\" models). The answer model sometimes reads it as 500 (about 7 times Stanza) and sometimes literally (about 700 times), and the judge scores the two readings differently. Found by the full regression run of 2026-10-26 (two wrong attempts after three correct baseline passes); the retrieval was identical to the baseline. Dropped for answer ambiguity, after seeing that result; the other 39 questions and their baseline are unchanged."
+    }
+  ]
+}

@@ -1,0 +1,2347 @@
+{
+  "version": 2,
+  "set_name": "regression_v2",
+  "passes": 3,
+  "entries": {
+    "huggingface_doc_qa_eval:008": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8588.91,
+          "cny": 0.007992
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5801.184,
+          "cny": 0.007388
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5814.308,
+          "cny": 0.00728
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6807.794,
+          "cny": 0.007484
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5534.893,
+          "cny": 0.007206
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 10277.035,
+          "cny": 0.007872
+        }
+      ]
+    },
+    "huggingface_doc_qa_eval:009": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 9162.857,
+          "cny": 0.006331
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 4892.216,
+          "cny": 0.005842
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8000.547,
+          "cny": 0.008772
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 13888.471,
+          "cny": 0.00623
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7599.938,
+          "cny": 0.008368
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6711.483,
+          "cny": 0.007562
+        }
+      ]
+    },
+    "huggingface_doc_qa_eval:013": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 13618.246,
+          "cny": 0.006011
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5056.722,
+          "cny": 0.006046
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5537.907,
+          "cny": 0.006122
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8787.255,
+          "cny": 0.010046
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 11686.524,
+          "cny": 0.010044
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7969.1,
+          "cny": 0.00987
+        }
+      ]
+    },
+    "huggingface_doc_qa_eval:019": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 11413.723,
+          "cny": 0.009679
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7395.136,
+          "cny": 0.009182
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6805.694,
+          "cny": 0.009188
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7503.506,
+          "cny": 0.010236
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7623.702,
+          "cny": 0.00929
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 10061.501,
+          "cny": 0.009768
+        }
+      ]
+    },
+    "huggingface_doc_qa_eval:024": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7277.918,
+          "cny": 0.004995
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5586.186,
+          "cny": 0.005374
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5077.973,
+          "cny": 0.004994
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8519.116,
+          "cny": 0.007106
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5889.591,
+          "cny": 0.00572
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 4893.849,
+          "cny": 0.004832
+        }
+      ]
+    },
+    "huggingface_doc_qa_eval:028": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8678.445,
+          "cny": 0.005458
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5024.464,
+          "cny": 0.00356
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5807.207,
+          "cny": 0.003688
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5745.701,
+          "cny": 0.0036
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6002.2,
+          "cny": 0.003512
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6270.126,
+          "cny": 0.00388
+        }
+      ]
+    },
+    "huggingface_doc_qa_eval:030": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 10054.071,
+          "cny": 0.007043
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5559.5,
+          "cny": 0.006202
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7173.073,
+          "cny": 0.006964
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7185.787,
+          "cny": 0.007786
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5938.941,
+          "cny": 0.006732
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6430.789,
+          "cny": 0.005444
+        }
+      ]
+    },
+    "huggingface_doc_qa_eval:034": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8763.611,
+          "cny": 0.004493
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5927.914,
+          "cny": 0.004434
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6563.209,
+          "cny": 0.004454
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6507.108,
+          "cny": 0.005028
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6245.519,
+          "cny": 0.004852
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5836.477,
+          "cny": 0.004474
+        }
+      ]
+    },
+    "huggingface_doc_qa_eval:057": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6198.873,
+          "cny": 0.005719
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 4403.147,
+          "cny": 0.005782
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 4568.568,
+          "cny": 0.005598
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5094.07,
+          "cny": 0.005752
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 4729.107,
+          "cny": 0.005654
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 4492.436,
+          "cny": 0.005886
+        }
+      ]
+    },
+    "huggingface_doc_qa_eval:061": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8295.368,
+          "cny": 0.005136
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5932.582,
+          "cny": 0.005164
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6708.825,
+          "cny": 0.005164
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7093.356,
+          "cny": 0.005788
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 9445.271,
+          "cny": 0.005328
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6731.037,
+          "cny": 0.005252
+        }
+      ]
+    },
+    "huggingface_doc_qa_eval:062": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7033.261,
+          "cny": 0.00607
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 4703.495,
+          "cny": 0.006116
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 4797.598,
+          "cny": 0.005974
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5956.244,
+          "cny": 0.00638
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5060.772,
+          "cny": 0.006062
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5325.893,
+          "cny": 0.00587
+        }
+      ]
+    },
+    "huggingface_doc_qa_eval:063": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6764.602,
+          "cny": 0.00495
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5340.585,
+          "cny": 0.00494
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 4969.632,
+          "cny": 0.00519
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8936.574,
+          "cny": 0.009194
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 13251.451,
+          "cny": 0.009258
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8189.287,
+          "cny": 0.008986
+        }
+      ]
+    },
+    "hf_docs_two_hop:01": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6382.941,
+          "cny": 0.00653
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6137.096,
+          "cny": 0.006476
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7725.023,
+          "cny": 0.00707
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 11540.96,
+          "cny": 0.011264
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 12128.488,
+          "cny": 0.01035
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 10182.816,
+          "cny": 0.010386
+        }
+      ]
+    },
+    "hf_docs_two_hop:03": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7387.975,
+          "cny": 0.004966
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6118.575,
+          "cny": 0.005288
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6421.344,
+          "cny": 0.005518
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 9153.774,
+          "cny": 0.00523
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5990.934,
+          "cny": 0.005192
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8182.995,
+          "cny": 0.005292
+        }
+      ]
+    },
+    "hf_docs_two_hop:09": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8113.711,
+          "cny": 0.007554
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8085.503,
+          "cny": 0.009222
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7260.87,
+          "cny": 0.008574
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6033.162,
+          "cny": 0.007346
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6304.682,
+          "cny": 0.007992
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6638.767,
+          "cny": 0.007552
+        }
+      ]
+    },
+    "hf_docs_two_hop:10": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 9978.014,
+          "cny": 0.010686
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7916.167,
+          "cny": 0.008404
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6424.373,
+          "cny": 0.008844
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 24709.157,
+          "cny": 0.022417
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 23428.601,
+          "cny": 0.033061
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 20710.692,
+          "cny": 0.017819
+        }
+      ]
+    },
+    "hf_docs_two_hop:13": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7488.686,
+          "cny": 0.005679
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7320.945,
+          "cny": 0.007034
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7114.754,
+          "cny": 0.006928
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8608.899,
+          "cny": 0.005448
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6618.635,
+          "cny": 0.00685
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 10434.584,
+          "cny": 0.00632
+        }
+      ]
+    },
+    "hf_docs_two_hop:15": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8008.047,
+          "cny": 0.007892
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6633.081,
+          "cny": 0.00811
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 9184.88,
+          "cny": 0.009854
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6424.54,
+          "cny": 0.007882
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7245.56,
+          "cny": 0.007664
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7622.726,
+          "cny": 0.009032
+        }
+      ]
+    },
+    "hf_docs_two_hop:16": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7085.97,
+          "cny": 0.0067
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5518.636,
+          "cny": 0.006686
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5622.305,
+          "cny": 0.00669
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 20473.854,
+          "cny": 0.017172
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 21360.93,
+          "cny": 0.031364
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 16577.116,
+          "cny": 0.016057
+        }
+      ]
+    },
+    "hf_docs_two_hop:17": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8072.983,
+          "cny": 0.005406
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5187.432,
+          "cny": 0.005904
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5392.721,
+          "cny": 0.005518
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 4571.343,
+          "cny": 0.005666
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5189.731,
+          "cny": 0.005366
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6189.627,
+          "cny": 0.006046
+        }
+      ]
+    },
+    "hf_docs_colloquial:08": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7915.606,
+          "cny": 0.003501
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5169.489,
+          "cny": 0.003478
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5777.827,
+          "cny": 0.003716
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8537.901,
+          "cny": 0.006314
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 12689.324,
+          "cny": 0.006352
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 9758.247,
+          "cny": 0.006428
+        }
+      ]
+    },
+    "hf_docs_colloquial:09": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7630.213,
+          "cny": 0.005235
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5286.877,
+          "cny": 0.005092
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5728.078,
+          "cny": 0.00497
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 10984.829,
+          "cny": 0.009209
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 13267.214,
+          "cny": 0.007971
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 10909.676,
+          "cny": 0.009073
+        }
+      ]
+    },
+    "hf_docs_colloquial:10": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6628.507,
+          "cny": 0.002789
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 4515.447,
+          "cny": 0.002488
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5192.375,
+          "cny": 0.002496
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 10673.253,
+          "cny": 0.004972
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 12616.779,
+          "cny": 0.004756
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 10406.989,
+          "cny": 0.004796
+        }
+      ]
+    },
+    "hf_docs_colloquial:12": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7519.426,
+          "cny": 0.005299
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8170.645,
+          "cny": 0.008074
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8336.651,
+          "cny": 0.007106
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6996.557,
+          "cny": 0.00666
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8845.339,
+          "cny": 0.007288
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6613.584,
+          "cny": 0.00592
+        }
+      ]
+    },
+    "hf_docs_colloquial:14": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8016.711,
+          "cny": 0.00562
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7492.281,
+          "cny": 0.007286
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6459.56,
+          "cny": 0.007034
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8708.572,
+          "cny": 0.006304
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 10345.588,
+          "cny": 0.006912
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 11846.272,
+          "cny": 0.005786
+        }
+      ]
+    },
+    "hf_docs_colloquial:15": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7832.135,
+          "cny": 0.005171
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5125.382,
+          "cny": 0.004706
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6117.996,
+          "cny": 0.005028
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 9156.862,
+          "cny": 0.00805
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8510.364,
+          "cny": 0.008352
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 12756.937,
+          "cny": 0.008576
+        }
+      ]
+    },
+    "hf_docs_hard:01": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": false,
+          "score": 1,
+          "status": "not_found",
+          "stop_reason": null,
+          "total_ms": 5196.154,
+          "cny": 0.002668
+        },
+        {
+          "pass_no": 2,
+          "correct": false,
+          "score": 1,
+          "status": "not_found",
+          "stop_reason": null,
+          "total_ms": 4363.441,
+          "cny": 0.002532
+        },
+        {
+          "pass_no": 3,
+          "correct": false,
+          "score": 1,
+          "status": "not_found",
+          "stop_reason": null,
+          "total_ms": 5968.028,
+          "cny": 0.002868
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 22571.011,
+          "cny": 0.018918
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 23650.005,
+          "cny": 0.021971
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 24099.675,
+          "cny": 0.017542
+        }
+      ]
+    },
+    "hf_docs_hard:04": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6480.932,
+          "cny": 0.006018
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6203.003,
+          "cny": 0.005956
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6438.666,
+          "cny": 0.006288
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8569.565,
+          "cny": 0.009492
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 15240.829,
+          "cny": 0.010744
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8349.395,
+          "cny": 0.009596
+        }
+      ]
+    },
+    "hf_docs_hard:05": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6344.515,
+          "cny": 0.006324
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5834.741,
+          "cny": 0.00594
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6410.706,
+          "cny": 0.006538
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 15626.725,
+          "cny": 0.014672
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 17252.816,
+          "cny": 0.015249
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 15652.184,
+          "cny": 0.018028
+        }
+      ]
+    },
+    "hf_docs_hard:07": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 8003.867,
+          "cny": 0.008548
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7904.263,
+          "cny": 0.009792
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6795.281,
+          "cny": 0.008076
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": "deadline",
+          "total_ms": 17460.134,
+          "cny": 0.020828
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": "deadline",
+          "total_ms": 22419.143,
+          "cny": 0.027725
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": "deadline",
+          "total_ms": 20546.168,
+          "cny": 0.020875
+        }
+      ]
+    },
+    "hf_docs_hard:08": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6964.049,
+          "cny": 0.006672
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6615.786,
+          "cny": 0.006914
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6664.387,
+          "cny": 0.006784
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 14525.231,
+          "cny": 0.015914
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": "deadline",
+          "total_ms": 21688.753,
+          "cny": 0.02033
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": "deadline",
+          "total_ms": 17204.315,
+          "cny": 0.016162
+        }
+      ]
+    },
+    "hf_docs_hard:10": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6583.3,
+          "cny": 0.009616
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 9697.933,
+          "cny": 0.010782
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7772.904,
+          "cny": 0.00829
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 21842.025,
+          "cny": 0.021438
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": "deadline",
+          "total_ms": 20158.118,
+          "cny": 0.014509
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": "deadline",
+          "total_ms": 17922.322,
+          "cny": 0.01867
+        }
+      ]
+    },
+    "hf_docs_hard:11": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": false,
+          "score": 1,
+          "status": "not_found",
+          "stop_reason": null,
+          "total_ms": 5373.962,
+          "cny": 0.00253
+        },
+        {
+          "pass_no": 2,
+          "correct": false,
+          "score": 1,
+          "status": "not_found",
+          "stop_reason": null,
+          "total_ms": 4952.976,
+          "cny": 0.002418
+        },
+        {
+          "pass_no": 3,
+          "correct": false,
+          "score": 1,
+          "status": "not_found",
+          "stop_reason": null,
+          "total_ms": 5646.473,
+          "cny": 0.002746
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 23617.103,
+          "cny": 0.018108
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 20513.448,
+          "cny": 0.013111
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 25836.997,
+          "cny": 0.017576
+        }
+      ]
+    },
+    "hf_docs_hard:14": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6005.65,
+          "cny": 0.007264
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5331.628,
+          "cny": 0.00671
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6169.77,
+          "cny": 0.007178
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": "deadline",
+          "total_ms": 21622.866,
+          "cny": 0.020443
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 19455.853,
+          "cny": 0.025102
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": "deadline",
+          "total_ms": 19714.005,
+          "cny": 0.012364
+        }
+      ]
+    },
+    "hf_docs_hard:17": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5191.632,
+          "cny": 0.004346
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5189.091,
+          "cny": 0.004578
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5968.559,
+          "cny": 0.00505
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 16891.232,
+          "cny": 0.011329
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 17645.696,
+          "cny": 0.020744
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 18157.587,
+          "cny": 0.010539
+        }
+      ]
+    },
+    "hf_docs_hard:18": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 9427.795,
+          "cny": 0.010726
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5800.13,
+          "cny": 0.00862
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7941.523,
+          "cny": 0.009724
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 16574.334,
+          "cny": 0.021225
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 29322.755,
+          "cny": 0.015091
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 16591.58,
+          "cny": 0.020403
+        }
+      ]
+    },
+    "hf_docs_hard:20": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7616.892,
+          "cny": 0.008412
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5987.893,
+          "cny": 0.007486
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7889.487,
+          "cny": 0.007706
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7477.521,
+          "cny": 0.008174
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 5756.638,
+          "cny": 0.007522
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": 3,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6439.759,
+          "cny": 0.00746
+        }
+      ]
+    },
+    "hf_docs_ambiguous:06": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": false,
+          "score": null,
+          "status": "not_found",
+          "stop_reason": null,
+          "total_ms": 2191.168,
+          "cny": 0.0
+        },
+        {
+          "pass_no": 2,
+          "correct": false,
+          "score": null,
+          "status": "not_found",
+          "stop_reason": null,
+          "total_ms": 2094.977,
+          "cny": 0.0
+        },
+        {
+          "pass_no": 3,
+          "correct": false,
+          "score": null,
+          "status": "not_found",
+          "stop_reason": null,
+          "total_ms": 2070.854,
+          "cny": 0.0
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": null,
+          "status": "need_clarification",
+          "stop_reason": null,
+          "total_ms": 2106.131,
+          "cny": 0.001838
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": null,
+          "status": "need_clarification",
+          "stop_reason": null,
+          "total_ms": 1215.169,
+          "cny": 0.00187
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": null,
+          "status": "need_clarification",
+          "stop_reason": null,
+          "total_ms": 4829.81,
+          "cny": 0.00191
+        }
+      ]
+    },
+    "hf_docs_ambiguous:08": {
+      "standard": [
+        {
+          "pass_no": 1,
+          "correct": false,
+          "score": null,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 7560.187,
+          "cny": 0.004364
+        },
+        {
+          "pass_no": 2,
+          "correct": false,
+          "score": null,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6739.1,
+          "cny": 0.003052
+        },
+        {
+          "pass_no": 3,
+          "correct": false,
+          "score": null,
+          "status": "answered",
+          "stop_reason": null,
+          "total_ms": 6473.49,
+          "cny": 0.003268
+        }
+      ],
+      "agentic": [
+        {
+          "pass_no": 1,
+          "correct": true,
+          "score": null,
+          "status": "need_clarification",
+          "stop_reason": null,
+          "total_ms": 1107.364,
+          "cny": 0.001814
+        },
+        {
+          "pass_no": 2,
+          "correct": true,
+          "score": null,
+          "status": "need_clarification",
+          "stop_reason": null,
+          "total_ms": 2717.078,
+          "cny": 0.00207
+        },
+        {
+          "pass_no": 3,
+          "correct": true,
+          "score": null,
+          "status": "need_clarification",
+          "stop_reason": null,
+          "total_ms": 2745.652,
+          "cny": 0.00219
+        }
+      ]
+    }
+  }
+}
