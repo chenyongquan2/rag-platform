@@ -1,6 +1,6 @@
 # EVAL-4 Regression question set, one-command comparison, pre-commit reminder
 
-Status: in progress
+Status: done
 Phase: eval upgrade (step 4 of `rag-platform-eval-upgrade-plan.md`, sections 10, 12, 13)
 Depends on: EVAL-0 (deadline-cut classification), EVAL-2 (hard and ambiguous sets), EVAL-3 (three passes, stable questions)
 Design sections: s14-4, s13-5
@@ -134,8 +134,8 @@ Tests in `tests/unit/test_eval_regress_{suite,verdict,cli}.py` and `tests/unit/t
 The online sampling schedule (plan section 10, optional); making the hook blocking; a retrieval-only smoke set
 (plan section 2); changing agent code; guarding the no-answer questions (not repeated in step 3).
 
-## Handoff (filled at the end)
-- Files:
-- Decisions:
-- Open issues:
-- Review rounds:
+## Handoff
+- Files: `src/rag/eval/agentic/regress/{suite,verdict,cli}.py`, `src/rag/eval/agentic/cli.py` (registers `regress-build` and `regress`), `scripts/regression_reminder.py` and the `regression-reminder` hook in `.pre-commit-config.yaml`, `evals/datasets/hf_docs/regression_v1.json` and `regression_v1.baseline.json` (40 questions: single_hop 12, two_hop 8, colloquial 6, hard 12, ambiguous 2; seed 20261023, date 2026-10-23; 35 also stable for standard RAG), `tests/unit/test_eval_regress_{suite,verdict,cli}.py`, `tests/unit/test_regression_reminder.py` (32 tests), report section 4.
+- Decisions: lenient 2-of-3 rule kept (ask_docs changed result on 7 and 6 of 75 questions between adjacent passes; held-out 6 of 147 cases); problems carry no information and are replaced, a stage of 3 or more questions that are all problems stops the run; code failures (`structured_output_failed`, `answer_parse_failed`, `internal_error`) are wrong, gateway errors, deadline cuts and a deadline stop after the answer step are problems (the last one added after the first real check, see rule 2); exit 3 is never PASS; default spend limit is three times the estimate with margin, at least 0.2 CNY; `--kb-override` exists to check the tool and is labelled in the output.
+- Open issues: the full set did not print PASS in one run on the original configuration (gateway timeouts left `hf_docs_ambiguous:06` undecided; run alone it passed); only the threshold 0.9 degradation was checked (2 questions failed every time; slower-only changes show as exit 3); the rule change was made after seeing the first check on the same questions; ambiguous has 2 questions; `hard:01` is flaky on unchanged code; a stage stopped by the spend limit between its two systems is not judged and its cost is not printed. Cost of the step 2.31 CNY (ledger 33.87 to 36.19) against the 1 CNY estimate.
+- Review rounds: 3 (round 1 CHANGES: code failures hidden as run problems, old `--out` reused, missing checks and tests; round 2 APPROVE; round 3 CHANGES: wrong reason given for the `hard:01` false alarm, what can be said, wording of the spend limit; all text fixes).
