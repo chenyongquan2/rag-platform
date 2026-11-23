@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 880 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ask-docs-flow-title ask-docs-flow-desc" id="ask-docs-flow-root">
+        <title id="ask-docs-flow-title">ask_docs flow</title>
+        <desc id="ask-docs-flow-desc">A question is rewritten and checked for ambiguity, searched, and judged for sufficiency; if the chunks are not enough and time remains the graph searches again, otherwise it generates a cited answer and checks the citations.</desc>
+        <defs>
+      <style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif:ital@0;1&amp;family=Noto+Sans+KR:wght@400;500;600&amp;family=Noto+Serif+KR:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;display=swap');
+      #ask-docs-flow-root { --color-paper: #f5f5f5; --color-ink: #2d3142; --color-muted: #4f5d75; --color-accent: #bf4520;
+      --font-sans: 'Geist', system-ui, sans-serif;
+      --font-serif: 'Instrument Serif', serif;
+      --font-mono: 'Geist Mono', ui-monospace, monospace; }
+      #ask-docs-flow-root { font-family: var(--font-sans); color: var(--color-ink); }
+      #ask-docs-flow-root .diagram-container { width: 100%; overflow-x: auto; }
+      @media print {
+#ask-docs-flow-root .diagram-container { overflow-x: visible; }
+}</style>
+          <marker id="ask-docs-flow-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="ask-docs-flow-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+          <marker id="ask-docs-flow-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+        <!-- arrows first -->
+        <path d="M400,64 V96" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#ask-docs-flow-arrow)"/>
+        <path d="M400,152 V184" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#ask-docs-flow-arrow)"/>
+
+        <path d="M500,224 H600" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#ask-docs-flow-arrow)"/>
+        <rect x="523" y="202" width="54" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="550" y="211" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">AMBIGUOUS</text>
+
+        <path d="M400,264 V296" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#ask-docs-flow-arrow)"/>
+        <rect x="412" y="274" width="36" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="430" y="283" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">CLEAR</text>
+
+        <path d="M400,352 V384" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#ask-docs-flow-arrow)"/>
+
+        <!-- loop: not enough, time left -->
+        <path d="M500,424 H652 Q660,424 660,416 V332 Q660,324 652,324 H500" fill="none" stroke="#bf4520" stroke-width="1.4" marker-end="url(#ask-docs-flow-arrow-accent)"/>
+        <rect x="537" y="404" width="78" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="576" y="413" fill="#bf4520" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">NO · TIME LEFT</text>
+
+        <!-- yes: enough -->
+        <path d="M400,464 V496" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#ask-docs-flow-arrow)"/>
+        <rect x="412" y="474" width="28" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="426" y="483" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">YES</text>
+
+        <!-- out of budget -->
+        <path d="M300,424 H168 Q160,424 160,432 V516 Q160,524 168,524 H300" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#ask-docs-flow-arrow)"/>
+        <rect x="194" y="404" width="73" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="230" y="413" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">OUT OF BUDGET</text>
+
+        <path d="M400,552 V584" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#ask-docs-flow-arrow)"/>
+
+        <!-- nodes -->
+        <!-- Question (oval, start) -->
+        <rect x="300" y="24" width="200" height="40" rx="20" fill="#f5f5f5"/>
+        <rect x="300" y="24" width="200" height="40" rx="20" fill="#4f5d75" stroke="#5a6580" stroke-width="1" fill-opacity="0.10"/>
+        <text x="400" y="49" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Question</text>
+
+        <!-- Rewrite -->
+        <rect x="300" y="96" width="200" height="56" rx="6" fill="#f5f5f5"/>
+        <rect x="300" y="96" width="200" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="400" y="122" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Rewrite question</text>
+        <text x="400" y="138" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">small model</text>
+
+        <!-- Ambiguous? diamond -->
+        <polygon points="400,184 500,224 400,264 300,224" fill="#f5f5f5"/>
+        <polygon points="400,184 500,224 400,264 300,224" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="400" y="228" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Ambiguous?</text>
+
+        <!-- Clarify (oval, end) -->
+        <rect x="600" y="204" width="200" height="40" rx="20" fill="#f5f5f5"/>
+        <rect x="600" y="204" width="200" height="40" rx="20" fill="#4f5d75" stroke="#5a6580" stroke-width="1" fill-opacity="0.10"/>
+        <text x="700" y="229" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Ask user to clarify</text>
+
+        <!-- Search -->
+        <rect x="300" y="296" width="200" height="56" rx="6" fill="#f5f5f5"/>
+        <rect x="300" y="296" width="200" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="400" y="322" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Search</text>
+        <text x="400" y="338" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">hybrid retrieval + rerank</text>
+
+        <!-- Enough? diamond (focal) -->
+        <polygon points="400,384 500,424 400,464 300,424" fill="#f5f5f5"/>
+        <polygon points="400,384 500,424 400,464 300,424" fill="#bf4520" stroke="#bf4520" stroke-width="1" fill-opacity="0.08"/>
+        <text x="400" y="421" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Chunks enough?</text>
+        <text x="400" y="435" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">judge, per sub-question</text>
+
+        <!-- Generate -->
+        <rect x="300" y="496" width="200" height="56" rx="6" fill="#f5f5f5"/>
+        <rect x="300" y="496" width="200" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="400" y="522" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Generate answer</text>
+        <text x="400" y="538" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">numbered citations</text>
+
+        <!-- Check citations -->
+        <rect x="300" y="584" width="200" height="56" rx="6" fill="#f5f5f5"/>
+        <rect x="300" y="584" width="200" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="400" y="610" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Check citations</text>
+        <text x="400" y="626" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">does the chunk support it?</text>
+
+        <!-- legend -->
+        <line x1="30" y1="664" x2="850" y2="664" stroke="#2d3142" stroke-width="0.8" stroke-opacity="0.10"/>
+        <text x="30" y="688" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.14em">LEGEND</text>
+        <rect x="110" y="678" width="20" height="12" rx="6" fill="#4f5d75" stroke="#5a6580" stroke-width="1" fill-opacity="0.10"/>
+        <text x="138" y="687" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.06em">START / END</text>
+        <rect x="250" y="678" width="20" height="12" rx="3" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="278" y="687" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.06em">STEP</text>
+        <rect x="350" y="678" width="20" height="12" rx="3" fill="#bf4520" stroke="#bf4520" stroke-width="1" fill-opacity="0.08"/>
+        <text x="378" y="687" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.06em">DECISION: SEARCH AGAIN OR ANSWER</text>
+      </svg>
