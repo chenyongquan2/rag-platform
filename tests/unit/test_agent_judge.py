@@ -154,6 +154,14 @@ def test_judge_failure_falls_back_to_the_rules_with_a_flag(
     assert (outcome.verdict, outcome.missing) == ("partly_enough", ("C",))
 
 
+def test_a_verdict_for_a_number_that_was_not_asked_is_ignored() -> None:
+    # One sub-question asked; the model also answers for a "2" that does not exist.
+    model = FakeChatModel(responses=[judge_reply(False, True)])
+    outcome = _judge([_round("A", [0.9])], model)
+    assert outcome.fallback is None and outcome.used_model
+    assert (outcome.verdict, outcome.missing) == ("partly_enough", ("A",))
+
+
 def test_a_judge_without_a_model_falls_back_too() -> None:
     def no_gateway() -> Any:
         raise ValueError("LLM_BASE_URL is not set")

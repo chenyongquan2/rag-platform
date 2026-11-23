@@ -336,6 +336,30 @@ def test_the_command_line_runs_writes_the_records_and_reports_again(
     assert len(load_question_set(paths["dev"], kb=KB).questions) == 4
 
 
+def test_no_skip_asks_the_model_even_where_the_rerank_score_would_settle_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _write_sets(tmp_path)
+    judge = FakeChatModel(responses=[judge_reply(g) for g in JUDGE_SCRIPT])
+    monkeypatch.setattr(cli, "build_retriever", lambda *a, **k: MapRetriever(RESULTS))
+    monkeypatch.setattr(cli, "build_models", lambda settings, rescue: (judge, None))
+    monkeypatch.setattr(cli, "spent_cny", lambda settings: 0.0)
+    seen: list[float | None] = []
+    collect = cli.collect_records
+
+    def spy(specs: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["cfg"].agent.judge_skip_score)
+        return collect(specs, **kwargs)
+
+    monkeypatch.setattr(cli, "collect_records", spy)
+    sets = [arg for name, p in paths.items() for arg in ("--set", f"{name}={p}")]
+    out = tmp_path / "out"
+    argv = ["run", "--kb", KB, *sets, "--out", str(out), "--no-skip"]
+    assert cli.main(argv, settings=observe_settings()) == 0
+    assert seen == [None]
+    assert load_records(out / "records.json").provenance.models["judge_skip_score"] == "None"
+
+
 @pytest.mark.parametrize(
     "argv",
     [

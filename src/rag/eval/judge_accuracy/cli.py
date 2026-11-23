@@ -1,7 +1,8 @@
 """Command line of the judge-accuracy script (spec P3-03; design s13-4, s14-2).
 
 uv run python -m rag.eval.judge_accuracy run --kb hf_docs --set NAME=FILE [--set ...] --out DIR
-    [--limit N] [--max-cny 2.0] [--rescue] [--threshold T] [--index-prefix P] [--deadline-ms MS]
+    [--limit N] [--max-cny 2.0] [--rescue] [--threshold T] [--no-skip] [--index-prefix P]
+    [--deadline-ms MS]
 uv run python -m rag.eval.judge_accuracy report RECORDS.json [--out FILE]
 
 `run` asks every question of the sets through the real search chain (the one search_docs uses),
@@ -10,7 +11,9 @@ its gold page (a question is "enough on round one" when the page is among the re
 no-answer question never is) and writes `records.json` and `report.md` under `--out`. Each set
 file holds either answerable questions (all with a gold page) or no-answer questions (none).
 `--rescue` also writes rounds two and three for the answerable questions that were not enough,
-with the real helper model, to see what another round is worth. The run stops before a question
+with the real helper model, to see what another round is worth. `--no-skip` asks the model even
+where `agent.judge_skip_score` would settle a sub-question by its rerank score, so two models can
+be compared on the same calls (P3-03 ran before that rule existed). The run stops before a question
 once it has spent `--max-cny` (default 2.0) according to the cost ledger. `report` recomputes the
 report from a records file: no model, no search.
 """
@@ -97,11 +100,17 @@ def _load_specs(
 
 
 def _models_provenance(settings: ServiceSettings) -> dict[str, str]:
+    from rag.llm import resolve_chat_profile
+
+    judge = resolve_chat_profile(settings.agent_judge_profile, settings)
     models = {
         "embed": settings.embed_model,
         "reranker": settings.reranker_model,
         "judge_profile": settings.agent_judge_profile,
+        "judge_model": judge.model,
     }
+    if judge.base_url:  # a profile's own server (spec P3-03 rerun with a local model)
+        models["judge_base_url"] = judge.base_url
     revision = reranker_revision(settings.reranker_model)
     if revision:
         models["reranker_revision"] = revision
@@ -119,6 +128,9 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
     if args.threshold is not None:
         retrieval = cfg.retrieval.model_copy(update={"threshold": args.threshold})
         cfg = cfg.model_copy(update={"retrieval": retrieval})
+    if args.no_skip:
+        agent = cfg.agent.model_copy(update={"judge_skip_score": None})
+        cfg = cfg.model_copy(update={"agent": agent})
     specs, infos = _load_specs(args.set, cfg.kb, args.limit)
     spent = spent_cny(settings)
     if spent + args.max_cny > settings.budget_stop_cny:
@@ -152,12 +164,12 @@ def _run(args: argparse.Namespace, settings: ServiceSettings) -> int:
         close = getattr(retriever, "close", None)
         if callable(close):
             close()
+    models = _models_provenance(settings)
+    models["judge_skip_score"] = str(cfg.agent.judge_skip_score)
     file = file.model_copy(
         update={
             "question_sets": infos,
-            "provenance": collect_provenance(
-                settings=settings, models=_models_provenance(settings)
-            ),
+            "provenance": collect_provenance(settings=settings, models=models),
         }
     )
     out = Path(args.out)
@@ -203,6 +215,9 @@ def main(argv: Sequence[str] | None = None, *, settings: ServiceSettings | None 
     p_run.add_argument("--max-cny", type=float, default=DEFAULT_MAX_CNY, help="spend limit")
     p_run.add_argument("--rescue", action="store_true", help="also try rounds two and three")
     p_run.add_argument("--threshold", type=float, help="override retrieval.threshold")
+    p_run.add_argument(
+        "--no-skip", action="store_true", help="ignore agent.judge_skip_score: always ask"
+    )
     p_run.add_argument("--index-prefix", default="", help="e.g. fake_ for the fake index")
     p_run.add_argument("--deadline-ms", type=int, help="search deadline (default: settings')")
     p_run.set_defaults(routes=None)

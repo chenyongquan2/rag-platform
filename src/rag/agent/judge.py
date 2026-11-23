@@ -170,10 +170,13 @@ async def _ask_model(
         timeout_ms=ctx.settings.agent_judge_timeout_ms,
         model=ctx.judge_model_source(),
     )
-    numbers = [v.n for v in judgement.sub_questions]
+    # A verdict for a number that was not asked says nothing and is dropped (small local models
+    # add one for a "sub-question 2" that does not exist); a missing or repeated number fails.
+    verdicts = [v for v in judgement.sub_questions if 1 <= v.n <= len(asked)]
+    numbers = [v.n for v in verdicts]
     if sorted(numbers) != list(range(1, len(asked) + 1)):
         raise HelperFailed("incomplete", f"verdicts for {numbers}, asked {len(asked)}")
-    return {asked[v.n - 1] for v in judgement.sub_questions if v.grounded}
+    return {asked[v.n - 1] for v in verdicts if v.grounded}
 
 
 def _sure_owners(

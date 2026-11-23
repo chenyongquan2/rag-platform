@@ -106,11 +106,18 @@ class ChatProfile(BaseModel):
       be generating, and billing, the first answer.
     - `max_tokens` caps reasoning and answer tokens together (the default model is a reasoning
       model), so it must leave room for the reasoning.
+    - `base_url`: another OpenAI-compatible server for this profile only, e.g. a model served on
+      this machine (Ollama's `http://127.0.0.1:11434/v1`). Its key is `api_key`, never the
+      gateway's `llm_api_key`, so the gateway key is not sent to another server.
+    - `reasoning_effort`: sent as is when set, e.g. "none" turns thinking off for a hybrid model
+      served by Ollama (qwen3); None sends nothing and the model decides.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     model: str = ""  # empty: `chat_model`
+    base_url: str = ""  # empty: `llm_base_url`
+    api_key: SecretStr = SecretStr("")  # with `base_url` only; empty: a placeholder
     connect_timeout_s: float = Field(gt=0)
     read_timeout_s: float = Field(gt=0)
     deadline_s: float | None = Field(default=None, gt=0)
@@ -119,6 +126,7 @@ class ChatProfile(BaseModel):
     backoff_max_s: float = Field(ge=0)
     max_tokens: int = Field(gt=0)
     temperature: float | None = Field(default=0.0, ge=0, le=2)
+    reasoning_effort: str | None = None
 
 
 ChatProfileName = Literal["online", "offline", "cheap"]

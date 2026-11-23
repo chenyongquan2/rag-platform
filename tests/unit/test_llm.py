@@ -335,6 +335,36 @@ def test_factory_requires_gateway_and_price(tmp_path: Path) -> None:
     assert not (tmp_path / "ledger.jsonl").exists()
 
 
+def test_profile_with_own_server_never_gets_gateway_key(tmp_path: Path) -> None:
+    local = "qwen3:4b"
+    prices = {MODEL: ModelPrice(input_cny_per_m=2.0), local: ModelPrice(input_cny_per_m=0.0)}
+    cheap = {"model": local, "base_url": "http://127.0.0.1:11434/v1"}
+    gateway = FakeChatGateway()
+    model, ledger = gateway_model(
+        tmp_path, gateway, "cheap", chat_cheap=cheap, model_prices=prices, llm_api_key=""
+    )
+    assert model.invoke("ping").content == "pong pong"
+    request = gateway.requests[0]
+    assert str(request.url) == "http://127.0.0.1:11434/v1/chat/completions"
+    assert request.headers["authorization"] == "Bearer unused"
+    assert gateway.bodies[0]["model"] == local
+    assert "reasoning_effort" not in gateway.bodies[0]
+    assert ledger.entries()[-1]["model"] == local
+
+    # Its own key when it has one; the other profiles still use the gateway and its key.
+    gateway = FakeChatGateway()
+    keyed = {**cheap, "api_key": "local-key", "reasoning_effort": "none"}
+    model, _ = gateway_model(tmp_path, gateway, "cheap", chat_cheap=keyed, model_prices=prices)
+    model.invoke("ping")
+    assert gateway.requests[0].headers["authorization"] == "Bearer local-key"
+    assert gateway.bodies[0]["reasoning_effort"] == "none"
+    gateway = FakeChatGateway()
+    model, _ = gateway_model(tmp_path, gateway, "online", chat_cheap=keyed, model_prices=prices)
+    model.invoke("ping")
+    assert str(gateway.requests[0].url) == "http://gateway.test/v1/chat/completions"
+    assert gateway.requests[0].headers["authorization"] == f"Bearer {KEY}"
+
+
 # ---- ledger lines ---------------------------------------------------------------------------
 
 

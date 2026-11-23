@@ -2,10 +2,11 @@
 
 `make_chat_model(profile)` returns a LangChain chat model from `init_chat_model` talking to the
 OpenAI-compatible gateway. The three profiles share the gateway and, by default, the model
-(`chat_model`); they differ in connect and read timeouts, deadline, retries, waits and output
-token cap. Every call goes through `LedgerTransport`, which does the retries (the openai SDK's
-are off) within the profile's deadline, reserves each attempt's estimated cost before sending
-and writes its real usage to the cost ledger afterwards.
+(`chat_model`), unless a profile names its own server (`base_url`); they differ in connect and
+read timeouts, deadline, retries, waits and output token cap. Every call goes through
+`LedgerTransport`, which does the retries (the openai SDK's are off) within the profile's
+deadline, reserves each attempt's estimated cost before sending and writes its real usage to the
+cost ledger afterwards.
 """
 
 from __future__ import annotations
@@ -68,17 +69,24 @@ def make_chat_model(
         config = config.model_copy(update={"max_tokens": max_tokens})
     if settings.chat_backend == "fake":
         return FakeChatModel(default_response=settings.chat_fake_reply)
-    if not settings.llm_base_url:
-        raise ValueError("LLM_BASE_URL is not set; set it in .env or use CHAT_BACKEND=fake")
-    api_key = settings.llm_api_key.get_secret_value()
-    if not api_key:
-        raise ValueError("LLM_API_KEY is not set; set it in .env or use CHAT_BACKEND=fake")
+    if config.base_url:
+        # Not the gateway: never send it the gateway key. Local servers ignore the key, but the
+        # openai SDK refuses an empty one.
+        base_url = config.base_url
+        api_key = config.api_key.get_secret_value() or "unused"
+    else:
+        base_url = settings.llm_base_url
+        if not base_url:
+            raise ValueError("LLM_BASE_URL is not set; set it in .env or use CHAT_BACKEND=fake")
+        api_key = settings.llm_api_key.get_secret_value()
+        if not api_key:
+            raise ValueError("LLM_API_KEY is not set; set it in .env or use CHAT_BACKEND=fake")
     ledger = ledger or CostLedger.from_settings(settings)
     ledger.price(config.model)  # no price -> fail now, before any money is spent
 
     if breaker is None:
         breaker = shared_breaker(
-            settings.llm_base_url,
+            base_url,
             failures=settings.chat_breaker_failures,
             open_s=settings.chat_breaker_open_s,
         )
@@ -98,10 +106,13 @@ def make_chat_model(
     http_async_client = httpx.AsyncClient(
         transport=AsyncLedgerTransport(transport=async_transport, **policy)
     )
+    extra: dict[str, str] = {}
+    if config.reasoning_effort is not None:
+        extra["reasoning_effort"] = config.reasoning_effort
     return init_chat_model(
         config.model,
         model_provider="openai",
-        base_url=settings.llm_base_url,
+        base_url=base_url,
         api_key=api_key,
         timeout=httpx.Timeout(config.read_timeout_s, connect=config.connect_timeout_s),
         max_retries=0,
@@ -113,4 +124,5 @@ def make_chat_model(
         http_async_client=http_async_client,
         # We pass both clients, so nothing is injected; () also stops the warning that says so.
         http_socket_options=(),
+        **extra,
     )
