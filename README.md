@@ -1,5 +1,7 @@
 # rag-platform
 
+English | [简体中文](README.zh-CN.md)
+
 A multi-knowledge-base RAG platform built the way a production system is built: hybrid retrieval, an agentic answer graph, citations that are checked, a cost ledger, observability, and an evaluation harness whose numbers come with confidence intervals and stated limits.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
