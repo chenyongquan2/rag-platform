@@ -2,7 +2,50 @@
 
 Multi-knowledge-base RAG platform: Elasticsearch hybrid retrieval (BM25 + vector) with application-level RRF and cross-encoder reranking, LlamaIndex ingestion, LangChain model calls, LangGraph agentic RAG, MCP tools, and an evaluation harness.
 
-Status: design done, implementation starting (phase P0).
+Status: phases P0 to P8 are implemented (retrieval, answering with citations, agentic `ask_docs`, private knowledge bases, cache, monitoring, model selection, production guards), and the evaluation upgrade is done. Each phase has a report in [docs/reports/](docs/reports/); progress is logged in [docs/progress.md](docs/progress.md).
+
+## Results at a glance
+
+The public knowledge base is the Hugging Face documentation (2,647 documents). Every number below comes from a report in this repository; the report is named next to it. All of them are measured on a development set of 99 questions unless the row says otherwise, so treat them as measurements on this one corpus, not as general claims.
+
+| What was measured | Result | Source |
+|---|---|---|
+| Retrieval: BM25 + vector, RRF fusion, then cross-encoder rerank of 10 chunks | Hit@1 0.788 (Wilson 95% interval 0.70 to 0.86), Hit@8 0.929, MRR@8 0.841 | [P2 report](docs/reports/P2-report.md), [P7 report](docs/reports/P7-report.md) |
+| The same retrieval without the rerank step | Hit@1 0.616, MRR@8 0.747 | [P2 report](docs/reports/P2-report.md) |
+| Held-out questions (not used for tuning) | Hit@1 about 7 points lower than on the development set; the two sets are different questions, so they cannot be compared pair by pair | [P0 report](docs/reports/P0-report.md) |
+| Retrieval latency, whole chain | median 2,987 ms, 95th percentile 3,694 ms, with the rerank step on CPU | [P2 report](docs/reports/P2-report.md) |
+| Rerank step alone against the 3 s target | median 2.7 to 3.5 s, so the target is **not met**; the faster candidate (MiniLM) loses about 8 points of Hit@1, and the decision is recorded in the report | [P7 report](docs/reports/P7-report.md) |
+| LLM judge against human labels, answer quality, 1 to 3 scale, 50 rows | weighted kappa 0.886, 49 of 50 exact matches. The AI judged first and a person then checked each row, so agreement may be higher than with independent labels | [human-agreement](docs/reports/human-agreement.md) |
+
+Things this repository does on purpose, because a result is only worth reading if you know how it was measured: the difference between two configurations is tested (paired tests, and a note when a p-value is not corrected for several comparisons); the judge is checked against human labels before its scores are used; each report ends with what it can and cannot be used to claim.
+
+## How a question is answered
+
+```text
+documents ──> read, clean, chunk (LlamaIndex) ──> embeddings (cached, cost ledger) ──> Elasticsearch index version
+                                                                                        (alias switch, rollback)
+question ──> rewrite / clarify ──> BM25 + vector search ──> RRF fusion ──> cross-encoder rerank
+         ──> sufficiency judge (search again if the chunks do not answer it)
+         ──> answer with numbered citations ──> citation support check
+Around it: Redis result cache, OpenTelemetry traces and Prometheus metrics, HTTP and MCP search service,
+           evaluation harness (retrieval, answer, citation, repeated runs, regression set)
+```
+
+Sections that explain each part: [Retrieval](#retrieval), [Search service](#search-service-mcp-and-http), [Answering with the ask_docs graph](#answering-with-the-ask_docs-graph), [Result cache](#result-cache-p5-01), [Monitoring](#monitoring-p5-02), [Retrieval evaluation](#retrieval-evaluation). The design document (Chinese) is [docs/design/rag-platform-design.html](docs/design/rag-platform-design.html); the reasons for each decision are in [docs/decisions.md](docs/decisions.md).
+
+## Quick start without any API cost
+
+Needs Docker and [uv](https://docs.astral.sh/uv/). This path uses fake embeddings, so it calls no model and spends nothing; retrieval quality is meaningless in this mode, it only shows that the pipeline runs.
+
+```bash
+uv sync
+scripts/dev_up.sh                                                    # Elasticsearch, Redis, collector, Jaeger
+uv run python -m rag.index.cli init --kb hf_docs
+uv run python -m rag.ingest.job --kb hf_docs --limit 50 --fake-embed
+uv run pytest                                                        # unit tests, no network
+```
+
+Real embeddings and chat models need the gateway settings in `.env` (copy `.env.example`) and cost money; the ledger and budget limits are described under [Embeddings and cost](#embeddings-and-cost).
 
 ## Development
 
